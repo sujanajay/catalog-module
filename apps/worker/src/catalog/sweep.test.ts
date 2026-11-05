@@ -8,6 +8,7 @@ import { DEFAULT_DRAFT_EXPIRY_DAYS, draftExpiryDaysFromEnv, handleSweep, ingestR
 import { EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import type { BatchCounts } from "@catalog/core/catalog/types";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
+import { INGEST_STOPPED_TEXT } from "@catalog/core/catalog/ingest/index";
 
 /** Tier 2 (PGlite): the real 0000_init.sql migration (via createTestDb) and the real releaseLocks. */
 type Row = Record<string, unknown>;
@@ -336,5 +337,25 @@ describe("ingest re-send (M6-F2-R4)", () => {
     // NOW is on a window edge: ten minutes on is the same window (same task names), thirty minutes on the next one.
     expect(ingestResendRun(new Date(NOW.getTime() + 10 * 60_000))).toBe(run);
     expect(ingestResendRun(new Date(NOW.getTime() + 30 * 60_000))).not.toBe(run);
+  });
+});
+
+describe("M1-S6 draft movers in the sweep (M1-F5-R1, R4)", () => {
+  it("hands an idle auto-start draft on and re-sends an intake that gave up, in one sweep", async () => {
+    const draft = randomUUID(), stopped = randomUUID();
+    for (const [id, status, counts] of [[draft, "draft", "{}"], [stopped, "failed", JSON.stringify({ failReason: INGEST_STOPPED_TEXT })]] as const) {
+      await db.execute(sql`
+        INSERT INTO catalog_batches (id, brand_slug, brand_name, name, status, is_test, product_type, channels, options, counts, cost, created_by, updated_at)
+        VALUES (${id}, 'uspa', 'USPA', 'b', ${status}, true, 'auto', '["noon"]'::jsonb, '{"autoStart": true}'::jsonb, ${counts}::jsonb, '{}'::jsonb,
+                'test@opptra.com', ${hoursAgo(1)}::timestamptz)`);
+      await db.execute(sql`INSERT INTO catalog_uploads (id, batch_id, kind, name, status) VALUES (${randomUUID()}, ${id}, 'zip', 'a.zip', 'uploaded')`);
+    }
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const enqueue = vi.fn(async () => "task");
+    await handleSweep({ db, enqueue, releaseLocks, now: () => NOW }, {});
+    expect((await batch(draft)).status).toBe("ingesting");
+    expect((await batch(stopped)).status).toBe("ingesting");
+    const sent = enqueue.mock.calls.map((c) => ((c as unknown[])[1] as Record<string, unknown>).batchId);
+    expect(sent).toEqual(expect.arrayContaining([draft, stopped]));
   });
 });

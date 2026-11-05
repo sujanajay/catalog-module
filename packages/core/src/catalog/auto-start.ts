@@ -37,7 +37,7 @@ export interface AutoStartBody { batchId: string; at: string; busyRetries?: numb
 export async function armAutoStart(db: Db, enqueue: typeof enqueueTask, batchId: string, delaySec = AUTO_START_DELAY_SEC, now = new Date(), busy?: { busyRetries: number; busySince: string }): Promise<string | null> {
   const at = new Date(now.getTime() + delaySec * 1000).toISOString();
   const rows = await db.update(catalogBatches)
-    .set({ counts: mergeCounts({ autoStartAt: at }) })
+    .set({ counts: mergeCounts({ autoStartAt: at, autoStartEnded: null }) })
     .where(and(
       eq(catalogBatches.id, batchId), eq(catalogBatches.status, "draft"),
       sql`(${catalogBatches.options}->>'autoStart')::boolean is true`,
@@ -65,7 +65,7 @@ export async function armAutoStart(db: Db, enqueue: typeof enqueueTask, batchId:
  * transaction takes, so Wait and an auto-start never interleave: either the start committed first (false here), or
  * the start sees autoStart off under its lock and does not start (startDraftBatch's auto-start guard).
  * `stopped` is true only when this Wait turned auto-start off or cleared a countdown, read under that lock: a second
- * Wait, or a Wait on a draft that never counted down, stops nothing (one operator touch per real decision, M1 D33).
+ * Wait, or a Wait on a draft that never counted down, stops nothing (one operator touch per real decision, M1 D35).
  */
 export async function holdAutoStart(db: Db, batchId: string): Promise<{ held: boolean; stopped: boolean }> {
   return db.transaction(async (tx) => {

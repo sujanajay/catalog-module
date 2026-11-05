@@ -242,7 +242,7 @@ export async function lockProducts(db: Db, batchId: string, productIds: string[]
           .returning({ id: catalogProducts.id })).length;
       }
       if (locked === ids.length) return;
-      const busy = [];
+      const busy: { productId: string; identifier: string; batchId: string; batchName: string }[] = [];
       for (const slice of slices) {
         pushAll(busy, await tx
           .select({

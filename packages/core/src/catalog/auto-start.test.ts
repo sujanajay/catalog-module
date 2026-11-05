@@ -59,7 +59,7 @@ describe("Wait (hold-start)", () => {
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("says it stopped a countdown only once, and never for a draft that was not counting down (M1 D33)", async () => {
+  it("says it stopped a countdown only once, and never for a draft that was not counting down (M1 D35)", async () => {
     const b = await draft({ autoStart: true });
     await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW);
     expect(await holdAutoStart(db, b.id)).toEqual({ held: true, stopped: true });
@@ -130,6 +130,11 @@ describe("the auto-start task", () => {
     const after = await read(b.id);
     expect(after.status).toBe("draft");
     expect(after.counts.autoStartAt).toBeNull();
+    // Review P2-4: marked as ended on purpose, so the sweep does not arm it again; the next countdown clears the mark.
+    expect(after.counts.autoStartEnded).toBe(true);
+    await db.update(catalogBatches).set({ channels: ["noon"] }).where(eq(catalogBatches.id, b.id));
+    expect(await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW)).toBeTruthy();
+    expect((await read(b.id)).counts.autoStartEnded).toBeNull();
   });
 });
 

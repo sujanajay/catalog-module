@@ -1,6 +1,6 @@
 {
-  "id": "4cf85069-58f9-4fa7-a9ca-764e856c74c7",
-  "prevId": "8eca4745-35c7-42f0-ad31-03142d4a7adc",
+  "id": "1904fc6a-ebe9-49e5-b954-c1c0dad25314",
+  "prevId": "60a9f961-45d2-45d1-b00b-cd7b1d23c6c9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -921,6 +921,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "parent_batch_id": {
+          "name": "parent_batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "digest": {
           "name": "digest",
           "type": "jsonb",
@@ -943,9 +949,37 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "catalog_batches_parent_batch_id_idx": {
+          "name": "catalog_batches_parent_batch_id_idx",
+          "columns": [
+            {
+              "expression": "parent_batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
+        "catalog_batches_parent_batch_id_fk": {
+          "name": "catalog_batches_parent_batch_id_fk",
+          "tableFrom": "catalog_batches",
+          "tableTo": "catalog_batches",
+          "columnsFrom": [
+            "parent_batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
         "catalog_batches_settings_snapshot_id_fk": {
           "name": "catalog_batches_settings_snapshot_id_fk",
           "tableFrom": "catalog_batches",
@@ -5286,6 +5320,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "last_full_batch_id": {
+          "name": "last_full_batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "option_id": {
           "name": "option_id",
           "type": "uuid",
@@ -5414,6 +5454,19 @@
           "tableTo": "catalog_batches",
           "columnsFrom": [
             "last_batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "catalog_products_last_full_batch_id_catalog_batches_id_fk": {
+          "name": "catalog_products_last_full_batch_id_catalog_batches_id_fk",
+          "tableFrom": "catalog_products",
+          "tableTo": "catalog_batches",
+          "columnsFrom": [
+            "last_full_batch_id"
           ],
           "columnsTo": [
             "id"
@@ -6446,6 +6499,95 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.catalog_shot_numbers": {
+      "name": "catalog_shot_numbers",
+      "schema": "",
+      "columns": {
+        "product_id": {
+          "name": "product_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "n": {
+          "name": "n",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_id": {
+          "name": "batch_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_shot_numbers_batch_id_idx": {
+          "name": "catalog_shot_numbers_batch_id_idx",
+          "columns": [
+            {
+              "expression": "batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "catalog_shot_numbers_product_id_catalog_products_id_fk": {
+          "name": "catalog_shot_numbers_product_id_catalog_products_id_fk",
+          "tableFrom": "catalog_shot_numbers",
+          "tableTo": "catalog_products",
+          "columnsFrom": [
+            "product_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "catalog_shot_numbers_batch_id_catalog_batches_id_fk": {
+          "name": "catalog_shot_numbers_batch_id_catalog_batches_id_fk",
+          "tableFrom": "catalog_shot_numbers",
+          "tableTo": "catalog_batches",
+          "columnsFrom": [
+            "batch_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "catalog_shot_numbers_product_id_n_pk": {
+          "name": "catalog_shot_numbers_product_id_n_pk",
+          "columns": [
+            "product_id",
+            "n"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},

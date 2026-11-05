@@ -385,6 +385,8 @@ export const catalogBatches = pgTable(
      * read from the snapshot file (M5-F4-R8) is pinned the same way.
      */
     rulesetVersion: integer("ruleset_version"),
+    /** M1-S6 (M1-F5-R2): the started batch this follow-up batch adds inputs to; null for every other batch. */
+    parentBatchId: uuid("parent_batch_id"),
     /**
      * M1-S5 (M1-F4-R1, 0025): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
      * page reads one row, not the outputs. Null before the first finalize and on batches finished before M1-S5.
@@ -393,6 +395,8 @@ export const catalogBatches = pgTable(
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),
+    index("catalog_batches_parent_batch_id_idx").on(t.parentBatchId),
+    foreignKey({ name: "catalog_batches_parent_batch_id_fk", columns: [t.parentBatchId], foreignColumns: [t.id] }).onDelete("set null"),
     // Named: the generated name is longer than Postgres's 63-character limit.
     foreignKey({ name: "catalog_batches_settings_snapshot_id_fk", columns: [t.settingsSnapshotId], foreignColumns: [catalogSettingsSnapshots.id] }),
     enumCheck("catalog_batches", "status", t.status, BATCH_STATUSES),
@@ -446,6 +450,12 @@ export const catalogProducts = pgTable(
     productType: text("product_type").$type<ProductType>(),
     lockBatchId: uuid("lock_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
     lastBatchId: uuid("last_batch_id").references(() => catalogBatches.id, { onDelete: "set null" }),
+    /**
+     * M1 D30 (re-review 3 P2-1, migration 0024): the last batch that published this product and was not a follow-up
+     * ("Add more photos"). A follow-up only adds photos, so it moves last_batch_id but not this; decisions.ts
+     * laterPublisher reads this one when last_batch_id is a follow-up. Null for a product no full batch published yet.
+     */
+    lastFullBatchId: uuid("last_full_batch_id").references((): AnyPgColumn => catalogBatches.id, { onDelete: "set null" }),
     /** M0 (0009): the option this product is, when its keys resolve to exactly one (F1-R6); null until then. */
     optionId: uuid("option_id").references((): AnyPgColumn => catalogOptions.id, { onDelete: "set null" }),
     createdAt: createdAt(),
@@ -480,6 +490,30 @@ export const catalogBatchProducts = pgTable(
     index("catalog_batch_products_product_id_idx").on(t.productId),
     enumCheck("catalog_batch_products", "link_status", t.linkStatus, LINK_STATUSES),
     enumCheck("catalog_batch_products", "change", t.change, CHANGE_KINDS),
+  ],
+);
+
+/**
+ * M1-S6 (M1 D30, re-review P1-A): the shot numbers a follow-up batch ("Add more photos") holds for a product. They are
+ * given out in one place (ingest/append.ts allocateShots) under the product row lock, after every shot the product
+ * has or is about to have, and the primary key makes two batches holding one number impossible. A batch keeps its
+ * numbers when it groups again; deleting the batch or the product frees them.
+ */
+export const catalogShotNumbers = pgTable(
+  "catalog_shot_numbers",
+  {
+    productId: uuid("product_id")
+      .notNull()
+      .references(() => catalogProducts.id, { onDelete: "cascade" }),
+    n: integer("n").notNull(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => catalogBatches.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.productId, t.n] }),
+    index("catalog_shot_numbers_batch_id_idx").on(t.batchId),
   ],
 );
 

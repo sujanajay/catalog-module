@@ -173,7 +173,14 @@
     {
       "idx": 24,
       "version": "7",
-      "when": 1793866233190,
+      "when": 1793865478876,
+      "tag": "0024_follow_up_batches",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793868640238,
       "tag": "0025_batch_digest",
       "breakpoints": true
     }

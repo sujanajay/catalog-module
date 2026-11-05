@@ -23,13 +23,15 @@ const TOUCH_ROUTES = [
  * Operator write routes of the wizard's own path, or a step of a touch counted elsewhere: not touches. The replacement's
  * signed upload URL is the first half of replace_photo (counted on complete); eval labels mark a test batch for the
  * model bake-off and never change it. The one-page New batch's brand inference and a draft's brand change act on a draft
- * before Start, so they are the wizard's own path too. "Wait" (hold-start) is a touch (M1 D33) when it stops a countdown.
+ * before Start, so they are the wizard's own path too. "Wait" (hold-start) is a touch (M1 D35) when it stops a countdown.
+ * More photos for a started batch (extend, M1-S6) make a new follow-up batch, an upload of its own, not a correction of
+ * the batch it adds to.
  */
 const NOT_TOUCH_ROUTES = [
   "batches", "batches/[id]", "batches/[id]/detected", "batches/[id]/links", "batches/[id]/links/[uploadId]", "batches/[id]/start",
   "batches/[id]/uploads", "batches/[id]/uploads/[uploadId]", "batches/[id]/uploads/[uploadId]/complete", "batches/[id]/eval-labels",
   "outputs/[id]/replacement", "brands/[slug]/export", "products/[id]", "products/[id]/aliases",
-  "brands/infer", "batches/[id]/brand",
+  "brands/infer", "batches/[id]/brand", "batches/[id]/extend",
 ];
 
 function routeFiles(dir: string): string[] {
@@ -78,7 +80,7 @@ describe("operator touches (M6-F3-R3)", () => {
     expect(await touches()).toEqual([{ batch_id: collecting!.id, action: "cancel" }]);
   });
 
-  it("counts one touch for the Wait that stops a countdown: none for a second Wait, a draft not counting down or a started batch (M1 D33)", async () => {
+  it("counts one touch for the Wait that stops a countdown: none for a second Wait, a draft not counting down or a started batch (M1 D35)", async () => {
     const counting = { ...DEFAULT_BATCH_OPTIONS, autoStart: true };
     const [draft] = await db.insert(catalogBatches).values({ name: "a", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft", options: counting, counts: { ...EMPTY_BATCH_COUNTS, autoStartAt: new Date().toISOString() } }).returning();
     const [plain] = await db.insert(catalogBatches).values({ name: "c", brandSlug: "uspa", brandName: "USPA", createdBy: "op@opptra.com", status: "draft", options: { ...DEFAULT_BATCH_OPTIONS, autoStart: false } }).returning();

@@ -73,6 +73,12 @@ export const ERROR_TRY_AGAIN = "Try this page again";
 /** The batch page's way back into the wizard for a batch that has not started (F4 part 1). */
 export const CONTINUE_SETTING_UP = "Continue setting up";
 export const continueSettingUpHref = (batchId: string) => `/catalog/new?batch=${encodeURIComponent(batchId)}`;
+/** M1-F5-R2 (M1-S6): the started batch's button that opens its linked follow-up batch on the New batch page. */
+export const ADD_MORE_PHOTOS = "Add more photos";
+/** The batch page line of a follow-up batch: the batch it adds photos to. */
+export const FOLLOW_UP_OF = "Adds photos to";
+/** The batch page line of a batch with follow-ups. */
+export const MORE_PHOTOS_IN = "More photos for this batch:";
 /** The draft banner once the grouping is ready to check. */
 export const DRAFT_READY_TEXT = "Ready to check. Press Continue setting up to see the grouping and choose marketplaces.";
 /** The "How this works" paragraph of a batch that is still being set up. */

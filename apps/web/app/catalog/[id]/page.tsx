@@ -29,7 +29,10 @@ import DetailsTab from "@/components/catalog/DetailsTab";
 import NotRefreshedLine from "@/components/catalog/NotRefreshedLine";
 import CostLine from "@/components/catalog/CostLine";
 import RetryCollectButton from "@/components/catalog/RetryCollectButton";
-import { canRetryLinks } from "@/lib/catalog/copy";
+import AddMorePhotosButton from "@/components/catalog/AddMorePhotosButton";
+import { batchLinks } from "@catalog/core/catalog/follow-up";
+import { db } from "@/lib/db";
+import { canRetryLinks, FOLLOW_UP_OF, MORE_PHOTOS_IN } from "@/lib/catalog/copy";
 import { batchLinkFailures } from "@/lib/catalog/preview";
 import { batchSource, canCancel, canContinueSettingUp, collectingText, continueSettingUpHref, hasNotStarted, HOW_THIS_WORKS_DRAFT, notStartedText, NOTHING_PROCESSED, plural } from "@/lib/catalog/copy";
 import SkuMapModal from "@/components/catalog/SkuMapModal";
@@ -69,7 +72,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const sheetLoaded = !digest || tab === "sheet";
   const detailsLoaded = !digest || tab === "details";
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
-  const [attention, evalPage, cost, stageCost, chunks, comparePage] = await Promise.all([
+  const [attention, evalPage, cost, stageCost, chunks, comparePage, links] = await Promise.all([
     evalMode || (digest && !batch.counts.attentionProducts) ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     batchCostLine(batch),
@@ -77,6 +80,8 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
     digest ? Promise.resolve(null) : batchStageCost(id),
     detailsLoaded ? batchChunkSummary(id) : Promise.resolve(null),
     tab === "compare" && !notStarted ? batchCompare(id, { page: Number(query.cpage ?? 0) || 0, ...compareFilters }) : Promise.resolve(null),
+    // M1-F5-R2: the batch a follow-up adds to, and this batch's own follow-ups.
+    batchLinks(db(), { id, parentBatchId: batch.parentBatchId ?? null }),
   ]);
   const fullCost = stageCost ? fullCostText(stageCost, inrPerUsdFromEnv()) : null;
   const channelLabels = batch.channels.map(c => channel(c).label);
@@ -120,7 +125,10 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
           <ActionOnly><Link className="btn primary" href={`/catalog/new?brand=${encodeURIComponent(batch.brandSlug)}`}>Start again</Link></ActionOnly>
         )}
         {canAct && state.stalled && <ActionOnly><RetryCollectButton batchId={id} /></ActionOnly>}
+        {canAct && batch.startedAt && batch.status !== "cancelled" && !evalMode && <ActionOnly><AddMorePhotosButton batchId={id} /></ActionOnly>}
       </div>
+      {links.parent && <p>{FOLLOW_UP_OF} <Link href={`/catalog/${links.parent.id}`}>{links.parent.name}</Link>.</p>}
+      {links.followUps.length > 0 && <p>{MORE_PHOTOS_IN} {links.followUps.map((f, i) => <span key={f.id}>{i ? ", " : ""}<Link href={`/catalog/${f.id}`}>{f.name}</Link></span>)}.</p>}
       <BatchBanner key={id} status={batch.status} counts={batch.counts} source={source} updatedAt={new Date(batch.updatedAt).toISOString()} startedAt={batch.startedAt ? new Date(batch.startedAt).toISOString() : null} now={now.toISOString()} keptPhotos={data.keptPhotos} styliSkipped={data.styliSkipped} continueHref={canAct && settingUp ? continueSettingUpHref(id) : undefined} fixId={canAct && state.fixable ? id : undefined} retryLinksId={linksRetryable ? id : undefined} cancel={canAct && canCancel(batch) ? { id, name: batch.name } : undefined} />
       <NotRefreshedLine items={data.notRefreshedChannels} />
       {!digest && <BatchKpis counts={batch.counts} />}

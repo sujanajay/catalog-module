@@ -115,7 +115,7 @@ export async function improvePhoto(db: Db, enqueue: typeof enqueueTask, input: {
     if (waiting?.w === true) return { outcome: "busy" as const };
     // P1 (review 2026-11-04): a later batch published this product, so this batch's outputs are no longer its links
     // (the same check as Use as is, Replace and Try again: decisions.ts laterPublisher).
-    if (await laterPublisher(tx, product, input.batchId)) {
+    if (await laterPublisher(tx, product, input.batchId, first.n)) {
       await endImprovement(tx, { batchId: input.batchId, productId: first.productId, sourceImageId: input.sourceImageId }, "superseded", now);
       return { outcome: "superseded" as const };
     }

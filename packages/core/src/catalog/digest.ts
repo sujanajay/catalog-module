@@ -11,7 +11,7 @@ import { CHANNEL_ORDER, CHANNELS } from "./channels";
 import type { BatchDigest, DigestReason } from "./digest-types";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
-import { HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
+import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
 import type { SheetRow, SheetSpec } from "./sheet";
 import type { ChannelId, HoldCause } from "./types";
 import { minOf } from "../arrays";
@@ -69,8 +69,6 @@ const FIX_FILE = "Send the file again in a new batch, as a photo or a working li
 const NOT_MADE = "the image could not be made";
 const HELD_REASON = "Held for you to decide before the photos are sent.";
 const FIX_HELD = "Decide on the Needs you tab.";
-/** The start of M1-S6's APPEND_TAKEN_NOTE (publish.ts), matched by text until that note is in this branch's base. */
-const NOT_ADDED_TAKEN = "Not added: another batch's live photo already has this place";
 const NOT_ADDED_TAKEN_GROUP = "another batch's photo already has this place";
 const NOT_ADDED_LIMIT = "the channel takes no more images of this product";
 const FIX_TAKEN = "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.";
@@ -144,7 +142,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     if (withLinks) productsWithLinks++;
     if (mine.some(o => o.reason?.includes(HOLDOUT_KEPT_NOTE))) controlsSkipped++;
     // A product held for a person (a batch started before auto-decide): counted under "Needs you" and listed in the
-    // Exceptions sheet, so every product without a link is in a sheet (M1 D30).
+    // Exceptions sheet, so every product without a link is in a sheet (M1 D32).
     if (pair.change === "pending_attention") {
       needsYou++;
       exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason: HELD_REASON, fix: FIX_HELD, group: `Waiting for you: ${HELD_REASON.charAt(0).toLowerCase()}${HELD_REASON.slice(1, -1)}` });
@@ -177,7 +175,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
       // M1-S6 (M1 D30): a follow-up photo that was not added. Checked before the link check: its place may show another
       // batch's live photo, which is not this photo's link.
       if (o.status === "skipped" && o.flags.includes("not_added")) {
-        const taken = o.reason?.startsWith(NOT_ADDED_TAKEN) ?? false;
+        const taken = o.reason === APPEND_TAKEN_NOTE;
         exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? NOT_ADDED_LIMIT, fix: taken ? FIX_TAKEN : FIX_LIMIT,
           group: `${CHANNELS[o.channel].label} image ${o.n} not added: ${taken ? NOT_ADDED_TAKEN_GROUP : NOT_ADDED_LIMIT}` });
         productExceptions++;

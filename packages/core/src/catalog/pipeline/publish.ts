@@ -11,6 +11,7 @@ import { assertWithinProduct, productPrefix, publicObjectPath } from "../naming"
 import { lockProducts } from "../products";
 import type { ChannelId, EventKind } from "../types";
 import { verifyPublic } from "./verify";
+import { CHANNEL_IMAGE_LIMITS } from "../ingest/append";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
 import { autoDecideNote, autoDecideOf } from "../auto-decide";
@@ -21,7 +22,8 @@ export type Output = typeof catalogOutputs.$inferSelect;
 export type Source = typeof catalogSourceImages.$inferSelect;
 export interface PublishDeps { db: Db; storage: Pick<typeof storage, "headObject" | "downloadBuffer" | "stageCopyToPublic" | "deletePublicObject" | "setCustomTime" | "getPublicBucketName">; fetch: typeof fetch; now: () => Date; sleep?: (ms:number) => Promise<void>;
   /** M3-S1: the render-key versions of the channel rows the worker rendered with (channel-rules.ts); M5-S3: of the batch's pinned ruleset version (null: the latest). */ channelRules: (version?: number | null) => Promise<Pick<ChannelRules, "keyVersion">>;
-  /** M0-S3: a version or change-log write that failed is logged here (ERROR) and never fails the delivery (decision D26). */ log?: (message: string, fields?: Record<string, unknown>) => void }
+  /** M0-S3: a version or change-log write that failed is logged here (ERROR) and never fails the delivery (decision D26). */ log?: (message: string, fields?: Record<string, unknown>) => void
+  /** M1 D30: the image limit per channel for a follow-up batch; absent, CHANNEL_IMAGE_LIMITS (empty: no limit). */ imageLimits?: Partial<Record<ChannelId, number>> }
 /** M3-F3-R3: the note on an output a running experiment's listing kept out of this publish. */
 export const HOLDOUT_KEPT_NOTE = "This listing is part of a running test, so its live image was kept as it is.";
 /**
@@ -70,21 +72,54 @@ export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscale
 export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
   return `${channel(o.channel).label} img ${o.n}: ${o.decision === "use_as_is" ? `kept as is by ${o.decidedBy}: ` : ""}${o.reason}`;
 }
-export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[]; deletes: { output: Output; objectPath: string; ifGenerationMatch: number }[]; kept: Output[] }
-export function planPublish(input: { brandSlug: string; pathKey: string; isTest: boolean; channels: ChannelId[]; sources: Pick<Source,"n">[]; outputs: Output[]; live: Output[] }): PublishPlan {
+export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[]; deletes: { output: Output; objectPath: string; ifGenerationMatch: number }[]; kept: Output[]; skipped: { output: Output; reason: string }[] }
+/** M1 D30: the note on a follow-up photo that is not added because its channel's image limit is reached. */
+export function overLimitNote(channelId: ChannelId, limit: number): string {
+  return `Not added: ${channel(channelId).label} takes at most ${limit} images of a product. The photos already live are kept.`;
+}
+/** M1 D30: the note on a follow-up photo whose place already holds another batch's live photo (it only adds, never replaces). */
+export const APPEND_TAKEN_NOTE = "Not added: another batch's live photo already has this place, and more photos never replace one. The technical team will look at it.";
+/** M1 D30: the refusal when a follow-up would delete or overwrite a public object another batch made. */
+export const NOT_OWN_OBJECT = "A follow-up batch only removes or replaces photos it made itself.";
+/**
+ * M1 D30 (re-review P1-A), checked next to assertWithinProduct: a follow-up batch may delete or overwrite only a live
+ * output it made itself, named by its batch id and shot number, never whatever sits at that place.
+ */
+export function assertOwnedByBatch(output: Pick<Output, "batchId" | "n">, batchId: string | undefined, n: number): void {
+  if (!batchId || output.batchId !== batchId || output.n !== n) throw new Error(NOT_OWN_OBJECT);
+}
+/**
+ * `append` (M1 D30, a follow-up batch `batchId`): photos are only added. A live photo of another batch is never
+ * deleted or overwritten: a copy onto its place, or above its channel's image limit (`limits`), is not added and is
+ * returned in `skipped` (flagged `not_added` by publishProduct). A "remove" decision deletes only the batch's own live
+ * output of that shot.
+ */
+export function planPublish(input: { brandSlug: string; pathKey: string; isTest: boolean; channels: ChannelId[]; sources: Pick<Source,"n">[]; outputs: Output[]; live: Output[]; append?: boolean; batchId?: string; limits?: Partial<Record<ChannelId, number>> }): PublishPlan {
   const scope = productPrefix(input.brandSlug, input.pathKey, input.isTest), selected = input.live.filter(o => input.channels.includes(o.channel));
-  const copies = input.outputs.filter(o => o.status === "staged" || (o.status === "verified" && !o.isLive) || (o.decision === "use_as_is" && !o.isLive)).filter(o => o.decision !== "remove" && o.decision !== "replaced").map(output => {
+  const skipped: PublishPlan["skipped"] = [];
+  const addable = (output: Output): boolean => {
+    if (!input.append) return true;
+    const limit = input.limits?.[output.channel];
+    if (limit !== undefined && output.n > limit) { skipped.push({ output, reason: overLimitNote(output.channel, limit) }); return false; }
+    if (selected.some(o => o.channel === output.channel && o.n === output.n && o.batchId !== input.batchId)) { skipped.push({ output, reason: APPEND_TAKEN_NOTE }); return false; }
+    return true;
+  };
+  const copies = input.outputs.filter(o => o.status === "staged" || (o.status === "verified" && !o.isLive) || (o.decision === "use_as_is" && !o.isLive)).filter(o => o.decision !== "remove" && o.decision !== "replaced").filter(addable).map(output => {
     const objectPath = publicObjectPath(input.brandSlug, input.pathKey, output.channel, output.n, input.isTest);
     if (!input.channels.includes(output.channel)) throw new Error("Publication channel is outside this batch.");
     assertWithinProduct(objectPath, scope);
-    return { output, objectPath, ifGenerationMatch: selected.find(o => o.channel === output.channel && o.n === output.n)?.generation ?? 0 };
+    const target = selected.find(o => o.channel === output.channel && o.n === output.n);
+    if (input.append && target) assertOwnedByBatch(target, input.batchId, output.n);
+    return { output, objectPath, ifGenerationMatch: target?.generation ?? 0 };
   });
-  const deletes = selected.filter(o => !input.sources.some(s => s.n === o.n) || input.outputs.some(x => x.channel === o.channel && x.n === o.n && x.decision === "remove")).map(output => {
+  const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && x.decision === "remove");
+  const deletes = selected.filter(o => input.append ? o.batchId === input.batchId && removes(o) : !input.sources.some(s => s.n === o.n) || removes(o)).map(output => {
     assertWithinProduct(output.objectPath, scope);
+    if (input.append) assertOwnedByBatch(output, input.batchId, output.n);
     return { output, objectPath: output.objectPath, ifGenerationMatch: output.generation ?? 0 };
   });
-  const kept = selected.filter(o => input.sources.some(s => s.n === o.n) && !input.outputs.some(x => x.channel === o.channel && x.n === o.n));
-  return { copies, deletes, kept };
+  const kept = selected.filter(o => (input.append || input.sources.some(s => s.n === o.n)) && !input.outputs.some(x => x.channel === o.channel && x.n === o.n));
+  return { copies, deletes, kept, skipped };
 }
 /**
  * Finalization releases completed products; attention products retain their batch lock. M1-F3-R7: an auto-decide batch
@@ -133,7 +168,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const [pair] = await tx.select().from(catalogBatchProducts).where(where);
       const notes = pair?.notes?.includes(HOLDOUT_KEPT_NOTE) ? pair.notes : [pair?.notes, HOLDOUT_KEPT_NOTE].filter(Boolean).join("; ");
       await tx.update(catalogBatchProducts).set({ change:"unchanged", notes }).where(where);
-      await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+      await tx.update(catalogProducts).set(publisherOf(batchId, batch.options.append === true)).where(eq(catalogProducts.id,productId));
       return { outcome:"published", batch:found, changed:false };
     }
     const outputs = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId)));
@@ -189,8 +224,21 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held", batch:found };
     }
-    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel)), live });
+    const append = batch.options.append === true;
+    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel)), live, append, batchId, limits: deps.imageLimits ?? CHANNEL_IMAGE_LIMITS });
     const now = deps.now(), actor = batch.createdBy;
+    // M1 D30: a follow-up photo that would replace another batch's live photo or go over its channel's limit is not
+    // added: it is flagged `not_added` on the output and the product (a flagged item with its note), never dropped silently.
+    for (const { output, reason } of plan.skipped) {
+      const flags = [...new Set([...output.flags, "not_added" as const])];
+      await tx.update(catalogOutputs).set({status:"skipped",reason,flags,updatedAt:now}).where(eq(catalogOutputs.id,output.id));
+      Object.assign(output, { status: "skipped", reason, flags });
+    }
+    if (plan.skipped.length && pair && !pair.flags.includes("not_added")) {
+      pair.flags = [...pair.flags, "not_added"];
+      await tx.update(catalogBatchProducts).set({ flags: pair.flags }).where(where);
+    }
+    if (plan.skipped.length) log("follow-up photos not added", { severity: "WARNING", batchId, productId, outputs: plan.skipped.length, reasons: [...new Set(plan.skipped.map(s => s.reason))] });
     let failure: string | null = null;
     const landed = new Map<string, { channel: ChannelId; n: number; generation: string }>();
     const changes: { channel: ChannelId; n:number; oldGeneration:number|null; newGeneration:number; sha256:string }[] = [];
@@ -229,6 +277,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     if (failure) await tx.update(catalogOutputs).set({status:"failed",reason:failure,error:failure,updatedAt:now}).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"staged")));
     const removed: Output[] = [];
     if (!failure) for (const target of plan.deletes) {
+      if (append) assertOwnedByBatch(target.output, batchId, target.output.n);
       await deps.storage.deletePublicObject(target.objectPath,productPrefix(product.brandSlug,product.pathKey,product.isTest),{ifGenerationMatch:target.ifGenerationMatch});
       await tx.update(catalogOutputs).set({isLive:false,status:"skipped",supersededAt:now,reason:`Removed in batch ${batch.name}`,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
       removed.push(target.output);
@@ -239,7 +288,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,now,actor,rulesKeyVersion:c => rules.keyVersion(c),log})); }
     catch (error) { log("change log not written",{severity:"ERROR",batchId,productId,error:error instanceof Error ? error.message : String(error)}); }
     const previousSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.isCurrent,true)));
-    const reordered = sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
+    const reordered = !append && sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
     const wasNew = !all.some(o=>o.batchId !== batchId && (o.publishedAt || o.isLive));
     // M1-F3-R2: in an auto-decide batch a product with nothing delivered on any channel is an exception, not a new product.
     const nothingDelivered = auto && !failure && !changes.length && !plan.kept.length && !outputs.some(o => o.status === "verified");
@@ -259,18 +308,31 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       for (const source of sources) {
         const old = previousSources.find(s=>s.n===source.n);
         if (old?.sha256 === source.sha256) continue;
+        // M1 D30: a follow-up never retires a current photo, and a photo it did not add (skipped) does not become current.
+        if (append && (old || plan.skipped.some(k => k.output.sourceImageId === source.id))) continue;
         if (old) { await deps.storage.setCustomTime(old.rawUri,now); await tx.update(catalogSourceImages).set({isCurrent:false,supersededAt:now}).where(eq(catalogSourceImages.id,old.id)); }
         await tx.update(catalogSourceImages).set({isCurrent:true}).where(eq(catalogSourceImages.id,source.id));
       }
-      for (const old of previousSources.filter(s=>!sources.some(n=>n.n===s.n))) { await deps.storage.setCustomTime(old.rawUri,now); await tx.update(catalogSourceImages).set({isCurrent:false,supersededAt:now}).where(eq(catalogSourceImages.id,old.id)); }
+      // M1 D30: a follow-up adds photos, so the photos it has no shot for stay current.
+      if (!append) for (const old of previousSources.filter(s=>!sources.some(n=>n.n===s.n))) { await deps.storage.setCustomTime(old.rawUri,now); await tx.update(catalogSourceImages).set({isCurrent:false,supersededAt:now}).where(eq(catalogSourceImages.id,old.id)); }
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
     const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
-    await tx.update(catalogProducts).set({lastBatchId:batchId}).where(eq(catalogProducts.id,productId));
+    await tx.update(catalogProducts).set(publisherOf(batchId, append)).where(eq(catalogProducts.id,productId));
     return { outcome: failure || nothingDelivered ? "failed" : "published", batch: found, changed: !failure && !nothingDelivered && change !== "unchanged" };
   });
+}
+/**
+ * M1 D30 (re-review 3 P2-1): what a publish writes on the product. Every batch becomes last_batch_id; a full batch also
+ * becomes last_full_batch_id. A follow-up only adds photos, so it keeps last_full_batch_id, filling it (when a product
+ * published before migration 0024 has none) with the previous publisher if that one was a full batch. Postgres reads the
+ * old row in SET, so the subquery sees the previous last_batch_id.
+ */
+export function publisherOf(batchId: string, append: boolean) {
+  if (!append) return { lastBatchId: batchId, lastFullBatchId: batchId };
+  return { lastBatchId: batchId, lastFullBatchId: sql<string | null>`coalesce(${catalogProducts.lastFullBatchId}, (SELECT b.id FROM ${catalogBatches} b WHERE b.id = ${catalogProducts.lastBatchId} AND coalesce((b.options->>'append')::boolean, false) = false))` };
 }
 /** The upscalerId the worker's env selects (UPSCALE_MODEL on the service UPSCALE_URL names), or null when off. */
 export function configuredUpscalerId(env: NodeJS.ProcessEnv = process.env): string | null {

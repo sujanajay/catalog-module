@@ -168,7 +168,8 @@ export async function runAutoStart(db: Db, deps: StartDeps & { now?: () => Date 
     }
     // A changed draft, no marketplace chosen, or nothing usable: this countdown ends and the Start button shows. A
     // collection still running arms a new countdown when it ends (only this countdown's own `at` is cleared).
-    await db.update(catalogBatches).set({ counts: mergeCounts({ autoStartAt: null }) })
+    // Review P2-4: `autoStartEnded` tells the sweep this countdown ended on purpose, so it is not armed again.
+    await db.update(catalogBatches).set({ counts: mergeCounts({ autoStartAt: null, autoStartEnded: true }) })
       .where(and(eq(catalogBatches.id, batch.id), eq(catalogBatches.status, "draft"), sql`${catalogBatches.counts}->>'autoStartAt' = ${body.at}`));
     log("WARNING", "auto-start did not start the batch", { batchId: batch.id, brandSlug: batch.brandSlug, reason: err.message });
     return `not started: ${err.message}`;

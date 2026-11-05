@@ -87,7 +87,7 @@ async function seed(w:ReturnType<typeof world>,name:string,options:{productId?:s
   return {batch:batch!,product,chunk:chunk!};
 }
 async function run(w:ReturnType<typeof world>,s:Awaited<ReturnType<typeof seed>>) {expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200);return handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});}
-it("M1-F5 test 2 (M1-S5, M1 D36): the same photos again the next day give a digest with every product unchanged, no new images and no new public objects",async()=>{
+it("M1-F5 test 2 (M1-S5, M1 D38): the same photos again the next day give a digest with every product unchanged, no new images and no new public objects",async()=>{
   const w=world(),channels:("noon"|"namshi")[]=["noon","namshi"],first=await seed(w,"rerun-f5",{shots:["a","b"],channels});
   expect((await run(w,first)).outcome).toBe("published");
   expect((await handleFinalizeTask(w.deps,{batchId:first.batch.id})).outcome).toBe("done");

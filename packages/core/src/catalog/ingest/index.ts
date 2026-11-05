@@ -45,6 +45,7 @@ import { loadSkuResolver, type ResolveResult, type SkuResolver } from "../sku-ma
 import type { BatchCounts, BatchOptions, ChangeKind, ChannelId, IntakePhase, LinkStatus, OutputFlag, PlacingClaim, UploadKind } from "../types";
 import { driveFolderAdapter } from "./drive-folder";
 import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
+import { allocateShots, shotNumbers, shotRanks } from "./append";
 import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
   baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
@@ -450,7 +451,9 @@ export async function runIngest(
       .update(catalogBatches)
       .set({
         status: "ingesting",
-        counts: progressCounts({ previewReady: false, failReason: null, placingClaim: null }, { phase: upload.kind === "sheet" || upload.kind === "google_sheet" ? "reading" : phase, done: "collected", at: clock() }),
+        // M1 D24: a lease that ran out is cleared (its grouping is out of date); a live one is left to its step, which
+        // sees the input change at its close and groups again (inputsChanged) instead of two steps running at once.
+        counts: sql`${progressCounts({ previewReady: false, failReason: null }, { phase: upload.kind === "sheet" || upload.kind === "google_sheet" ? "reading" : phase, done: "collected", at: clock() })} || (CASE WHEN ${placingLeaseFree(clock())} THEN '{"placingClaim": null}'::jsonb ELSE '{}'::jsonb END)`,
       })
       .where(and(eq(catalogBatches.id, batch.id), inArray(catalogBatches.status, ["draft", "ingesting", "failed"])))
       .returning({ id: catalogBatches.id });
@@ -565,11 +568,17 @@ async function finishIfLast(db: Db, deps: PlaceDeps, batchId: string, token: str
   const now = deps.now?.() ?? new Date();
   const attempt = randomUUID();
   const ingesting = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"));
-  const claimed = await db
-    .update(catalogBatches)
-    .set({ counts: progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null, grouped: 0, groupTotal: null }, { phase: "grouping", done: 0, at: now }) })
-    .where(and(ingesting, placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
-    .returning({ id: catalogBatches.id });
+  // M1 D24: the claim takes the batch row lock first (an input change holds it while it writes its upload rows and the
+  // change marker), so the uploads check reads every change committed before it, and the step records the marker it
+  // groups with (groupedChange); a change after this is caught at the closing write.
+  const claimed = await db.transaction(async (tx) => {
+    await tx.select({ id: catalogBatches.id }).from(catalogBatches).where(eq(catalogBatches.id, batchId)).for("update");
+    return tx
+      .update(catalogBatches)
+      .set({ counts: sql`${progressCounts({ placingClaim: placingClaim(token, now, attempt), placed: 0, placeTotal: null, grouped: 0, groupTotal: null }, { phase: "grouping", done: 0, at: now })} || jsonb_build_object('groupedChange', ${catalogBatches.counts}->'inputsChangedAt')` })
+      .where(and(ingesting, placingLeaseFree(now), sql`NOT ${UPLOADS_LEFT(batchId)}`))
+      .returning({ id: catalogBatches.id });
+  });
   // Grouping is not run again once placing went on to a later chunk (spec 14d F7 part 2): the retry
   // of this delivery after that only queues the continuation again.
   if (!claimed.length) return resumeAttempt(db, deps, batchId, token, body, { kind: "group" }, (a) => groupBatch(db, deps, batchId, token, a, body));
@@ -949,6 +958,8 @@ type PlaceDeps = IngestDeps & { enqueue: typeof enqueueTask; placeBudgetItems?: 
 function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, attempt: string, mark: { next?: number; group?: number } = {}) {
   const clock = () => deps.now?.() ?? new Date();
   const held = and(eq(catalogBatches.id, batchId), eq(catalogBatches.status, "ingesting"), placingLeaseHeld(token, attempt));
+  // Text reads (->>), so a missing key and a JSON null are both SQL NULL.
+  const unchangedInputs = sql`(${catalogBatches.counts}->>'inputsChangedAt') IS NOT DISTINCT FROM (${catalogBatches.counts}->>'groupedChange')`;
   // The stage marks the claim carries, kept on every renewal so a retry of this delivery resumes it.
   const claim = (at: Date) => ({ ...placingClaim(token, at, attempt), ...(mark.next !== undefined ? { next: mark.next } : {}), ...(mark.group !== undefined ? { group: mark.group } : {}) });
   return {
@@ -985,8 +996,20 @@ function leaseWrites(db: Db, deps: IngestDeps, batchId: string, token: string, a
       return rows.length > 0;
     },
     close: async (patch: Partial<BatchCounts>, status: "draft" | "failed"): Promise<boolean> => {
+      // M1 D24: not when an input changed since the claim (the marker is on this row, so a change that commits while
+      // this write waits for the row lock is seen); the step then groups again (inputsChanged).
       const rows = await db.update(catalogBatches)
         .set({ status, counts: mergeCounts({ ...patch, placingClaim: null, rate: [] }) })
+        .where(and(held, unchangedInputs)).returning({ id: catalogBatches.id });
+      return rows.length > 0;
+    },
+    /**
+     * M1 D24: an input changed since the claim: the lease is released and the preview stays not ready. The batch stays
+     * collecting for a regroup, or goes back to draft when no input is left to group.
+     */
+    restart: async (status: "ingesting" | "draft"): Promise<boolean> => {
+      const rows = await db.update(catalogBatches)
+        .set({ status, counts: mergeCounts({ placingClaim: null, rate: [], previewReady: false, phase: null }) })
         .where(held).returning({ id: catalogBatches.id });
       return rows.length > 0;
     },
@@ -1299,12 +1322,19 @@ async function groupProducts(
   const bucket = getBucketName();
   const rawUriOf = new Map<SourceItem, string>();
   const shots: PlannedShot[] = [];
+  // M1 D30: a follow-up batch only adds photos: its shot numbers are given out by allocateShots (after every shot the
+  // product has or another batch holds, under the product row lock), for new products too (two follow-ups can make one).
+  const allocated = batch.options.append
+    ? await allocateShots(db, batch.id, withPhotos.map((id) => ({ productId: productOf.get(id)!.id, count: shotRanks(grouped.products.get(id)!) })))
+    : null;
   for (const id of withPhotos) {
     const product = productOf.get(id)!;
-    for (const [i, item] of grouped.products.get(id)!.entries()) {
+    const items = grouped.products.get(id)!;
+    const numberOf = shotNumbers(items, allocated ? allocated.get(product.id)! : null);
+    for (const item of items) {
       const r = resultOf.get(item);
       if (!r) continue;
-      const n = item.n ?? i + 1;
+      const n = numberOf.get(item)!;
       const target = rawPath(prefix, product.pathKey, n, r.ext);
       const rawUri = toGsUri(bucket, target);
       rawUriOf.set(item, rawUri);
@@ -1441,21 +1471,17 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
   await recordSourcePhotoVersions(db, versions.map((v) => ({ ...v, optionId: optionOf.get(v.productId) ?? null, isTest: batch.isTest })));
   await saveJson(deps, statePath(prefix), state.preview);
 
-  // An input removed while this ran (spec 14b F3) was read above, so this result is out of date. The
-  // removal already cleared previewReady; keep it cleared (no failure either) so the next Continue
-  // runs this step again without it.
+  // An input removed or changed while this ran (spec 14b F3, M1 D24) makes this result out of date: the step groups
+  // again with the inputs as they are now (inputsChanged), never two steps at once and never with a removed input.
   const removedSince = state.uploadIds.length ? await db.select({ id: catalogUploads.id }).from(catalogUploads).where(and(inArray(catalogUploads.id, state.uploadIds), eq(catalogUploads.status, "removed"))) : [];
-  if (removedSince.length) {
-    if (!(await lease.close({ ...state.counts, previewReady: false, phase: null, placed: total }, "draft"))) return lease.stopped();
-    return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stale: an input was removed" };
-  }
+  if (removedSince.length) return inputsChanged(db, deps, batchId, lease, body);
   if (state.failReason) {
-    if (!(await lease.close({ ...state.counts, failReason: state.failReason, phase: null, placed: total }, "failed"))) return lease.stopped();
+    if (!(await lease.close({ ...state.counts, failReason: state.failReason, phase: null, placed: total }, "failed"))) return (await changedSinceClaim(db, batchId, token)) ? inputsChanged(db, deps, batchId, lease, body) : lease.stopped();
     // An operator upload with nothing usable: WARNING, so it sends no alert and stays out of Error Reporting.
     log("WARNING", "batch failed", { batchId: batch.id, brandSlug: batch.brandSlug, reason: state.failReason, cause: "no_photos" });
     return { progress: { done: 0, total: 0, phase: "done" }, outcome: "failed: no photos" };
   }
-  if (!(await lease.close({ ...state.counts, phase: state.waitingForColumn ? "needs_input" : "ready", placed: total }, "draft"))) return lease.stopped();
+  if (!(await lease.close({ ...state.counts, phase: state.waitingForColumn ? "needs_input" : "ready", placed: total }, "draft"))) return (await changedSinceClaim(db, batchId, token)) ? inputsChanged(db, deps, batchId, lease, body) : lease.stopped();
   // M1-F2-R6: a batch made with autoStart starts by itself after its countdown (a sheet still waiting for its column
   // does not). The batch is collected either way, so a failure to arm only leaves its Start button.
   if (!state.waitingForColumn) {
@@ -1465,6 +1491,33 @@ async function placeBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     progress: { done: versions.length, total: versions.length, phase: "done" },
     outcome: `preview ready: ${state.preview.products.length} products, ${versions.length} photos`,
   };
+}
+
+/** M1 D24: the lease `token` is still this batch's and an input changed since its claim (the closing write was refused for it). */
+async function changedSinceClaim(db: Db, batchId: string, token: string): Promise<boolean> {
+  const [b] = await db.select({ status: catalogBatches.status, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  return b?.status === "ingesting" && b.counts.placingClaim?.token === token && (b.counts.inputsChangedAt ?? null) !== (b.counts.groupedChange ?? null);
+}
+
+/**
+ * M1 D24 (review P1-1): an input was removed, added or corrected while the batch-wide step ran. Its result is out of
+ * date, so it is not closed: the lease is released and one delivery of a read upload is queued under the batch's
+ * current run, whose claim groups again from scratch (groupBatch first removes the rows this step wrote). While an
+ * upload is still being read, that claim is refused (uploads left) and the upload's own last delivery claims instead.
+ */
+async function inputsChanged(db: Db, deps: PlaceDeps, batchId: string, lease: { restart(status: "ingesting" | "draft"): Promise<boolean>; stopped(): Promise<StepResult> }, body: DeliveryBody): Promise<StepResult> {
+  // A read upload's delivery claims again; an upload still being read claims at its own last delivery; with no input
+  // left at all there is nothing to group, and the batch goes back to draft (its page asks for photos).
+  const [read] = await db.select({ id: catalogUploads.id }).from(catalogUploads)
+    .where(and(eq(catalogUploads.batchId, batchId), inArray(catalogUploads.status, ["collected", "failed"]))).orderBy(catalogUploads.id).limit(1);
+  const [anyLive] = read ? [read] : await db.select({ id: catalogUploads.id }).from(catalogUploads)
+    .where(and(eq(catalogUploads.batchId, batchId), ne(catalogUploads.status, "removed"))).limit(1);
+  if (!(await lease.restart(anyLive ? "ingesting" : "draft"))) return lease.stopped();
+  const [b] = await db.select({ counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId));
+  const run = b?.counts.ingestRun ?? body.run;
+  if (read) await deps.enqueue(INGEST_ROUTE, { batchId, uploadId: read.id, ...(run ? { run } : {}) }, { taskId: hashedTaskId("regroup", batchId, randomUUID()) });
+  log("INFO", "inputs changed while grouping: grouping again", { batchId, regroup: !!read, inputsLeft: !!anyLive });
+  return { progress: { done: 0, total: 0, phase: "done" }, outcome: "stale: an input changed; grouping again" };
 }
 
 /** counts.failReason when an ingest task used its last attempt (the batch then shows "Fix and continue"). */
