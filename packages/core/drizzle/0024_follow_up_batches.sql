@@ -4,7 +4,7 @@
 -- can never hold one number. Additive only: one nullable column with no default, a new empty table, their indexes and
 -- foreign keys. The self-referencing key on catalog_batches is added NOT VALID (existing rows are all null, so nothing
 -- is scanned; new rows are checked); deleting a parent leaves its follow-ups standing (ON DELETE SET NULL). Re-runnable:
--- IF NOT EXISTS everywhere and the foreign keys only when missing. Numbered 0023 at the merge with main (M1 D3).
+-- IF NOT EXISTS everywhere and the foreign keys only when missing. Numbered 0024 at the merge with main (M1 D3).
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 ALTER TABLE "catalog_batches" ADD COLUMN IF NOT EXISTS "parent_batch_id" uuid;--> statement-breakpoint
 DO $$ BEGIN

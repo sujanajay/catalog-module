@@ -11,8 +11,8 @@ import { BackArrow } from "@/components/ui";
 import { db } from "@/lib/db";
 import { requireRole } from "@/lib/user";
 import { withoutModelNames } from "@/lib/catalog/redact";
-import { activeBatches, batchCostDetail, costOverview, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, reliability, COST_TTL_MS } from "@/lib/catalog/ops";
-import { durationText, incidentDurationText, INCIDENT_KIND_WORDS, outcomeText, RELIABILITY_HELP, RELIABILITY_TITLE, successRateLine } from "@/lib/catalog/ops-copy";
+import { activeBatches, batchCostDetail, costOverview, costReconciled, gpuCandidateRevision, healthSummary, lifetimeBrandCost, recentBatches, recentFailures, reliability, COST_TTL_MS } from "@/lib/catalog/ops";
+import { COST_ALERT_WORDS, COST_CARD_HELP, COST_CARD_TITLE, COST_ENV_WORDS, COST_NOT_RUN, costCheckText, costPartWords, durationText, incidentDurationText, INCIDENT_KIND_WORDS, outcomeText, RELIABILITY_HELP, RELIABILITY_TITLE, successRateLine } from "@/lib/catalog/ops-copy";
 import { REPORT_UNAVAILABLE, AGENCY_REFERENCE, HEALTH_TITLE, healthLines, chunkGaveUpText, chunkProgressText, chunkTotal, COST_STAGE_WORDS, hintText, logsUrl, money, OPS_HREF, OPS_REFRESH_MS, statusWord } from "@/lib/catalog/ops-copy";
 
 export const dynamic = "force-dynamic";
@@ -63,6 +63,8 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
   const orphans = await orphanDrafts(conn, now);
   const reliabilityRead = await reliability(conn, now);
   const rel = reliabilityRead.ok ? reliabilityRead.value : null;
+  const cardRead = await costReconciled(conn, now);
+  const card = cardRead.ok ? cardRead.value : null;
   const overviewRead = await costOverview(conn, now);
   const overview = overviewRead.ok ? overviewRead.value : null;
   const lifetimeRead = lifetime ? await lifetimeBrandCost(conn, now) : null;
@@ -77,7 +79,7 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
         <div>
           <Link href="/catalog"><BackArrow /> All batches</Link>
           <h1>Ops</h1>
-          <p className="lead">Batches running now, failures in the last 24 hours, how reliably batches finish, and what batches and brands cost. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
+          <p className="lead">Batches running now, failures in the last 24 hours, how reliably batches finish, what batches and brands cost, and how that matches what Google Cloud billed. Read only.{rate === null ? ` ${RUPEES_NOT_CONFIGURED}.` : ""}</p>
         </div>
       </div>
       <AutoRefresh active={!lifetime} ms={OPS_REFRESH_MS} />
@@ -163,6 +165,49 @@ export default async function OpsPage({ searchParams }: { searchParams: Promise<
                 ))}</tbody>
               </table></div>
             ) : <p>No batch finished in the last 30 days.</p>}
+          </>
+        )}
+      </section>
+
+      <section>
+        <h2>{COST_CARD_TITLE}</h2>
+        <p className="help">{COST_CARD_HELP} Read at most every {costMinutes} minutes.</p>
+        {!card ? <p>{REPORT_UNAVAILABLE}</p> : !card.days.length ? <p>{COST_NOT_RUN}</p> : (
+          <>
+            <h3>Per day</h3>
+            <div className="tw"><table>
+              <thead><tr>{["Day", "Billed", "Recorded by batches", "Idle", "Idle, no batch", "Shared", "Outside Google Cloud", "Total", "Check"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>{card.days.map(d => (
+                <tr key={d.day}><td>{d.day}</td><td>{money(d.billedUsd, rate)}</td><td>{money(d.attributedUsd, rate)}</td><td>{money(d.idleUsd, rate)}</td><td>{money(d.idleNoBatchUsd, rate)}</td><td>{money(d.sharedUsd, rate)}</td><td>{money(d.vendorUsd, rate)}</td><td>{money(d.totalUsd, rate)}{d.estimated ? " (estimate)" : ""}</td><td>{costCheckText(d)}</td></tr>
+              ))}</tbody>
+            </table></div>
+            <h3>Per part, last 30 days</h3>
+            <div className="tw"><table>
+              <thead><tr>{["Part", "Billed", "Recorded by batches", "Idle", "Hours billed"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+              <tbody>{card.components.filter(c => c.env === "live").map(c => (
+                <tr key={c.component}><td>{costPartWords(c.component, c.kind)}</td><td>{money(c.kind === "shared" ? c.sharedUsd : c.billedUsd, rate)}</td><td>{money(c.attributedUsd, rate)}</td><td>{money(c.idleUsd, rate)}</td><td>{c.billableSeconds ? (c.billableSeconds / 3600).toFixed(1) : ""}</td></tr>
+              ))}</tbody>
+            </table></div>
+            {card.apart.length ? <p className="help">Not in the totals above: {card.apart.map(a => `${COST_ENV_WORDS[a.env] ?? a.env} ${money(a.billedUsd, rate)}`).join(", ")}.</p> : null}
+            {card.alerts.length ? <p>Daily check alerts in this period: {card.alerts.map(a => `${COST_ALERT_WORDS[a.code] ?? a.code} (${a.count})`).join(", ")}. They are listed under Reliability.</p> : null}
+            <h3>True cost per product</h3>
+            <p className="help">True cost is what a batch recorded plus its share of the idle time and the shared database. Recorded only is the cost the batch&apos;s own steps recorded.</p>
+            {card.batches.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Batch", "Brand", "Products with links", "True cost per product", "Recorded only, per product", "True cost"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{card.batches.map(b => (
+                  <tr key={b.batchId}><td><Link href={`/catalog/${b.batchId}`}>{b.name}</Link>{b.isTest ? <> <span className="pill">Test</span></> : null}</td><td>{b.brandName}</td><td>{b.productsWithLinks ?? ""}</td><td>{b.truePerProductUsd === null ? "" : money(b.truePerProductUsd, rate)}</td><td>{b.marginalPerProductUsd === null ? "" : money(b.marginalPerProductUsd, rate)}</td><td>{money(b.trueUsd, rate)}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : <p>No batch ran in these days.</p>}
+            {card.brands.length ? (
+              <div className="tw"><table>
+                <thead><tr>{["Brand", "Batches", "Products with links", "True cost per product"].map(c => <th key={c}>{c}</th>)}</tr></thead>
+                <tbody>{card.brands.map(b => (
+                  <tr key={b.brandName}><td>{b.brandName}</td><td>{b.batches}</td><td>{b.productsWithLinks}</td><td>{b.truePerProductUsd === null ? "" : money(b.truePerProductUsd, rate)}</td></tr>
+                ))}</tbody>
+              </table></div>
+            ) : null}
           </>
         )}
       </section>

@@ -21,6 +21,7 @@ await build({
     "catalog-recheck": path.join(here, "src/catalog-recheck.ts"),
     "catalog-invariants": path.join(here, "src/catalog-invariants.ts"),
     "catalog-graph-export": path.join(here, "src/catalog-graph-export.ts"),
+    "catalog-cost-reconcile": path.join(here, "src/catalog-cost-reconcile.ts"),
     "catalog-output-evals": path.join(here, "src/catalog-output-evals.ts"),
     "catalog-enhancement-gate": path.join(here, "src/catalog-enhancement-gate.ts"),
     "fault-proxy": path.join(here, "src/fault-proxy.ts"),
