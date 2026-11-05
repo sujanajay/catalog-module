@@ -255,8 +255,10 @@ gate_probe() {
   # pipefail (restored on return by `local -`) so the probe's exit status, not sed's, decides.
   local -; set -o pipefail
   # GATE_SERVICE names the service to the probe (the matting probes run as their own job, catalog-check-<service>,
-  # so probes that run at once never share a job). On the timeout the probe gets TERM and cancels its job execution
-  # (gcloud_job_run); 60 s before KILL leaves gcloud on this laptop time for that call.
+  # so probes that run at once never share a job). On the timeout every process of the probe gets TERM; timeout
+  # returns 124 as soon as its direct child (bash services.sh) exits, while the nested check-matting.sh runs its TERM
+  # trap and cancels its job execution (gcloud_job_run) on its own, sed keeping the pipe open until it is done. KILL
+  # (60 s later) reaches only a probe that is still the direct child.
   GATE_SERVICE="$SVC_NAME" timeout --kill-after=60 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
   if [ "$status" != 0 ]; then
     if [ "$status" = 124 ] || [ "$status" = 137 ]; then

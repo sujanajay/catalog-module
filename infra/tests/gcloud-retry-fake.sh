@@ -18,6 +18,8 @@ gcloud() {
         succeeded) echo '{"status":{"conditions":[{"type":"Completed","status":"True"}],"succeededCount":1}}' ;;
         failed) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"NonZeroExitCode","message":"Task probe-job-ab12c-task0 failed with exit code: 1"}],"failedCount":1}}' ;;
         garbage) echo 'not json' ;;
+        partial) echo '{"status":{"conditions":[{"type":"Completed","status":"True"}],"succeededCount":1,"failedCount":1}}' ;;
+        busy) echo "ERROR: (gcloud.run.jobs.executions.describe) UNAVAILABLE: The service is currently unavailable." >&2; return 1 ;;
         dns) dns ;;
         denied) echo "ERROR: (gcloud.run.jobs.executions.describe) PERMISSION_DENIED: no" >&2; return 1 ;;
       esac ;;

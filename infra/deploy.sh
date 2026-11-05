@@ -61,7 +61,22 @@ cd "$(dirname "$0")/.."
 source infra/lib/deploy-steps.sh
 deploy_step pre-flight
 
-gcv() { gcloud "$@" | tr -d '\r'; }
+# Laptop network blips (infra/lib/gcloud-retry.sh): every read goes through gcloud_retry (network errors only, logged),
+# a secret is checked with gcloud_exists (missing and "cannot check" are different answers), and the migrate job runs
+# through gcloud_job_run (started once, judged from its final state).
+# shellcheck source=lib/gcloud-retry.sh
+source infra/lib/gcloud-retry.sh
+gcv() { gcloud_retry gcloud "$@" | tr -d '\r'; }
+# require_secret <name> <what to do when it is missing>: stops the deploy unless the secret exists.
+require_secret() {
+  local status=0
+  gcloud_exists secrets describe "$1" || status=$?
+  case "$status" in
+    0) ;;
+    1) echo "secret $1 missing; $2" >&2; exit 1 ;;
+    *) echo "ERROR: cannot check the secret $1 (the gcloud error is above; not a missing secret); nothing was changed. Re-run when gcloud works." >&2; exit 1 ;;
+  esac
+}
 
 # --- Rollback: one service back to its previous revision, no build, no smoke ------------------
 if [ "${1:-}" = --rollback ]; then
@@ -153,7 +168,7 @@ source infra/lib/shape.sh
 source infra/lib/labels.sh
 SQL_CONNECTION_LIMIT=${SQL_MAX_FLAG:-$(tier_max_connections "$SQL_TIER_LIVE")}
 [ -n "$SQL_CONNECTION_LIMIT" ] || { echo "ERROR: unknown ila-pg tier '$SQL_TIER_LIVE'; cannot check the connection budget" >&2; exit 1; }
-gcloud secrets describe catalog-db-password >/dev/null 2>&1 || { echo "secret catalog-db-password missing; run infra/bootstrap.sh first" >&2; exit 1; }
+require_secret catalog-db-password "run infra/bootstrap.sh first"
 # M1-F1-R4: the Supabase folder paste switch on catalog-web. SUPABASE_FOLDER_PASTE=on|off chooses; unset keeps the value
 # the live web service runs with, so an "off" sticks across later plain deploys (infra/lib/supabase-paste.sh).
 # shellcheck source=lib/supabase-paste.sh
@@ -164,7 +179,7 @@ echo "==> Supabase folder paste on $WEB_SERVICE: $SUPABASE_FOLDER_PASTE"
 # checked, so a missing or disabled key never blocks a deploy.
 if [ "$SUPABASE_FOLDER_PASTE" = on ]; then
   for secret in supabase-url supabase-service-key; do
-    gcloud secrets describe "$secret" >/dev/null 2>&1 || { echo "secret $secret missing; add it to Secret Manager, or deploy with SUPABASE_FOLDER_PASTE=off" >&2; exit 1; }
+    require_secret "$secret" "add it to Secret Manager, or deploy with SUPABASE_FOLDER_PASTE=off"
   done
 fi
 if [ -n "$(git status --porcelain)" ]; then
@@ -411,10 +426,12 @@ elif [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   else
     MIGRATE_LABELS=$(catalog_labels catalog-migrate live)
     catalog_labels_check catalog-migrate "$MIGRATE_LABELS" || exit 1
-    gcloud run jobs deploy catalog-migrate --quiet --image="$AR/worker:$TAG" --command=node --args=dist/migrate.js \
+    gcloud_retry gcloud run jobs deploy catalog-migrate --quiet --image="$AR/worker:$TAG" --command=node --args=dist/migrate.js \
       --service-account="$WORKER_SA" --max-retries=0 --task-timeout=600 "${NET[@]}" --labels="$MIGRATE_LABELS" \
       --set-secrets="$SECRETS" --set-env-vars="$MIGRATE_ENV"
-    gcloud run jobs execute catalog-migrate --region="$REGION" --wait
+    # Started once and judged from its final state; a polling blip only reads the same execution again, and Ctrl-C or a
+    # lost network never cancels a migration half-way (the third argument).
+    gcloud_job_run catalog-migrate "$REGION" 0
   fi
 else
   echo "==> migrate: SKIP (preview uses the existing schema)"

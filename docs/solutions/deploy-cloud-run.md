@@ -178,8 +178,19 @@ on GCP ran on (the 10-31 worker smoke passed there), and one deploy stopped on a
   when the request never left the laptop, so it can never start a second execution. Then it reads
   `executions describe` every 20 s and judges only the execution's Completed condition. Network errors while
   polling are waited out for up to 15 minutes. Past that, or on any other read error, the result counts as unknown
-  and the gate keeps the old traffic. Afterwards it prints the execution's log. On the gate's timeout (TERM) it
-  cancels the execution; `timeout --kill-after` is now 60 s, which leaves room for that call.
+  and the gate keeps the old traffic. Afterwards it prints the execution's log. On the gate's timeout every probe
+  process gets TERM. `timeout` returns 124 as soon as its direct child exits. The nested check-matting.sh runs its
+  TERM trap and cancels the execution on its own (review P3, checked by hand on Git Bash). A Run API 429 or 503
+  while polling is waited out like a network error, and success also needs no failed task.
+- The same applies outside the gates (review P2): deploy.sh's `gcv` reads go through `gcloud_retry`. Secrets are
+  checked with `gcloud_exists`, so a DNS blip says "cannot check the secret", not "secret missing". `catalog-migrate`
+  runs through `gcloud_job_run` with cancel-on-TERM off: it is started once, a polling blip only re-reads the same
+  execution, and a migration is never cancelled half-way. In services.sh, `probe_get` also retries curl 6 (DNS). The
+  identity and access token reads use `gcloud_retry`, and the IAP token mint retries network errors and Google's
+  429/500/503.
+- Not changed: other plain `gcloud` calls in deploy.sh (writes such as queue and IAM updates, and the post-gate jobs
+  catalog-cost-reconcile and catalog-graph-export, which still use `--wait`). A blip there can still stop a deploy
+  and need a re-run, but it never moves traffic.
 
 ## Rollback
 One service, seconds, no build and no smoke: `bash infra/deploy.sh --rollback <service> [revision]`

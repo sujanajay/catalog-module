@@ -11,14 +11,19 @@
 #       (GCLOUD_TRANSPORT_RE: DNS, refused, reset, timeout, gcloud crashing on a ConnectionError) it tries again,
 #       GCLOUD_RETRY_ATTEMPTS times in all, GCLOUD_RETRY_DELAY_S apart and doubling, and prints each retry. Any other
 #       failure (NOT_FOUND, PERMISSION_DENIED, an expired login) returns at once with gcloud's error.
-#   gcloud_job_run <job> <region>
+#   gcloud_exists <gcloud describe args...>
+#       0 when the resource exists, 1 when gcloud says it does not (NOT_FOUND), 2 when the check itself failed after
+#       the network retries (the error is printed), so a DNS blip is never reported as "missing".
+#   gcloud_job_run <job> <region> [cancel on TERM: 1 (default) or 0]
 #       Runs one execution of a Cloud Run job and judges it only from the execution's final state on GCP: starts it with
 #       --async (retried only when the request never left the laptop, so a retry can never start a second execution),
 #       then reads `executions describe` every GCLOUD_POLL_S seconds until its Completed condition is True (0) or False
 #       (1). A network error while polling is waited out for up to GCLOUD_POLL_OUTAGE_S seconds in a row; past that, or
 #       on any other read error, the result is unknown and it returns 1, so a gate keeps the old traffic. Afterwards the
 #       execution's log is printed (best effort; it never changes the verdict). TERM or INT (the gate's hard timeout)
-#       cancels the execution, so a probe the gate gave up on stops running on the candidate.
+#       cancels the execution, so a probe the gate gave up on stops running on the candidate (0 for a job that must
+#       never stop half-way, such as catalog-migrate). A Run API 429 or 503 while polling (GCLOUD_API_BUSY_RE) is waited
+#       out like a network error. Success needs Completed True and no failed task.
 # Tests set the variables below to 0 and put a fake gcloud first on PATH (or define gcloud as a function).
 
 GCLOUD_RETRY_ATTEMPTS=${GCLOUD_RETRY_ATTEMPTS:-5}
@@ -31,13 +36,15 @@ GCLOUD_POLL_OUTAGE_S=${GCLOUD_POLL_OUTAGE_S:-900}
 GCLOUD_TRANSPORT_RE='gcloud crashed \((ConnectionError|SSLError|Timeout|ReadTimeout|ConnectTimeout|TransportError|ConnectionResetError|RemoteDisconnected|ProtocolError|ChunkedEncodingError|MaxRetryError|NewConnectionError)\)|NameResolutionError|getaddrinfo failed|Failed to resolve|Temporary failure in name resolution|Name or service not known|Connection reset by peer|Connection aborted|Connection refused|Max retries exceeded|Read timed out|Connection timed out'
 # The subset where the request certainly never reached Google (no name, no connection): safe to repeat even for a call
 # that is not idempotent, such as starting a job execution.
+# A Run API that is briefly overloaded: during polling waited out like a network error (the request itself is a read).
+GCLOUD_API_BUSY_RE='RESOURCE_EXHAUSTED|UNAVAILABLE|HTTPError 503|HTTPError 429|code=503|code=429|Service Unavailable|Too Many Requests'
 GCLOUD_UNSENT_RE='NameResolutionError|getaddrinfo failed|Failed to resolve|Temporary failure in name resolution|Name or service not known|Connection refused|ConnectTimeout|NewConnectionError'
 
 # The first network-error phrase in a gcloud error file, for the retry line.
 gcloud_network_reason() {
   local found
   # The whole first matching line (it names the host and the cause), cut to a readable length.
-  found=$(grep -m1 -E "$GCLOUD_TRANSPORT_RE" "$1" 2>/dev/null) || found="network error"
+  found=$(grep -m1 -E "$GCLOUD_TRANSPORT_RE|${GCLOUD_API_BUSY_RE:-^$}" "$1" 2>/dev/null) || found="network error"
   found=${found//$'\r'/}
   echo "${found:0:240}"
 }
@@ -64,13 +71,25 @@ gcloud_retry() {
   done
 }
 
+gcloud_exists() {
+  local out status=0
+  out=$(gcloud_retry gcloud "$@" 2>&1 >/dev/null) || status=$?
+  # The retry lines stay visible; the rest of gcloud's stderr only on a failed check.
+  grep -E '^WARN: ' <<<"$out" >&2 || true
+  [ "$status" != 0 ] || return 0
+  if grep -qiE "NOT_FOUND|not found|does not exist|could not be found|cannot find" <<<"$out"; then return 1; fi
+  printf '%s\n' "$out" >&2
+  return 2
+}
+
 # gcloud_job_state < execution JSON: running | succeeded | failed: <message> | unreadable
 gcloud_job_state() {
   node -e '
     let s = ""; process.stdin.on("data", (d) => s += d).on("end", () => {
       let j; try { j = JSON.parse(s.replace(/\r/g, "")); } catch { console.log("unreadable"); return; }
       const c = (j?.status?.conditions ?? []).find((x) => x.type === "Completed");
-      if (c?.status === "True") console.log("succeeded");
+      if (c?.status === "True" && Number(j?.status?.failedCount ?? 0) === 0) console.log("succeeded");
+      else if (c?.status === "True") console.log("failed: " + j.status.failedCount + " task(s) failed");
       else if (c?.status === "False") console.log("failed: " + String(c.message || c.reason || "no message").replace(/\s+/g, " "));
       else console.log("running");
     });'
@@ -98,7 +117,7 @@ gcloud_job_logs() {
 }
 
 gcloud_job_run() {
-  local job=$1 region=$2 execution="" err status json state="" outage_since="" attempt=1 delay=$GCLOUD_RETRY_DELAY_S
+  local job=$1 region=$2 cancel=${3:-1} execution="" err status json state="" outage_since="" attempt=1 delay=$GCLOUD_RETRY_DELAY_S
   err=$(mktemp)
   while :; do
     status=0
@@ -122,12 +141,16 @@ gcloud_job_run() {
   fi
   echo "==> $job: execution $execution started; reading its state every $GCLOUD_POLL_S s"
   # shellcheck disable=SC2064 # the names are fixed now
-  trap "gcloud_job_cancel '$job' '$execution' '$region'; exit 143" TERM INT
+  if [ "$cancel" = 1 ]; then
+    trap "gcloud_job_cancel '$job' '$execution' '$region'; exit 143" TERM INT
+  else
+    trap "echo \"==> $job: stopped waiting; execution $execution runs on (gcloud run jobs executions describe $execution --region=$region)\" >&2; exit 143" TERM INT
+  fi
   while :; do
     status=0
     json=$(gcloud run jobs executions describe "$execution" --region="$region" --format=json 2>"$err") || status=$?
     if [ "$status" != 0 ]; then
-      if ! grep -qE "$GCLOUD_TRANSPORT_RE" "$err"; then
+      if ! grep -qE "$GCLOUD_TRANSPORT_RE|$GCLOUD_API_BUSY_RE" "$err"; then
         cat "$err" >&2
         state="unknown: cannot read execution $execution"
         break
