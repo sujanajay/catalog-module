@@ -604,6 +604,9 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # M0-S4: the daily graph export job follows the new catalog-worker image. Only updates a job that
   # infra/catalog-graph-export.sh already set up (never creates one); never executed here.
   bash infra/catalog-graph-export.sh job
+  # M6-S2: the daily cost reconciliation job follows the new catalog-worker image the same way (only a job that
+  # infra/catalog-cost-reconcile.sh already set up; never executed here).
+  bash infra/catalog-cost-reconcile.sh job
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi

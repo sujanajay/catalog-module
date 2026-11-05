@@ -52,6 +52,7 @@ const TABLES = [
   // 0020_batch_outcomes_incidents.sql (M6-S6)
   "catalog_batch_outcomes", "catalog_incidents", "catalog_batch_touches", "catalog_revisions",
   "catalog_upscaler_health", // 0022_upscaler_health.sql (M1-S4b)
+  "catalog_cost_days", "catalog_cost_allocations", // 0023_cost_reconciliation.sql (M6-S2)
 ];
 
 const INDEXES = [
@@ -74,6 +75,7 @@ const INDEXES = [
   "catalog_rule_results_ruleset_version_idx",
   "catalog_batch_outcomes_ended_at_idx", "catalog_incidents_kind_started_at_idx", "catalog_incidents_batch_id_idx",
   "catalog_incidents_dedupe_key_uq", "catalog_batch_touches_batch_id_idx", "catalog_revisions_first_seen_at_idx",
+  "catalog_cost_days_day_component_env_source_uq", "catalog_cost_allocations_day_batch_component_uq", "catalog_cost_allocations_batch_id_idx",
 ];
 
 describe("generated migrations", () => {

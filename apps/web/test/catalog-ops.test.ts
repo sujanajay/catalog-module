@@ -143,7 +143,7 @@ describe("admin Ops page", () => {
     setDbForTests(slow);
     try {
       const html = await render(OpsPage({ searchParams: Promise.resolve({ batch: batch.id, lifetime: "1" }) }));
-      expect(html.split(REPORT_UNAVAILABLE.replace(/'/g, "&#x27;")).length - 1).toBe(5); // overview, lifetime, batch, day totals and (M6-S6) reliability
+      expect(html.split(REPORT_UNAVAILABLE.replace(/'/g, "&#x27;")).length - 1).toBe(6); // overview, lifetime, batch, day totals, (M6-S6) reliability and (M6-S2) cost
       expect(html).toContain("October drop");
     } finally { setDbForTests(db); warn.mockRestore(); }
   });
