@@ -8,11 +8,12 @@ import { brandMaster, catalogBatches, catalogUploads } from "@catalog/core/db/sc
 import { createTestDb } from "@catalog/core/db/testing";
 import type { SheetsLike } from "@catalog/core/catalog/ingest/types";
 import type { SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
-import { SUPABASE_OFF } from "@catalog/core/catalog/ingest/supabase-folder";
+import { SUPABASE_OFF, SUPABASE_STILL_READING } from "@catalog/core/catalog/ingest/supabase-folder";
 import { POST as create } from "../app/api/catalog/batches/route";
 import { POST as addLinks } from "../app/api/catalog/batches/[id]/links/route";
 import { PATCH as patchDetected } from "../app/api/catalog/batches/[id]/detected/route";
-import { pasteEntries } from "../components/catalog/paste-check";
+import { pasteEntries, readFoldersToEnd, type PasteResult } from "../components/catalog/paste-check";
+import { ingestBatch } from "../lib/catalog/uploads";
 import { setDbForTests, type Db } from "../lib/db";
 import { resetUserDeps, setUserDeps } from "../lib/user";
 
@@ -43,10 +44,20 @@ vi.mock("@catalog/core/catalog/ingest/google-sheet", async (original) => ({
   googleClients: vi.fn(async () => ({ sheets, drive: {} })),
 }));
 
+// softlines/big is a brand folder of 40 product folders whose list calls each take one second of the clock, so one
+// request (a 25 s slice) cannot read it all.
+let clock = 0;
+const BIG = `${SUPA}/storage/v1/object/public/softlines/big`;
 const fakeSupabase: SupabaseStorageLike = {
   origin: SUPA,
   async isPublic() { return true; },
-  async list(_bucket, prefix) {
+  async list(_bucket, prefix, offset) {
+    if (prefix === "big" || prefix.startsWith("big/")) {
+      clock += 1000;
+      if (offset) return [];
+      if (prefix === "big") return Array.from({ length: 40 }, (_, i) => ({ name: `B${String(i).padStart(3, "0")}`, id: null, metadata: null }));
+      return [{ name: "front.jpg", id: `${prefix}/f`, metadata: { size: 80_000 } }, { name: "back.jpg", id: `${prefix}/b`, metadata: { size: 80_000 } }];
+    }
     const code = { anta: "ZSKU", uspa: "USKU" }[prefix];
     if (code) return [1, 2].map((n) => ({ name: `${code}${n}`, id: null, metadata: null }));
     return ["front.jpg", "back.jpg"].map((name) => ({ name, id: `${prefix}/${name}`, metadata: { size: 80_000 } }));
@@ -196,6 +207,46 @@ ${FOLDER}/noext`);
     const answers = await paste(id, `${FOLDER}/My Photo 1.jpg`);
     expect(answers.map((a) => a.kind)).toEqual(["url_list"]);
     expect((await uploadsOf(id))[0]).toMatchObject({ kind: "url_list", name: "Image links", status: "uploaded" });
+  });
+
+  it("a folder too large for one request is read over several: the row says reading, Continue waits, then it fills (R1 exit finding 1)", async () => {
+    const real = Date.now;
+    const start = real();
+    clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => start + clock);
+    try {
+      const id = await newBatch();
+      const send = async (text: string) => {
+        const r = await addLinks(request("POST", { text }), ctx(id));
+        expect(r.status).toBe(200);
+        return await r.json() as PasteResult;
+      };
+      const first = await send(BIG);
+      expect(first).toMatchObject({ kind: "supabase_folder", access: "reading", pill: "Reading folder", folder: BIG });
+      expect(first.summary).toMatch(/^Reading Supabase folder softlines\/big: \d+ photos in \d+ folders so far\.$/);
+      const [reading] = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(reading).toMatchObject({ name: "Supabase folder softlines/big", status: "pending", error: null });
+      expect(reading!.detected).toMatchObject({ supabaseFolder: { url: BIG, listing: { pending: expect.any(Array), files: expect.any(Array) } } });
+      // Continue waits for the folder instead of starting without it.
+      await expect(ingestBatch(id)).rejects.toThrow(SUPABASE_STILL_READING);
+
+      // The paste box sends the folder link again until it is read; each request carries on from the last.
+      const progress: PasteResult[][] = [];
+      const answers = await readFoldersToEnd(first, send, (a) => progress.push(a));
+      expect(progress.length).toBeGreaterThanOrEqual(1);
+      expect(answers).toEqual([expect.objectContaining({ kind: "supabase_folder", access: "ok", pill: "80 photos", summary: "Supabase folder softlines/big: 80 photos in 40 folders, grouped by folder name." })]);
+      const rows = (await uploadsOf(id)).filter((u) => u.kind === "url_list");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: "uploaded", error: null });
+      expect(rows[0]!.sourceUrl!.split("\n")).toHaveLength(80);
+      expect(new Set(rows[0]!.sourceUrl!.split("\n")).size).toBe(80);
+      expect(rows[0]!.detected).toMatchObject({ supabaseFolder: { url: BIG, mode: "folder" } });
+      expect((rows[0]!.detected as { supabaseFolder: Record<string, unknown> }).supabaseFolder.listing).toBeUndefined();
+      // 40 folders and the root, each listed once over all requests.
+      expect(clock).toBe(41_000);
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 

@@ -13,7 +13,9 @@ export const UPLOADED = "Uploaded";
 export const CHECKED = "Checked";
 export const REMOVED = "Removed";
 export const DID_NOT_FINISH = "Upload did not finish. Add the file again or remove it.";
-export const uploadingWord = (progress: number) => `Uploading ${progress}%`;
+/** A pending pasted-links row: a Supabase folder read over several requests (apps/web/lib/catalog/links.ts). */
+export const READING_FOLDER = "Reading the folder. If this does not change, paste the folder link again.";
+export const uploadingWord =(progress: number) => `Uploading ${progress}%`;
 
 /** Pasted links and Google links are removed through `/links`; files through `/uploads` (as `LINK_KINDS` on the server). */
 const LINK_KINDS: readonly string[] = PASTE_INPUT_KINDS;
@@ -43,7 +45,7 @@ export function inputRows(server: ServerInput[], local: LocalUpload[], removedHe
     const base = { key: s.id, kind: s.kind, name: s.relativePath ?? s.name, size: s.sizeBytes };
     const remove = () => removeServer(s);
     if (s.status === "removed") rows.push({ ...base, state: REMOVED });
-    else if (s.status === "pending") rows.push({ ...base, state: DID_NOT_FINISH, remove });
+    else if (s.status === "pending") rows.push({ ...base, state: s.kind === "url_list" ? READING_FOLDER : DID_NOT_FINISH, remove });
     else if (s.status === "uploaded") rows.push({ ...base, state: UPLOADED, remove });
     else if (s.status === "collected") rows.push({ ...base, state: CHECKED, remove });
     // A link that failed its access check keeps its own sentence (the paste box's); a file says it failed.

@@ -4,8 +4,8 @@ import { catalogBatches, catalogUploads, type CatalogBatch, type CatalogUpload }
 import { accessStatus, checkLinkAccess, detectPastedText, NOTHING_TO_CHECK, pasteReadback } from "@catalog/core/catalog/ingest/detect";
 import { collectGoogleSheetOnWeb, googleClients } from "@catalog/core/catalog/ingest/google-sheet";
 import { collectDriveFolderOnWeb } from "@catalog/core/catalog/ingest/drive-folder";
-import { readSupabaseFolder, type SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
-import { withoutSupabaseFolders } from "@catalog/core/catalog/ingest/supabase-link";
+import { readSupabaseFolder, type SupabaseListState, type SupabaseStorageLike } from "@catalog/core/catalog/ingest/supabase-folder";
+import { canonicalFolderUrl, parseSupabaseFolderLink, withoutSupabaseFolders } from "@catalog/core/catalog/ingest/supabase-link";
 import { batchPrefix } from "@catalog/core/catalog/naming";
 import { pinnedFetch } from "@catalog/core/safe-url";
 import * as storage from "@catalog/core/storage";
@@ -72,20 +72,44 @@ async function addSupabaseFolders(id: string, client: SupabaseStorageLike, text:
  * `url_list` row of image links (product folder names kept as the rows' names when the folder is one
  * folder per product). `detected.supabaseFolder` holds the canonical link (no token), so pasting the
  * same folder again in any spelling updates that row and the plain image-links row stays apart.
+ *
+ * A folder too large to list in one request (R1 exit finding 1: a whole brand of 477 product folders) is
+ * read over several: the row stays `pending` ("reading") with where the listing got to in
+ * `detected.supabaseFolder.listing`, the answer is `access: "reading"`, and the paste box sends the
+ * folder link again, which carries on from there until the row is `uploaded` (or failed).
  */
 async function addSupabaseFolder(id: string, client: SupabaseStorageLike, link: string, target?: string) {
-  const read = await readSupabaseFolder(client, link);
+  const parsed = parseSupabaseFolderLink(link);
+  const key = parsed ? canonicalFolderUrl(parsed) : link;
+  const prior = target
+    ? (await db().select().from(catalogUploads).where(and(eq(catalogUploads.id, target), eq(catalogUploads.batchId, id))).limit(1))[0]
+    : (await db().select().from(catalogUploads).where(folderRowOf(id, key, link)).limit(1))[0];
+  const read = await readSupabaseFolder(client, link, { state: listingOf(prior, key) });
   const values: LinkRowValues = read.ok
     ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: read.mode } } }
-    : { kind: "url_list", name: "Supabase folder", sourceUrl: link, status: "failed", error: read.error, detected: { kind: "url_list", message: read.error, supabaseFolder: { url: link, mode: "filename" } } };
+    : read.reading
+      ? { kind: "url_list", name: read.title, sourceUrl: read.url, status: "pending", error: null, detected: { kind: "url_list", title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: "filename", listing: read.state } } }
+      : { kind: "url_list", name: "Supabase folder", sourceUrl: link, status: "failed", error: read.error, detected: { kind: "url_list", message: read.error, supabaseFolder: { url: link, mode: "filename" } } };
   const uploadId = await saveLinkRow(id, values, read.ok, async (tx) => {
     if (target) return linkRowFor(tx, id, "url_list", link, target);
-    const [row] = await tx.select().from(catalogUploads).where(and(eq(catalogUploads.batchId, id), eq(catalogUploads.kind, "url_list"), sql`${catalogUploads.detected}->'supabaseFolder'->>'url' = ${link}`)).limit(1).for("update");
+    const [row] = await tx.select().from(catalogUploads).where(folderRowOf(id, key, link)).limit(1).for("update");
     return row ?? null;
   });
-  return read.ok
-    ? { kind: "supabase_folder", access: "ok", summary: read.message, count: read.photos, uploadId, pill: `${read.photos.toLocaleString("en-US")} ${read.photos === 1 ? "photo" : "photos"}` }
-    : { kind: "supabase_folder", access: "no_access", summary: read.error, uploadId };
+  if (read.ok) return { kind: "supabase_folder", access: "ok", summary: read.message, count: read.photos, uploadId, pill: `${read.photos.toLocaleString("en-US")} ${read.photos === 1 ? "photo" : "photos"}` };
+  if (read.reading) return { kind: "supabase_folder", access: "reading", summary: read.message, count: read.photos, uploadId, pill: SUPABASE_READING_PILL, folder: read.url };
+  return { kind: "supabase_folder", access: "no_access", summary: read.error, uploadId };
+}
+/** The pill of a Supabase folder still being read. */
+export const SUPABASE_READING_PILL = "Reading folder";
+/** The batch's row of one Supabase folder link (stored canonical; a failed paste keeps the link as pasted). */
+function folderRowOf(id: string, key: string, link: string) {
+  return and(eq(catalogUploads.batchId, id), eq(catalogUploads.kind, "url_list"), sql`${catalogUploads.detected}->'supabaseFolder'->>'url' IN (${key}, ${link})`);
+}
+/** Where an unfinished listing of this folder got to, so the next request carries on; else a fresh listing. */
+function listingOf(row: CatalogUpload | undefined, key: string): SupabaseListState | undefined {
+  if (!row || row.status !== "pending") return undefined;
+  const folder = (row.detected as { supabaseFolder?: { url?: string; listing?: SupabaseListState } } | null)?.supabaseFolder;
+  return folder?.url === key && folder.listing ? folder.listing : undefined;
 }
 /**
  * The row a paste writes to (spec 14b F3): the row named by `PATCH /links/[uploadId]`; else, for image

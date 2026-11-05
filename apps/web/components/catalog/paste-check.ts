@@ -12,15 +12,18 @@ export interface PasteResult {
   pill?: string; notes?: string[];
   /** The other inputs one text added (several Supabase folder links, then the image links beside them). */
   others?: PasteResult[];
+  /** A Supabase folder still being read (`access: "reading"`): its link, sent again to carry on. */
+  folder?: string;
 }
 
-export interface PasteView { checking: boolean; results: PasteResult[]; error: string }
+/** `progress` holds the answers so far while a large Supabase folder is still being read. */
+export interface PasteView { checking: boolean; results: PasteResult[]; error: string; progress?: PasteResult[] }
 
-export const EMPTY_PASTE_VIEW: PasteView = { checking: false, results: [], error: "" };
+export const EMPTY_PASTE_VIEW: PasteView = { checking: false, results: [], error: "", progress: [] };
 
 export interface PasteCheckerOptions {
-  /** Sends one text to the server and returns its answers. */
-  save(value: string): Promise<PasteResult[]>;
+  /** Sends one text to the server and returns its answers; `progress` shows the answers so far of a long read. */
+  save(value: string, progress: (answers: PasteResult[]) => void): Promise<PasteResult[]>;
   onView(view: PasteView): void;
   /** True while any write is outstanding (the wizard waits for it before Continue goes ahead). */
   onBusy(busy: boolean): void;
@@ -46,17 +49,17 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
     queuedText = value;
     pending++;
     opts.onBusy(true);
-    show({ checking: true, error: "" });
+    show({ checking: true, error: "", progress: [] });
     chain = chain.then(async () => {
       try {
         if (turn !== latest) return; // replaced by a later edit before it was sent
-        const results = await opts.save(value);
+        const results = await opts.save(value, (progress) => { if (turn === latest) show({ progress }); });
         // A later edit or a forget() decides what counts as saved; an answer it replaced does not.
         if (turn === latest) savedText = value;
         opts.onSaved();
-        if (turn === latest) show({ checking: false, results });
+        if (turn === latest) show({ checking: false, results, progress: [] });
       } catch (err) {
-        if (turn === latest) show({ checking: false, error: err instanceof Error ? err.message : "Paste the link again." });
+        if (turn === latest) show({ checking: false, error: err instanceof Error ? err.message : "Paste the link again.", progress: [] });
       } finally {
         if (--pending === 0) opts.onBusy(false);
       }
@@ -72,10 +75,27 @@ export function createPasteChecker(opts: PasteCheckerOptions) {
     latest++;
     savedText = "";
     queuedText = "";
-    show({ checking: false, results: [], error: "" });
+    show({ checking: false, results: [], error: "", progress: [] });
   }
 
   return { check, forget, settled: () => chain, view: () => view };
+}
+
+/**
+ * The answers of one pasted text (the first answer and its `others`), with every Supabase folder that is still
+ * being read (`access: "reading"`) sent again by its link until it is read, failed or answered without a link.
+ * The server lists a large folder a slice per request and carries on where the last one stopped, so the
+ * folder is read over several short requests. `progress` gets the answers so far before each request.
+ */
+export async function readFoldersToEnd(first: PasteResult, send: (text: string) => Promise<PasteResult>, progress: (answers: PasteResult[]) => void): Promise<PasteResult[]> {
+  const answers = [first, ...(first.others ?? [])];
+  for (let i = 0; i < answers.length; i++) {
+    while (answers[i]!.access === "reading" && answers[i]!.folder) {
+      progress([...answers]);
+      answers[i] = await send(answers[i]!.folder!);
+    }
+  }
+  return answers;
 }
 
 const GOOGLE = /https?:\/\/(docs\.google\.com\/spreadsheets|drive\.google\.com\/.*folders)/i;

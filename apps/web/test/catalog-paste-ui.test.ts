@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { PasteStatus } from "../components/catalog/PasteBox";
-import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, type PasteResult, type PasteView } from "../components/catalog/paste-check";
+import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, readFoldersToEnd, type PasteResult, type PasteView } from "../components/catalog/paste-check";
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -45,7 +45,7 @@ describe("paste box waiting state (spec 14b F2)", () => {
     await h.tick();
     h.answer("https://example.com/test_brand/A_1.jpg");
     await h.checker.settled();
-    expect(h.checker.view()).toEqual({ checking: false, error: "", results: [{ kind: "url_list", access: "ok", summary: "readback of https://example.com/test_brand/A_1.jpg", pill: "1 image link" }] });
+    expect(h.checker.view()).toEqual({ checking: false, error: "", progress: [], results: [{ kind: "url_list", access: "ok", summary: "readback of https://example.com/test_brand/A_1.jpg", pill: "1 image link" }] });
     expect(markup(h.checker.view())).not.toContain("Checking your links...");
     expect(markup(h.checker.view())).toContain("1 image link");
     expect(h.busy).toEqual([true, false]);
@@ -95,6 +95,45 @@ describe("paste box waiting state (spec 14b F2)", () => {
     expect(html).toContain("Rows 6 and 7 would get the same name, TB-F.");
     expect(html).toContain("No access yet");
     expect(html).not.toContain("image links");
+  });
+});
+
+describe("a large Supabase folder read over several requests (R1 exit finding 1)", () => {
+  const FOLDER = "https://projref.supabase.co/storage/v1/object/public/softlines/vero-moda";
+  const reading = (n: number): PasteResult => ({ kind: "supabase_folder", access: "reading", summary: `Reading Supabase folder softlines/vero-moda: ${n} photos in ${n / 2} folders so far.`, count: n, pill: "Reading folder", folder: FOLDER });
+
+  it("sends a reading folder again until it is read, showing the answers so far, and keeps the answers beside it", async () => {
+    const sent: string[] = [];
+    const replies = [reading(1600), { kind: "supabase_folder", access: "ok", summary: "Supabase folder softlines/vero-moda: 2,039 photos in 477 folders, grouped by folder name.", pill: "2,039 photos" }];
+    const progress: PasteResult[][] = [];
+    const sheet: PasteResult = { kind: "google_sheet", access: "ok", summary: "Sheet" };
+    const answers = await readFoldersToEnd({ ...reading(800), others: [sheet] }, async (text) => { sent.push(text); return replies.shift()!; }, (a) => progress.push(a));
+    expect(sent).toEqual([FOLDER, FOLDER]);
+    expect(progress.map((a) => a.map((r) => r.count ?? r.summary))).toEqual([[800, "Sheet"], [1600, "Sheet"]]);
+    expect(answers.map((a) => [a.kind, a.access, a.pill])).toEqual([["supabase_folder", "ok", "2,039 photos"], ["google_sheet", "ok", undefined]]);
+  });
+
+  it("an answer that is not reading, or reading without a link, is not sent again", async () => {
+    const send = async () => { throw new Error("not sent"); };
+    expect(await readFoldersToEnd({ kind: "url_list", access: "ok", summary: "x" }, send, () => undefined)).toHaveLength(1);
+    expect(await readFoldersToEnd({ ...reading(2), folder: undefined }, send, () => undefined)).toHaveLength(1);
+  });
+
+  it("while reading, the paste box shows the waiting pill and the reading line; the checker passes the progress through", async () => {
+    const html = markup({ ...EMPTY_PASTE_VIEW, checking: true, progress: [reading(1600)] });
+    expect(html).toContain("Checking your links...");
+    expect(html).toContain("Reading folder");
+    expect(html).toContain("1600 photos in 800 folders so far.");
+    expect(html).not.toContain("No access yet");
+    const views: PasteView[] = [];
+    const checker = createPasteChecker({
+      async save(_value, progress) { progress([reading(400)]); return [{ kind: "supabase_folder", access: "ok", summary: "done", pill: "800 photos" }]; },
+      onView: (v) => views.push(v), onBusy: () => undefined, onSaved: () => undefined,
+    });
+    checker.check(FOLDER);
+    await checker.settled();
+    expect(views.some((v) => v.checking && v.progress?.[0]?.access === "reading")).toBe(true);
+    expect(checker.view()).toMatchObject({ checking: false, progress: [], results: [{ pill: "800 photos" }] });
   });
 });
 

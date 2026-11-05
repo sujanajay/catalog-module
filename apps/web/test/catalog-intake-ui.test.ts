@@ -2,7 +2,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { DID_NOT_FINISH, inputRows, InputListView, type ServerInput } from "../components/catalog/InputList";
+import { DID_NOT_FINISH, inputRows, InputListView, READING_FOLDER, type ServerInput } from "../components/catalog/InputList";
 import type { LocalUpload } from "../components/catalog/Uploader";
 import { LinkFailuresView, type LinkFailureRow } from "../components/catalog/LinkFailures";
 import { canRetryLinks } from "../lib/catalog/copy";
@@ -25,6 +25,13 @@ const render = (rows: ReturnType<typeof inputRows>) => renderToStaticMarkup(crea
 const none = new Set<string>();
 
 describe("input list (spec 14b F3)", () => {
+  it("a pending pasted-links row is a Supabase folder still being read, not a cut-off upload (R1 exit finding 1)", () => {
+    const rows = inputRows([server("SUPA", "pending", { kind: "url_list", name: "Supabase folder softlines/vero-moda", relativePath: null, sizeBytes: null })], [], none, vi.fn());
+    expect(rows[0]!.state).toBe(READING_FOLDER);
+    expect(render(rows)).not.toContain(DID_NOT_FINISH);
+    expect(render(rows)).toContain("Supabase folder softlines/vero-moda");
+  });
+
   it("shows a pending server row this session is not uploading as cut off, with Remove", () => {
     const removeServer = vi.fn();
     const rows = inputRows([server("CUT_1", "pending")], [], none, removeServer);
