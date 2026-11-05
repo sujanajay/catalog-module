@@ -41,4 +41,7 @@ routine is in `gcloud-login-after-reboot.md`.
    (the same config and substitutions as `deploy.sh`).
 4. When the images exist, run `infra/deploy.sh`; it skips the build for a commit whose images are already there.
 
+The catalog-upscale CPU gate in `deploy.sh` failed on slow Cloud Run hosts. The root cause and fix (pixel caps sized
+for 167 s/MP hosts, 18% headroom) are in #176.
+
 Evidence: `.runs/2026-11-05-r1-deploy-ca4ce17.md`.
