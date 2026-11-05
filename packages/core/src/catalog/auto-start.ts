@@ -64,17 +64,21 @@ export async function armAutoStart(db: Db, enqueue: typeof enqueueTask, batchId:
  * the batch is not a draft (it may have started a moment before). It takes the batch row lock that Start's
  * transaction takes, so Wait and an auto-start never interleave: either the start committed first (false here), or
  * the start sees autoStart off under its lock and does not start (startDraftBatch's auto-start guard).
+ * `stopped` is true only when this Wait turned auto-start off or cleared a countdown, read under that lock: a second
+ * Wait, or a Wait on a draft that never counted down, stops nothing (one operator touch per real decision, M1 D35).
  */
-export async function holdAutoStart(db: Db, batchId: string): Promise<boolean> {
+export async function holdAutoStart(db: Db, batchId: string): Promise<{ held: boolean; stopped: boolean }> {
   return db.transaction(async (tx) => {
-    const [row] = await tx.select({ status: catalogBatches.status }).from(catalogBatches).where(eq(catalogBatches.id, batchId)).for("update");
-    if (row?.status !== "draft") return false;
+    const [row] = await tx.select({ status: catalogBatches.status, options: catalogBatches.options, counts: catalogBatches.counts }).from(catalogBatches).where(eq(catalogBatches.id, batchId)).for("update");
+    if (row?.status !== "draft") return { held: false, stopped: false };
+    const stopped = row.options.autoStart === true || row.counts.autoStartAt != null;
+    if (!stopped) return { held: true, stopped: false };
     await tx.update(catalogBatches)
       .set({
         options: sql`${catalogBatches.options} || '{"autoStart": false}'::jsonb`,
         counts: mergeCounts({ autoStartAt: null }),
       })
       .where(eq(catalogBatches.id, batchId));
-    return true;
+    return { held: true, stopped: true };
   });
 }

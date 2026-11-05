@@ -29,6 +29,7 @@ import {
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import type { SkuMethod } from "../catalog/sku-mapping";
+import type { BatchDigest } from "../catalog/digest-types";
 import { CHANGE_ACTIONS, CHANGE_TYPE_STATUSES, COST_CLASSES } from "../learning/types";
 import type { SettingScope, SettingValue } from "../settings/registry";
 import type { SettingsSnapshotData } from "../settings/snapshot";
@@ -155,7 +156,11 @@ export const INCIDENT_SEVERITIES = ["warning", "error"] as const;
  * count against "no person" (a decision, a retry, Fix and continue, a cancel). The wizard's own path (create, add
  * inputs, Continue, review, Start) is not a touch.
  */
-export const TOUCH_ACTIONS = ["decision", "retry_photo", "replace_photo", "retry_collect", "retry_links", "fix_and_continue", "cancel", "add_sku_ids"] as const;
+/**
+ * M6-F3-R3 operator touches. `hold_start` (M1-S5, 0025): "Wait" on the start countdown is a person stepping in
+ * (manager decision 2026-11-05), so it counts against the zero-touch target.
+ */
+export const TOUCH_ACTIONS = ["decision", "retry_photo", "replace_photo", "retry_collect", "retry_links", "fix_and_continue", "cancel", "add_sku_ids", "hold_start"] as const;
 /** M6-S6 (M6-F3-R1) catalog_batch_outcomes.status: the batch status the outcome was recorded at. */
 export const BATCH_OUTCOME_STATUSES = ["done", "failed", "cancelled"] as const;
 
@@ -382,6 +387,11 @@ export const catalogBatches = pgTable(
     rulesetVersion: integer("ruleset_version"),
     /** M1-S6 (M1-F5-R2): the started batch this follow-up batch adds inputs to; null for every other batch. */
     parentBatchId: uuid("parent_batch_id"),
+    /**
+     * M1-S5 (M1-F4-R1, 0025): the batch digest, written by finalize from the same snapshot as the sheet, so the batch
+     * page reads one row, not the outputs. Null before the first finalize and on batches finished before M1-S5.
+     */
+    digest: jsonb("digest").$type<BatchDigest>(),
   },
   (t) => [
     index("catalog_batches_brand_slug_idx").on(t.brandSlug),

@@ -4,6 +4,7 @@
 // shape suffix (_rect/_square share the row), size-level keys (02's product_code rule), token
 // containment of a composite style+colour key inside file stems, and the match column with a
 // trailing _<n> stripped.
+import { maxOf } from "../../arrays";
 import { normalizeKey } from "../naming";
 import type { LinkStatus } from "../types";
 import { columnLetter, detectColumns, loadSheet, normalizeHeader, sheetDataRows, CANNOT_READ_IDENTIFIER } from "./links-sheet";
@@ -46,7 +47,7 @@ function rawKeys(header: string[], width: number): string[] {
 export async function readProductList(buf: Buffer, name: string, columns?: { identifier: number; ean?: number }): Promise<ProductListRow[]> {
   const { table, d, composite, identifierColumn, eanColumn, header } = await readList(buf, name, columns);
   if (!composite && identifierColumn < 0) throw new Error(CANNOT_READ_IDENTIFIER);
-  const width = Math.max(header.length, ...table.rows.map((r) => r.length));
+  const width = Math.max(header.length, maxOf(table.rows.map((r) => r.length)) ?? 0);
   const keys = rawKeys(header, width);
   const rows: ProductListRow[] = [];
   for (const { cells } of sheetDataRows(table, d.headerRow)) {

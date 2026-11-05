@@ -37,7 +37,7 @@ const read = async (id: string) => (await db.select().from(catalogBatches).where
 it("Wait during the auto-start's preview: the locked re-check sees it; the batch stays a held draft with no chunks", async () => {
   const b = await startableDraft();
   const at = (await armAutoStart(db, vi.fn(async () => "t"), b.id, 10, NOW))!;
-  hook.during = async () => { expect(await holdAutoStart(db, b.id)).toBe(true); };
+  hook.during = async () => { expect((await holdAutoStart(db, b.id)).held).toBe(true); };
   const enqueue = vi.fn(async () => "task");
   expect(await runAutoStart(db, { storage: {} as never, enqueue, now: () => new Date() }, { batchId: b.id, at })).toMatch(/^noop: Auto-start was turned off with Wait/);
   const after = await read(b.id);
