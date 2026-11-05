@@ -50,9 +50,8 @@ def request(url, token=None, data=None, content_type=None, timeout=TIMEOUT, limi
 # platform error (transient_reason): a 429 or 503 whose body is not the service's own JSON answer (the matting service
 # answers every error of its own as a JSON object, services/matting/app.py), a connection error before the request was
 # sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
-# any other status, the service's own error body, a read timeout (a slow candidate), a malformed answer, and the measured
-# /matte and /upscale calls (a front-end 503 there may be an instance that crashed under the load being measured, which
-# is exactly what the gate must catch; their only retry stays the 429 queue retry of the determinism round).
+# any other status, the service's own error body, a read timeout (a slow candidate) and a malformed answer. The measured
+# /matte and /upscale calls have their own, narrower rule (PLATFORM_RETRIES below).
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_DELAYS_S = (5, 10)
 TRANSIENT_MAX_S = 90
@@ -100,6 +99,89 @@ def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.mo
                 raise
             sleep(delay)
     raise AssertionError("unreachable")
+
+
+# Measured calls and platform rejections (2026-11-05, catalog-check-upscale-gpu-7g6tv, .runs/2026-11-05-gpu-determinism.md):
+# one x4 determinism /upscale call got a 503 from Cloud Run's front end in 0.5 ms (0.1 s at the probe), routed to an idle
+# GPU instance at the moment scale-down retired it; the container never saw the call, and the 11 other answers were
+# byte-identical across 2 instances. Such a rejection says nothing about the candidate's output or speed, so a measured
+# /matte or /upscale call is tried again, up to PLATFORM_RETRIES times, PLATFORM_RETRY_DELAYS_S apart, only after a
+# platform rejection: an HTTP 429 or 503 whose body is not the service's own JSON answer (transient_reason) that came back
+# within PLATFORM_REJECTION_MAX_S (a call turned away at the front door; an instance that crashes during inference fails
+# the call after its run time, and that stays a failure). Each retry is printed and recorded; only the attempt a container
+# answered is timed. Never retried: the service's own error (a JSON body), any other status, a transport failure or
+# timeout, a wrong answer. A round (one burst of calls at once) fails when Cloud Run turned away more than
+# PLATFORM_REJECTIONS_PER_ROUND of its attempts, so a real capacity problem still fails the gate; the gate runs have seen
+# at most 1 (7g6tv) and before that 0 in 8 GPU gate runs.
+PLATFORM_RETRIES = 2
+PLATFORM_RETRY_DELAYS_S = (5, 10)
+PLATFORM_REJECTION_MAX_S = 2.0
+PLATFORM_REJECTIONS_PER_ROUND = 2
+
+
+def platform_rejection(error, elapsed):
+    """Why a measured call's `error` is Cloud Run turning the call away before any container took it, or None."""
+    if not isinstance(error, urllib.error.HTTPError) or elapsed > PLATFORM_REJECTION_MAX_S:
+        return None
+    return transient_reason(error)
+
+
+def served_call(call, label, sleep=time.sleep, log=None, busy_retries=0, busy_sleep_s=0):
+    """call() (one attempt, an answer with .status and .rejection) until a container answered: a 429 is tried again up to
+    `busy_retries` times, `busy_sleep_s` apart (the determinism round's queue wait), and a platform rejection up to
+    PLATFORM_RETRIES times. Returns the last attempt, with .rejections set to the platform rejections it took (the last
+    attempt included when it was one too)."""
+    rejections = busy = 0
+    while True:
+        answer = call()
+        if answer.status == 429 and busy < busy_retries:
+            busy += 1
+            sleep(busy_sleep_s)
+            continue
+        if answer.rejection:
+            rejections += 1
+            last = rejections > PLATFORM_RETRIES
+            delay = None if last else PLATFORM_RETRY_DELAYS_S[min(rejections, len(PLATFORM_RETRY_DELAYS_S)) - 1]
+            if log is not None:
+                log.append({"call": label, "attempt": rejections, "of": PLATFORM_RETRIES + 1, "status": answer.status,
+                            "reason": answer.rejection, "nextInS": delay})
+            print(f"retry: {label}: {answer.rejection} (attempt {rejections} of {PLATFORM_RETRIES + 1}); "
+                  + ("giving up" if last else f"trying again in {delay} s"), flush=True)
+            if not last:
+                sleep(delay)
+                continue
+        answer.rejections = rejections
+        return answer
+
+
+def non200_text(answers):
+    """'N non-200: <why>' for the failed answers (.status, .rejection) of one row, so a failure always names its reason."""
+    kinds = {}
+    for answer in answers:
+        if answer.status == 200:
+            continue
+        if answer.rejection:
+            kind = f"platform {answer.status} after {PLATFORM_RETRIES} retries"
+        elif answer.status == 0:
+            kind = "no answer (transport failure or timeout)"
+        elif answer.status == -1:
+            kind = "not an image of the expected type and size"
+        else:
+            kind = f"HTTP {answer.status}"
+        kinds[kind] = kinds.get(kind, 0) + 1
+    total = sum(kinds.values())
+    if len(kinds) == 1:
+        return f"{total} non-200: {next(iter(kinds))}"
+    return f"{total} non-200: " + ", ".join(f"{count} x {kind}" for kind, count in kinds.items())
+
+
+def round_rejections(label, answers, problems):
+    """Adds a problem when Cloud Run turned away more than PLATFORM_REJECTIONS_PER_ROUND attempts of one round."""
+    rejected = sum(answer.rejections for answer in answers)
+    if rejected > PLATFORM_REJECTIONS_PER_ROUND:
+        problems.append(f"{label}: Cloud Run turned away {rejected} attempts in one round of {len(answers)} calls "
+                        f"(at most {PLATFORM_REJECTIONS_PER_ROUND}); a capacity problem, not a passing rejection")
+    return rejected
 
 
 def identity_token(audience):
@@ -196,17 +278,26 @@ def probe_image():
     return encoded.getvalue()
 
 
+class MatteAnswer:
+    """One /matte attempt: status (0 for a transport failure or timeout), client ms, and the platform rejection reason
+    (platform_rejection) when Cloud Run turned it away. rejections: set by served_call."""
+
+    def __init__(self, status, ms, rejection=None):
+        self.status, self.ms, self.rejection, self.rejections = status, ms, rejection, 0
+
+
 def timed_matte(url, token, model, data):
-    """One /matte call: (status, client ms). A transport failure or timeout counts as status 0."""
+    """One /matte attempt as a MatteAnswer."""
     started = time.perf_counter()
+    rejection = None
     try:
         upload(url + "/matte?model=" + urllib.parse.quote(model), token, data, "probe.png", "image/png")
         status = 200
     except urllib.error.HTTPError as error:
-        status = error.code
+        status, rejection = error.code, platform_rejection(error, time.perf_counter() - started)
     except Exception:  # noqa: BLE001 - any failure is a non-200 for the probe; no detail is printed
         status = 0
-    return status, int((time.perf_counter() - started) * 1000)
+    return MatteAnswer(status, int((time.perf_counter() - started) * 1000), rejection)
 
 
 def percentile(values, share):
@@ -220,7 +311,7 @@ def percentile(values, share):
 class Probe:
     def __init__(self, url, token, models, sleep=time.sleep):
         self.url, self.token, self.data, self.sleep = url, token, probe_image(), sleep
-        self.models = {model: {"ms": [], "statuses": [], "peakMiB": None} for model in models}
+        self.models = {model: {"ms": [], "answers": [], "platformRetries": 0, "peakMiB": None} for model in models}
         self.instances = {}
         self.steps = []
         self.problems = []
@@ -255,12 +346,15 @@ class Probe:
         self.steps.append({"step": step, "model": model, "instance": instance, "usedMiB": used, "residentModels": health.get("residentModels")})
 
     def calls(self, model, count, measured):
+        """`count` calls at once; a platform rejection is tried again (served_call) and only the answered attempt is timed."""
         with ThreadPoolExecutor(max_workers=count) as pool:
-            results = list(pool.map(lambda _: timed_matte(self.url, self.token, model, self.data), range(count)))
+            results = list(pool.map(lambda _: served_call(lambda: timed_matte(self.url, self.token, model, self.data), f"{model} /matte",
+                                                          self.sleep, self.retries), range(count)))
         entry = self.models[model]
-        entry["statuses"].extend(status for status, _ in results)
+        entry["answers"].extend(results)
+        entry["platformRetries"] += round_rejections(model, results, self.problems)
         if measured:
-            entry["ms"].extend(ms for status, ms in results if status == 200)
+            entry["ms"].extend(a.ms for a in results if a.status == 200)
 
     def run(self, concurrency, rounds):
         self.health("baseline")
@@ -287,14 +381,24 @@ class Probe:
 
     def rows(self):
         return [{"model": model, "peakVramUsedMiB": entry["peakMiB"], "p50Ms": percentile(entry["ms"], 0.5), "p95Ms": percentile(entry["ms"], 0.95),
-                 "non200": sum(1 for status in entry["statuses"] if status != 200), "calls": len(entry["statuses"]), "loads": self.loads(model)}
+                 "non200": sum(1 for a in entry["answers"] if a.status != 200), "non200Text": non200_text(entry["answers"]),
+                 "calls": len(entry["answers"]), "platformRetries": entry["platformRetries"], "loads": self.loads(model)}
                 for model, entry in self.models.items()]
 
     def failures(self, rows):
-        """Any non-200, any unreadable health, and a reload when the shape keeps every probed model resident. With fewer
-        resident sessions than models the switching order must reload, so loads are reported, not failed."""
+        """Any non-200 (with its reason), any unreadable health, a round with too many platform rejections, and a reload
+        when the shape keeps every probed model resident. With fewer resident sessions than models the switching order
+        must reload, so loads are reported, not failed."""
         reloads = [f"{r['model']}: {r['loads']} loads on one instance" for r in rows if r["loads"] > 1] if self.holds_all() else []
-        return [f"{r['model']}: {r['non200']} non-200" for r in rows if r["non200"]] + reloads + list(dict.fromkeys(self.problems))
+        return [f"{r['model']}: {r['non200Text']}" for r in rows if r["non200"]] + reloads + list(dict.fromkeys(self.problems))
+
+
+def print_platform_retries(rows):
+    """One line per table row whose calls Cloud Run turned away and the probe tried again (none on a clean run)."""
+    for r in rows:
+        if r["platformRetries"]:
+            print(f"platform retries {r['model']}{' ' + r['size'] if 'size' in r else ''}: {r['platformRetries']} in {r['calls']} calls "
+                  f"(not timed; at most {PLATFORM_REJECTIONS_PER_ROUND} per round)", flush=True)
 
 
 def markdown(rows):
@@ -354,6 +458,7 @@ def probe_main(argv, token_for=None, report_writer=None, now=None, sleep=time.sl
               "concurrency": args.concurrency, "rounds": args.rounds, "rows": rows, "reloadsChecked": probe.holds_all(),
               "instances": probe.instances, "steps": probe.steps, "retries": probe.retries, "passed": not failures, "failures": failures}
     print(markdown(rows), flush=True)
+    print_platform_retries(rows)
     location = (report_writer or write_report)(run, report)
     print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)
     return 1 if failures else 0
@@ -374,7 +479,8 @@ def probe_main(argv, token_for=None, report_writer=None, now=None, sleep=time.sl
 #                           (concurrency 1), then GET /health is timed until 200. It counts only when /health came from
 #                           an instance that started while the probe waited (its uptimeS is below the wait), up to 3
 #                           tries; fails when not measured or above s (UPSCALE_COLD_START_S in infra/lib/shape.sh).
-#   --determinism-calls n   per model, n calls of the same 800x1200 image at once (429 retried), each with its sha256
+#   --determinism-calls n   per model, n calls of the same 800x1200 image at once (429 retried; like every measured
+#                           call, a platform rejection too, see PLATFORM_RETRIES), each with its sha256
 #                           and instance id; repeated up to 3 times until at least 2 instances answered. Fails when
 #                           fewer than 2 instances answered, on any non-200, on two outputs from one instance, or on
 #                           outputs from two instances that differ visibly.
@@ -457,9 +563,10 @@ class UpscaleAnswer:
     not a JPEG of exactly `scale` times `size`. instance: the X-Instance-Id header (None from a revision before it).
     server_seconds: the service's own inference time (the X-Upscale-Ms header; None when absent or unreadable)."""
 
-    def __init__(self, status, seconds, digest=None, instance=None, body=None, server_seconds=None):
+    def __init__(self, status, seconds, digest=None, instance=None, body=None, server_seconds=None, rejection=None):
         self.status, self.seconds, self.digest, self.instance, self.body = status, seconds, digest, instance, body
-        self.server_seconds = server_seconds
+        # rejection: why Cloud Run turned this attempt away (platform_rejection), else None; rejections: set by served_call.
+        self.server_seconds, self.rejection, self.rejections = server_seconds, rejection, 0
 
     def __iter__(self):
         # (status, seconds, digest), as callers before the instance id unpacked it.
@@ -480,7 +587,7 @@ def server_seconds(headers):
 def timed_upscale(url, token, model, data, size, timeout, scale=2):
     """One /upscale call as an UpscaleAnswer."""
     started = time.perf_counter()
-    digest = instance = kept = served = None
+    digest = instance = kept = served = rejection = None
     try:
         headers, body = request(f"{url}/upscale?model={urllib.parse.quote(model)}&scale={scale}", token, data, "image/jpeg", timeout, UPSCALE_RESPONSE_LIMIT)
         try:
@@ -492,20 +599,17 @@ def timed_upscale(url, token, model, data, size, timeout, scale=2):
         status, digest, kept = (200, hashlib.sha256(body).hexdigest(), body) if ok else (-1, None, None)
         served = server_seconds(headers) if ok else None
     except urllib.error.HTTPError as error:
-        status = error.code
+        status, rejection = error.code, platform_rejection(error, time.perf_counter() - started)
     except Exception:  # noqa: BLE001 - any failure is a non-200 for the probe; no detail is printed
         status = 0
-    return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept, served)
+    return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept, served, rejection)
 
 
-def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep):
-    """timed_upscale, retrying a 429 (every instance busy) BUSY_RETRIES times, BUSY_RETRY_S apart."""
-    for _ in range(BUSY_RETRIES):
-        answer = timed_upscale(url, token, model, data, size, timeout, scale)
-        if answer.status != 429:
-            return answer
-        sleep(BUSY_RETRY_S)
-    return timed_upscale(url, token, model, data, size, timeout, scale)
+def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep, log=None, busy_retries=BUSY_RETRIES):
+    """timed_upscale until a container answered (served_call): a 429 (every instance busy) is tried again `busy_retries`
+    times, BUSY_RETRY_S apart (the determinism round), and a platform rejection PLATFORM_RETRIES times."""
+    return served_call(lambda: timed_upscale(url, token, model, data, size, timeout, scale), f"{model} {size[0]}x{size[1]} /upscale",
+                       sleep, log, busy_retries, BUSY_RETRY_S)
 
 
 # pixel_difference compares bands of about this many pixels at a time, so its temporary arrays stay about 3 MB each at
@@ -636,7 +740,7 @@ class UpscaleProbe:
         self.scale = UPSCALE_PROBE_MODELS.get(model, 2)
         # Per size: the bodies of its distinct outputs (sha256 -> bytes) until it is judged, then its judgement. Only the
         # size being probed holds bodies, so at most one input's distinct outputs are in memory at once.
-        self.sizes = {size: {"data": upscale_image(*size), "s": [], "answers": [], "bodies": {}, "judged": None} for size in sizes}
+        self.sizes = {size: {"data": upscale_image(*size), "s": [], "answers": [], "bodies": {}, "judged": None, "platformRetries": 0} for size in sizes}
         self.service = {}
         self.steps = []
         self.problems = []
@@ -671,8 +775,10 @@ class UpscaleProbe:
         entry = self.sizes[size]
         token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
-            results = list(pool.map(lambda _: timed_upscale(self.url, token, self.model, entry["data"], size, self.timeout, self.scale), range(count)))
+            results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, entry["data"], size, self.timeout, self.scale, self.sleep,
+                                                                   self.retries, busy_retries=0), range(count)))
         entry["answers"].extend(keep_bodies(results, entry["bodies"]))
+        entry["platformRetries"] += round_rejections(f"{size[0]}x{size[1]} round", results, self.problems)
         if measured:
             entry["s"].extend(a.seconds for a in results if a.status == 200)
             self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
@@ -699,7 +805,7 @@ class UpscaleProbe:
         DETERMINISM_ATTEMPTS rounds, or more while fewer than `seconds_budget` seconds passed, up to
         DETERMINISM_MAX_ROUNDS). Every call keeps its sha256 and instance id."""
         data, label = upscale_image(*size), f"{self.model} {size[0]}x{size[1]} determinism"
-        answers, calls, bodies = [], [], {}
+        answers, calls, bodies, capacity = [], [], {}, []
         began = clock()
         for attempt in range(1, DETERMINISM_MAX_ROUNDS + 1):
             if attempt > DETERMINISM_ATTEMPTS and clock() - began >= seconds_budget:
@@ -707,22 +813,24 @@ class UpscaleProbe:
                 break
             token = self.token
             with ThreadPoolExecutor(max_workers=count) as pool:
-                results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep), range(count)))
+                results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep,
+                                                                       self.retries), range(count)))
+            round_rejections(f"{label} round {attempt}", results, capacity)
             answers += keep_bodies(results, bodies)
             self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
             calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance,
-                       "sha256": a.digest} for a in results]
+                       "sha256": a.digest, "platformRetries": a.rejections} for a in results]
             if len({a.instance for a in answers if a.status == 200 and a.instance}) >= 2:
                 break
         summary, failures = judge_outputs(label, answers, bodies)
         bodies.clear()
-        non200 = sum(1 for a in answers if a.status != 200)
-        if non200:
-            failures.insert(0, f"{label}: {non200} non-200")
+        if any(a.status != 200 for a in answers):
+            failures.insert(0, f"{label}: {non200_text(answers)}")
+        failures += list(dict.fromkeys(capacity))
         if summary["instances"] < 2:
             failures.append(f"{label}: {summary['instances']} instance(s) answered in {attempt} rounds of {count} calls; at least 2 are needed")
         self.determinism = {"model": self.model, "size": f"{size[0]}x{size[1]}", "callsPerRound": count, "rounds": attempt, "calls": calls,
-                            **summary, "passed": not failures, "failures": failures}
+                            "platformRetries": sum(a.rejections for a in answers), **summary, "passed": not failures, "failures": failures}
         return self.determinism
 
     def rows(self, concurrency):
@@ -734,15 +842,16 @@ class UpscaleProbe:
             out.append({"model": self.model, "scale": self.scale, "size": f"{width}x{height}", "vcpu": self.service.get("vcpu"), "threads": self.service.get("threads"),
                         "tile": self.service.get("tile"), "concurrency": concurrency, "p50S": seconds(percentile(entry["s"], 0.5)),
                         "p95S": seconds(percentile(entry["s"], 0.95)), "maxS": seconds(max(entry["s"], default=None)),
-                        "non200": sum(1 for status in statuses if status != 200), "calls": len(statuses),
+                        "non200": sum(1 for status in statuses if status != 200), "non200Text": non200_text(entry["answers"]), "calls": len(statuses),
+                        "platformRetries": entry["platformRetries"],
                         "outputSha256": digests[0] if len(digests) == 1 else None, "distinctOutputs": len(digests),
                         "instances": summary["instances"], "outputs": summary["outputs"], "difference": summary["worst"], "outputFailures": failures,
-                        "callLog": [{"status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance, "sha256": a.digest}
-                                    for a in entry["answers"]]})
+                        "callLog": [{"status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance, "sha256": a.digest,
+                                     "platformRetries": a.rejections} for a in entry["answers"]]})
         return out
 
     def failures(self, rows):
-        return ([f"{r['model']} {r['size']}: {r['non200']} non-200" for r in rows if r["non200"]]
+        return ([f"{r['model']} {r['size']}: {r['non200Text']}" for r in rows if r["non200"]]
                 + [failure for r in rows for failure in r["outputFailures"]]
                 + (self.determinism["failures"] if self.determinism else [])
                 + [f"{self.model}: {problem}" for problem in dict.fromkeys(self.problems)])
@@ -865,8 +974,12 @@ def determinism_line(entry):
     worst = entry["worst"]
     difference = "byte-identical" if not worst else (f"max {worst['maxAbs']}/255, mean {worst['meanAbs']}, {worst['sharePixels'] * 100:.3f}% of pixels, "
                                                        f"PSNR {worst['psnrDb']} dB")
-    return (f"determinism {entry['model']} {entry['size']}: {len(entry['calls'])} calls, {entry['instances']} instances, "
-            f"{entry['distinctOutputs']} distinct outputs ({difference}): {'passed' if entry['passed'] else 'FAILED'}")
+    # A FAILED line always names why (the failures without their "<model> <size> determinism: " label).
+    prefix = f"{entry['model']} {entry['size']} determinism: "
+    reasons = "; ".join(f[len(prefix):] if f.startswith(prefix) else f for f in entry["failures"])
+    return (f"determinism {entry['model']} {entry['size']}: {len(entry['calls'])} calls, {entry.get('platformRetries', 0)} platform retries, "
+            f"{entry['instances']} instances, {entry['distinctOutputs']} distinct outputs ({difference}): "
+            + ("passed" if entry["passed"] else f"FAILED ({reasons})"))
 
 
 def parse_upscale_args(argv):
@@ -936,6 +1049,7 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
               "coldStart": cold_start, "capTimeout": cap_timeout, "retries": retries, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
               "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
+    print_platform_retries(rows)
     for entry in determinism:
         print(determinism_line(entry), flush=True)
     for entry in (cap_timeout or {}).get("models", []):
