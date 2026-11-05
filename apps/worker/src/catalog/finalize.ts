@@ -137,7 +137,10 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       return {...built,digest};
     };
     const initial=await deps.db.transaction(tx=>build(tx as unknown as CatalogDeps["db"]),{isolationLevel:"repeatable read"});
-    const snapshotOf=(built:typeof initial)=>JSON.stringify({...built,report:{...built.report,exports:undefined,recheck:undefined}});
+    // M1-S5 review P2-3: the digest's exceptions and notes rows come from the outputs and improvements the report and the
+    // digest numbers already cover, so only the numbers are compared; stringifying up to 225k rows twice (once under the
+    // batch row lock) added memory and time and caught nothing more.
+    const snapshotOf=(built:typeof initial)=>JSON.stringify({...built,digest:built.digest.digest,report:{...built.report,exports:undefined,recheck:undefined}});
     const snapshot=snapshotOf(initial),snapshotHash=createHash("sha256").update(snapshot).digest("hex");
     let resume:RecheckProgress|undefined;
     if(state) {

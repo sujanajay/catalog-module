@@ -5,6 +5,7 @@
 // BatchOptions.sheetColumns and 02's fillProductListWorkbook); row numbers in sentences are the
 // spreadsheet's own 1-based numbers.
 import ExcelJS from "exceljs";
+import { maxOf } from "../../arrays";
 import { parseCsv } from "../../csv";
 import { normalizeKey } from "../naming";
 import type { BatchOptions, UploadKind } from "../types";
@@ -166,7 +167,7 @@ const isText = (c: string) => c !== "" && !/^[\d.,\s-]+$/.test(c) && !URL_RE.tes
 /** 0-based index of the first row where at least half the cells are text and two match a known heading, or null. */
 function headerIndex(table: SheetTable): number | null {
   const all = [table.header, ...table.rows];
-  const width = Math.max(0, ...all.map((r) => r.length));
+  const width = maxOf(all.map((r) => r.length)) ?? 0;
   for (let i = 0; i < Math.min(all.length, HEADER_SCAN_ROWS); i++) {
     const row = all[i]!;
     const text = row.filter(isText).length;
@@ -186,7 +187,7 @@ function headerIndex(table: SheetTable): number | null {
  */
 export function detectColumns(table: SheetTable): ColumnDetection {
   const all = [table.header, ...table.rows];
-  const width = Math.max(0, ...all.map((r) => r.length));
+  const width = maxOf(all.map((r) => r.length)) ?? 0;
   const found = headerIndex(table);
   const h = found ?? Math.max(0, all.findIndex((r) => r.some((c) => c !== "")));
   const headerRow = h + 1;

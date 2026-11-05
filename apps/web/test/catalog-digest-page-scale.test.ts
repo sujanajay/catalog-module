@@ -10,6 +10,7 @@ import { createDbFromPglite } from "@catalog/core/db/testing";
 import { runMigrations } from "@catalog/core/db/migrate";
 import { catalogBatches } from "@catalog/core/db/schema";
 import { seedLargeBatch } from "@catalog/core/catalog/pipeline/large-batch-fixture";
+import { buildReport } from "@catalog/core/catalog/pipeline/report";
 import { batchLinks } from "@catalog/core/catalog/follow-up";
 import type { BatchDigest } from "@catalog/core/catalog/digest-types";
 import type { Db } from "../lib/db";
@@ -56,4 +57,23 @@ it(`shows the digest of a ${PRODUCTS.toLocaleString("en")}-product batch from it
   expect(await batchExportUrl(batchId, "exceptions", db, { signedUrl, downloadBuffer: read })).toBe("https://signed/exceptions-v1.csv");
   expect(await batchExportUrl(batchId, "notes", db, { signedUrl, downloadBuffer: read })).toBe("https://signed/delivered-with-a-note-v1.csv");
   expect(read).not.toHaveBeenCalled();
+}, 300_000);
+
+// M1-S5 review 2 P2-2: the Details tab still reads the report and three output queries. It is timed here on the same
+// batch with the report this batch's finalize would write (built from the seeded rows).
+it(`opens the Details tab of a ${PRODUCTS.toLocaleString("en")}-product batch within 2 s`, async () => {
+  const exports = { xlsx: "gs://private/links-v1.xlsx", csv: "gs://private/links-v1.csv", report: "gs://private/report-v1.json", filledProductList: null, exportsMatch: true };
+  const { report } = await buildReport(db as never, batchId, { recheck: { ok: PRODUCTS * PHOTOS, total: PRODUCTS * PHOTOS, failures: [] }, exports });
+  const stored = Buffer.from(JSON.stringify(report));
+  const read = vi.fn(async (uri: string) => {
+    if (uri !== "gs://private/report-v1.json") throw new Error(`the Details tab read ${uri}`);
+    return { buf: stored };
+  });
+  const t = performance.now();
+  const data = await batchDetails(batchId, db, read as never, { sheet: "unless-digest", details: true });
+  const ms = performance.now() - t;
+  console.log(`details tab reads: ${Math.round(ms)} ms, report ${(stored.length / 1e6).toFixed(1)} MB`);
+  expect(ms).toBeLessThan(2000);
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(data).toMatchObject({ failures: [], recheckFailures: [], sheet: { rows: [] } });
 }, 300_000);

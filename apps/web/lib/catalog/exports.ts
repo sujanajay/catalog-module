@@ -10,6 +10,7 @@ import { HttpError } from "../errors";
 import { getBrand } from "./brands";
 import { channel } from "@catalog/core/catalog/channels";
 import { readSheetTable } from "@catalog/core/catalog/ingest/links-sheet";
+import { firstSheetOnly } from "@catalog/core/first-sheet";
 import { batchSheetStatus, notRefreshedChannels as readNotRefreshedChannels } from "@catalog/core/catalog/pipeline/report";
 import { withoutModelNames } from "./redact";
 import { STYLI_SKIP_NOTE } from "@catalog/core/catalog/evals/completeness";
@@ -89,7 +90,8 @@ export async function liveSheet(productIds: string[], channels: ChannelId[], con
 }
 
 async function savedSheet(uri: string, read: typeof downloadBuffer): Promise<SheetSpec> {
-  const table = await readSheetTable((await read(uri)).buf, "links.xlsx");
+  // The Links sheet only: the Exceptions and "Delivered with a note" sheets after it are not parsed (review P2-1).
+  const table = await readSheetTable(await firstSheetOnly((await read(uri)).buf), "links.xlsx");
   const columns = table.header;
   const imageHeaders = table.rows[0] ?? [];
   const channels = CHANNEL_IDS.filter(id => columns.includes(channel(id).label));
