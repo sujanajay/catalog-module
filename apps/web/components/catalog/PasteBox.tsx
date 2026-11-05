@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { batchUrl, wizardApi } from "./wizard-client";
-import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, type PasteResult, type PasteView } from "./paste-check";
+import { createPasteChecker, EMPTY_PASTE_VIEW, pasteEntries, readFoldersToEnd, type PasteResult, type PasteView } from "./paste-check";
 
 /** The pill shown while the readback runs (spec 14b F2). */
 export const PASTE_WAITING = "Checking your links...";
@@ -12,17 +12,24 @@ export function pastePlaceholder(supabase: boolean): string {
 }
 
 function pillOf(r: PasteResult): string {
+  if (r.access === "reading") return r.pill ?? "Reading folder";
+  if (r.access === "removed") return "Removed";
+  if (r.access === "paused") return r.pill ?? "Paused";
   if (r.access !== "ok") return "No access yet";
   if (r.kind === "url_list") return r.pill ?? `${r.count ?? 0} image links`;
   if (r.pill) return r.pill;
   return "Access confirmed";
 }
 
-/** What the paste box says under the field: the waiting pill, or each answer with its pill, line and notes. */
+/**
+ * What the paste box says under the field: the waiting pill (with the answers so far while a large Supabase
+ * folder is still being read), or each answer with its pill, line and notes.
+ */
 export function PasteStatus({ view }: { view: PasteView }) {
+  const answers = (results: PasteResult[]) => results.map((r, i) => <div key={i}><p><span className={`pill ${r.access === "ok" ? "ok" : r.access === "reading" ? "" : "warn"}`}>{pillOf(r)}</span> {r.summary}</p>{(r.notes ?? []).map((note) => <p key={note} className="note">{note}</p>)}</div>);
   return <>
-    {view.checking ? <p><span className="pill">{PASTE_WAITING}</span></p>
-      : view.results.length ? view.results.map((r, i) => <div key={i}><p><span className={`pill ${r.access === "ok" ? "ok" : "warn"}`}>{pillOf(r)}</span> {r.summary}</p>{(r.notes ?? []).map((note) => <p key={note} className="note">{note}</p>)}</div>)
+    {view.checking ? <><p><span className="pill">{PASTE_WAITING}</span></p>{answers(view.progress ?? [])}</>
+      : view.results.length ? answers(view.results)
       : <p className="help">We check access as soon as you paste.</p>}
     {view.error ? <p role="alert">{view.error}</p> : null}
   </>;
@@ -40,12 +47,15 @@ export default function PasteBox({ ensureBatch, onBusy, onAdded, removed = 0, su
   props.current = { ensureBatch, onBusy, onAdded, supabase };
   const checker = useRef<ReturnType<typeof createPasteChecker> | null>(null);
   checker.current ??= createPasteChecker({
-    async save(value) {
+    async save(value, progress, cancelled) {
       const id = await props.current.ensureBatch();
+      const send = (text: string) => wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text });
+      const resend = (folder: string) => wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text: folder, continue: true });
       const got: PasteResult[] = [];
       for (const entry of pasteEntries(value, props.current.supabase)) {
-        const answer = await wizardApi<PasteResult>(batchUrl(id, "/links"), "POST", { text: entry });
-        got.push(answer, ...(answer.others ?? []));
+        if (cancelled()) break; // removed or replaced: the rest of this text is not sent
+        // A large Supabase folder answers "reading" and is sent again until it is read (R1 exit finding 1).
+        got.push(...await readFoldersToEnd(await send(entry), resend, (answers) => progress([...got, ...answers]), cancelled));
       }
       return got;
     },

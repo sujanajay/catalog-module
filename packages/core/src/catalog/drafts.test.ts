@@ -4,7 +4,7 @@ import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogUploads, DEFAULT_BATCH_OPTIONS, EMPTY_BATCH_COUNTS } from "../db/schema";
 import type { BatchCounts } from "./types";
-import { DRAFT_IDLE_MS, handOffIdleDrafts, logOrphanCount, ORPHAN_AGE_MS, orphanDrafts, rearmLostCountdowns, resendGivenUpIntake, SWEEP_MOVES_MAX } from "./drafts";
+import { DRAFT_IDLE_MS, handOffIdleDrafts, logOrphanCount, ORPHAN_AGE_MS, orphanDrafts, orphanReason, rearmLostCountdowns, resendGivenUpIntake, SWEEP_MOVES_MAX } from "./drafts";
 import { INGEST_STOPPED_TEXT } from "./ingest/index";
 import { INGEST_ROUTE } from "./ingest/hand-off";
 import { AUTO_START_ROUTE } from "./auto-start";
@@ -197,5 +197,19 @@ describe("orphanDrafts and the daily count (F5-R5)", () => {
     expect(await logOrphanCount(db, new Date("2026-11-06T00:04:00.000Z"))).toBe(4);
     expect(await logOrphanCount(db, new Date("2026-11-06T00:14:00.000Z"))).toBeNull();
     expect(await logOrphanCount(db, NOW)).toBeNull();
+  });
+});
+
+describe("Ops words for a draft stuck reading a Supabase folder (R1 review P2-2)", () => {
+  it("names the folder, not a file upload; a file still uploading is named first", () => {
+    const d = { channels: [], options: DEFAULT_BATCH_OPTIONS, counts: EMPTY_BATCH_COUNTS };
+    expect(orphanReason(d, { pending: 0, readingFolders: 1, webOnly: false })).toBe("A Supabase folder was not finished reading. Open the batch and paste the folder link again.");
+    expect(orphanReason(d, { pending: 2, readingFolders: 1, webOnly: false })).toBe("2 files did not finish uploading.");
+  });
+
+  it("counts a reading folder apart from file uploads, and the idle sweep still leaves that draft alone", async () => {
+    const reading = await draft({ createdMs: ORPHAN_AGE_MS + 60 * 60_000, idleMs: DRAFT_IDLE_MS + 60_000, uploads: [{ status: "uploaded" }, { status: "pending", kind: "url_list" }] });
+    expect((await orphanDrafts(db, NOW)).find((o) => o.id === reading.id)?.reason).toBe("A Supabase folder was not finished reading. Open the batch and paste the folder link again.");
+    expect(await handOffIdleDrafts(db, vi.fn(async () => "t"), NOW)).not.toContain(reading.id);
   });
 });
