@@ -940,7 +940,9 @@ export const catalogUpscalerHealth = pgTable(
     lastProbe: text("last_probe"),
     lastProbeAt: tsNull("last_probe_at"),
     lastSource: text("last_source"),
-    /** An upscaler id of the latest observation, for the sweep's /health probe when no photo waits. */
+    /** The request start of the newest symptom: what a proof that ends one outage hands on when a newer symptom exists. */
+    lastSymptomAt: tsNull("last_symptom_at"),
+    /** The upscaler id of the latest observation (for logs and Ops). */
     lastUpscaler: text("last_upscaler"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

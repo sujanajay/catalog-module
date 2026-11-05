@@ -1,5 +1,5 @@
 {
-  "id": "6c7d8aa5-0cbe-419e-bd03-ecd2e737e6c7",
+  "id": "a5a1d807-3c38-4972-99c9-bc727057bc1d",
   "prevId": "eb707a28-2e7f-424d-b37e-592f2591bfac",
   "version": "7",
   "dialect": "postgresql",
@@ -7070,6 +7070,12 @@
         "last_source": {
           "name": "last_source",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_symptom_at": {
+          "name": "last_symptom_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },

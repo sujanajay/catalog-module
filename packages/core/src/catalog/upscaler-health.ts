@@ -21,7 +21,7 @@
 //   `outage_deadline` event per batch the deadline finished.
 // Saturation (429), a backlog, a scale-up and a flapping service never trip it; a clean stop, a hung or deleted service
 // and a region that can start no instance (a GPU stockout, owner decision 2026-11-04) do.
-import { and, eq, inArray, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogEnlargements, catalogIncidents, catalogUpscalerHealth, type UpscalerService } from "../db/schema";
 import { settingDef } from "../settings/registry";
@@ -62,29 +62,34 @@ export function observationClass(kind: UpscalerObservation): ObservationClass {
 }
 
 /**
- * Records one observation, stamped `at` (its request start). Two atomic upserts, no read-modify-write:
- * - a proof moves `healthy_at` forward (it never goes back) and clears `unhealthy_since` only when the proof is newer
- *   than the outage's start (a call accepted before a stop and answered after it does not end the outage);
- * - a symptom sets `unhealthy_since` only when none is set and it is newer than the latest proof (a stale symptom never
- *   starts an outage); a running outage keeps its start.
- * `upscaler` is kept for the sweep's probe of a service no photo waits on.
+ * Records one observation, stamped `at` (its request start). Two atomic upserts, no read-modify-write, so any number
+ * of writers at once is safe (each upsert reads the row's latest committed version under its row lock):
+ * - a proof moves `healthy_at` forward (it never goes back) and ends the outage only when the proof is newer than the
+ *   outage's start (a call accepted before a stop and answered after it does not end the outage). When a symptom newer
+ *   than the proof was already recorded (writers finish out of order), the outage continues from that newest symptom
+ *   instead of ending: never earlier than the truth, so the deadline can only wait longer, never fire early;
+ * - a symptom newer than the latest proof starts the outage, or moves its start earlier (an earlier symptom that
+ *   arrived late); a symptom older than the latest proof never starts one.
+ * Invariant (any order of writes): `unhealthy_since` is null exactly when no symptom is newer than `healthy_at`, and
+ * otherwise is a symptom stamp newer than `healthy_at`.
  */
 export async function recordUpscalerObservation(db: Pick<Db, "insert">, input: { service: UpscalerService; kind: UpscalerObservation; at: Date; upscaler: string }, now: Date = input.at): Promise<void> {
   const h = catalogUpscalerHealth, at = input.at, probe = input.kind === "call_ok" || input.kind === "call_busy" ? null : input.kind;
-  const source = probe ? "probe" : "call";
+  const source = probe ? "probe" : "call", t = sql`${at.toISOString()}::timestamptz`;
   const probeSet = probe ? { lastProbe: sql`CASE WHEN ${h.lastProbeAt} IS NULL OR ${h.lastProbeAt} <= ${at.toISOString()}::timestamptz THEN ${probe}::text ELSE ${h.lastProbe} END`, lastProbeAt: sql`GREATEST(${h.lastProbeAt}, ${at.toISOString()}::timestamptz)` } : {};
   if (observationClass(input.kind) === "health") {
     await db.insert(h).values({ service: input.service, healthyAt: at, unhealthySince: null, lastProbe: probe, lastProbeAt: probe ? at : null, lastSource: source, lastUpscaler: input.upscaler, updatedAt: now })
       .onConflictDoUpdate({ target: h.service, set: {
-        healthyAt: sql`GREATEST(${h.healthyAt}, ${at.toISOString()}::timestamptz)`,
-        unhealthySince: sql`CASE WHEN ${h.unhealthySince} IS NOT NULL AND ${at.toISOString()}::timestamptz > ${h.unhealthySince} THEN NULL ELSE ${h.unhealthySince} END`,
+        healthyAt: sql`GREATEST(${h.healthyAt}, ${t})`,
+        unhealthySince: sql`CASE WHEN ${h.unhealthySince} IS NOT NULL AND ${t} > ${h.unhealthySince} THEN (CASE WHEN ${h.lastSymptomAt} > ${t} THEN ${h.lastSymptomAt} ELSE NULL END) ELSE ${h.unhealthySince} END`,
         ...probeSet, lastSource: source, lastUpscaler: input.upscaler, updatedAt: now,
       } });
     return;
   }
-  await db.insert(h).values({ service: input.service, healthyAt: null, unhealthySince: at, lastProbe: probe, lastProbeAt: at, lastSource: source, lastUpscaler: input.upscaler, updatedAt: now })
+  await db.insert(h).values({ service: input.service, healthyAt: null, unhealthySince: at, lastProbe: probe, lastProbeAt: at, lastSource: source, lastSymptomAt: at, lastUpscaler: input.upscaler, updatedAt: now })
     .onConflictDoUpdate({ target: h.service, set: {
-      unhealthySince: sql`CASE WHEN ${h.unhealthySince} IS NULL AND (${h.healthyAt} IS NULL OR ${at.toISOString()}::timestamptz > ${h.healthyAt}) THEN ${at.toISOString()}::timestamptz ELSE ${h.unhealthySince} END`,
+      unhealthySince: sql`CASE WHEN ${h.healthyAt} IS NOT NULL AND ${t} <= ${h.healthyAt} THEN ${h.unhealthySince} ELSE LEAST(${h.unhealthySince}, ${t}) END`,
+      lastSymptomAt: sql`GREATEST(${h.lastSymptomAt}, ${t})`,
       ...probeSet, lastSource: source, lastUpscaler: input.upscaler, updatedAt: now,
     } });
 }
@@ -106,25 +111,47 @@ const liveBatch = (): SQL => notInArray(catalogBatches.status, ["draft", "failed
 const waiting = (): SQL => and(eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "queued"))!;
 
 /**
- * The sweep's probe pass: the services some live batch's photos wait on, plus every service whose ledger shows an
- * outage (so an outage that ended while nothing waited is still closed). Each is probed once, all at once (the sweep's
- * worst case is one probe timeout), with an upscaler id a photo waits on (the x2 one when there is one) or the ledger's
- * last one. A probe that throws counts as `unknown`. Each answer is recorded as an observation stamped at its start.
+ * The sweep's probe of one service waits at most this long (review P2-2): a cold GPU start (about 180 s) does not fit,
+ * which is fine, because the sweep only needs "is this a proof of health": a timeout is a symptom, and the probe has
+ * woken the service for the deliveries' own probes, which keep their full cold-start timeout.
  */
-export async function assessUpscalerOutages(db: Db, probe: OutageProbe, clock: () => Date, log: (message: string, fields?: Record<string, unknown>) => void = () => undefined): Promise<OutageAssessment> {
+export const SWEEP_PROBE_TIMEOUT_MS = 60_000;
+/** Extra wall time after SWEEP_PROBE_TIMEOUT_MS before a probe that ignores its timeout is counted as `timeout`. */
+export const SWEEP_PROBE_GRACE_MS = 5_000;
+/** The deadline pass stops starting products after this much wall time; the next sweep (10 minutes) carries on. */
+export const DEADLINE_PASS_BUDGET_MS = 120_000;
+
+/** `work`, or `fallback` after `ms` of wall time (the work's own result is then ignored). */
+async function within<T>(work: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([work, new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); })]); }
+  finally { if (timer) clearTimeout(timer); }
+}
+
+/**
+ * The sweep's probe pass. Only the services some live batch's photos wait on are probed (review P2-1: a probe every 10
+ * minutes would keep a scale-to-zero GPU instance warm): each once, all at once, with SWEEP_PROBE_TIMEOUT_MS, using an
+ * upscaler id a photo waits on (the x2 one when there is one). A probe that throws or overruns counts as `unknown` or
+ * `timeout`. Each answer is recorded as an observation stamped at its start. An outage on a service no photo waits on
+ * has nobody to serve: its clock is closed without a probe (and its incidents resolve), so a later wait starts a new one.
+ */
+export async function assessUpscalerOutages(db: Db, probe: OutageProbe, clock: () => Date, log: (message: string, fields?: Record<string, unknown>) => void = () => undefined, options: { timeoutMs?: number; graceMs?: number } = {}): Promise<OutageAssessment> {
+  const timeoutMs = options.timeoutMs ?? SWEEP_PROBE_TIMEOUT_MS, graceMs = options.graceMs ?? SWEEP_PROBE_GRACE_MS;
   const rows = await db.selectDistinct({ upscaler: catalogEnlargements.upscaler }).from(catalogEnlargements)
     .innerJoin(catalogBatches, eq(catalogBatches.id, catalogEnlargements.batchId)).where(and(waiting(), liveBatch()));
   const pick = new Map<UpscalerService, string>();
   for (const { upscaler } of [...rows].sort((a, b) => upscalerFactor(a.upscaler) - upscalerFactor(b.upscaler) || a.upscaler.localeCompare(b.upscaler))) {
     if (!pick.has(serviceOf(upscaler))) pick.set(serviceOf(upscaler), upscaler);
   }
-  for (const row of await readUpscalerHealth(db)) {
-    if (row.unhealthySince && row.lastUpscaler && !pick.has(row.service)) pick.set(row.service, row.lastUpscaler);
+  const idle = (await readUpscalerHealth(db)).filter((r) => r.unhealthySince && !pick.has(r.service)).map((r) => r.service);
+  if (idle.length) {
+    await db.update(catalogUpscalerHealth).set({ unhealthySince: null, lastSymptomAt: null, updatedAt: clock() }).where(and(inArray(catalogUpscalerHealth.service, idle), isNotNull(catalogUpscalerHealth.unhealthySince)));
+    log("upscaler outage closed: nothing waits", { services: idle });
   }
   const answers = await Promise.all([...pick].map(async ([service, upscaler]) => {
     const at = clock();
     let answer: UpscaleProbe;
-    try { answer = await probe(upscaler); } catch { answer = "unknown"; }
+    try { answer = await within(probe(upscaler, { timeoutMs }), timeoutMs + graceMs, "timeout" as UpscaleProbe); } catch { answer = "unknown"; }
     try { await recordUpscalerObservation(db, { service, kind: answer, at, upscaler }, clock()); }
     catch (error) { log("upscaler health not recorded", { severity: "WARNING", service, probe: answer, error: error instanceof Error ? error.message : String(error) }); }
     return { service, probe: answer };
@@ -168,20 +195,24 @@ export interface DeadlineFailure { batchId: string; service: UpscalerService; ro
  * chunks with nothing left to wait for are unparked in the same transaction (a batch that is not processing gets its
  * chunks sent directly; a processing batch's window, which the sweep tops up next, picks them up). A row held by a
  * live delivery is left to it. Batches started before M1-S3 (no auto-decide copy) keep spec 18's wait. Writes one
- * `outage_deadline` incident per batch. Returns the batches it finished.
+ * `outage_deadline` incident per batch. The pass starts no product after `budgetMs` of wall time (review P2-2); the
+ * next sweep finishes the rest. Returns the batches it failed rows of.
  */
-export async function applyOutageDeadline(db: Db, enqueue: typeof enqueueTask, assessment: OutageAssessment, now: Date, log: (message: string, fields?: Record<string, unknown>) => void = () => undefined): Promise<DeadlineFailure[]> {
+export async function applyOutageDeadline(db: Db, enqueue: typeof enqueueTask, assessment: OutageAssessment, now: Date, log: (message: string, fields?: Record<string, unknown>) => void = () => undefined, options: { budgetMs?: number; wallClock?: () => number } = {}): Promise<DeadlineFailure[]> {
   const out: DeadlineFailure[] = [], cache = new Map<string, number>();
+  const wall = options.wallClock ?? Date.now, stopAt = wall() + (options.budgetMs ?? DEADLINE_PASS_BUDGET_MS);
   for (const s of assessment.services) {
     if (!s.outage || !s.since) continue;
-    const batches = await db.selectDistinct({ id: catalogBatches.id, options: catalogBatches.options, settingsSnapshotId: catalogBatches.settingsSnapshotId, isTest: catalogBatches.isTest, name: catalogBatches.name, counts: catalogBatches.counts })
-      .from(catalogBatches).innerJoin(catalogEnlargements, eq(catalogEnlargements.batchId, catalogBatches.id))
-      .where(and(liveBatch(), waiting(), onService(s.service)));
+    const ids = await db.selectDistinct({ id: catalogEnlargements.batchId }).from(catalogEnlargements)
+      .innerJoin(catalogBatches, eq(catalogBatches.id, catalogEnlargements.batchId)).where(and(liveBatch(), waiting(), onService(s.service)));
+    const batches = ids.length ? await db.select({ id: catalogBatches.id, options: catalogBatches.options, settingsSnapshotId: catalogBatches.settingsSnapshotId, isTest: catalogBatches.isTest, name: catalogBatches.name, counts: catalogBatches.counts })
+      .from(catalogBatches).where(inArray(catalogBatches.id, ids.map((b) => b.id))) : [];
     for (const batch of batches) {
       if (!autoDecideOf(batch.options)) continue;
       const hours = await deadlineHoursFor(db, batch, cache);
       if (!(hours > 0) || +now - +s.since < hours * 3_600_000) continue;
-      const rows = await failWaitingRows(db, enqueue, { batchId: batch.id, service: s.service, hours, bulk: isBulkBatch(batch) }, now, log);
+      if (out.length && wall() >= stopAt) { log("enlargement outage deadline continues next sweep", { severity: "WARNING", batchId: batch.id, service: s.service }); return out; }
+      const rows = await failWaitingRows(db, enqueue, { batchId: batch.id, service: s.service, hours, bulk: isBulkBatch(batch), stopAt, wall }, now, log);
       if (!rows) continue;
       out.push({ batchId: batch.id, service: s.service, rows, since: s.since, hours });
       log("enlargement outage deadline", { severity: "WARNING", batchId: batch.id, service: s.service, rows, since: s.since.toISOString(), hours });
@@ -192,13 +223,14 @@ export async function applyOutageDeadline(db: Db, enqueue: typeof enqueueTask, a
 }
 
 /** The fail of one batch's waiting rows of one service, product by product. Returns the rows failed. */
-async function failWaitingRows(db: Db, enqueue: typeof enqueueTask, input: { batchId: string; service: UpscalerService; hours: number; bulk: boolean }, now: Date, log: (message: string, fields?: Record<string, unknown>) => void): Promise<number> {
+async function failWaitingRows(db: Db, enqueue: typeof enqueueTask, input: { batchId: string; service: UpscalerService; hours: number; bulk: boolean; stopAt: number; wall: () => number }, now: Date, log: (message: string, fields?: Record<string, unknown>) => void): Promise<number> {
   const unclaimed = or(isNull(catalogEnlargements.claimedAt), lt(catalogEnlargements.claimedAt, new Date(+now - ENLARGE_CLAIM_MS)))!;
   const scope = and(eq(catalogEnlargements.batchId, input.batchId), waiting(), onService(input.service), unclaimed)!;
   const products = await db.selectDistinct({ productId: catalogEnlargements.productId }).from(catalogEnlargements).where(scope);
   const sentence = outageDeadlineSentence(input.hours);
   let failed = 0;
   for (const { productId } of products) {
+    if (failed && input.wall() >= input.stopAt) { log("enlargement outage deadline continues next sweep", { severity: "WARNING", batchId: input.batchId, service: input.service, failed }); break; }
     const { rows, unparked } = await db.transaction(async (tx) => {
       const t = tx as unknown as Db;
       const chunks = await lockProductChunks(t, input.batchId, productId);

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS "catalog_upscaler_health" (
 	"last_probe" text,
 	"last_probe_at" timestamp with time zone,
 	"last_source" text,
+	"last_symptom_at" timestamp with time zone,
 	"last_upscaler" text,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "catalog_upscaler_health_service_check" CHECK ("catalog_upscaler_health"."service" IN ('cpu', 'gpu'))

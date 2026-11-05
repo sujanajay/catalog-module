@@ -66,37 +66,25 @@ describe("upscaler health ledger (M1-S4b)", () => {
     expect(rows.find((r) => r.service === "gpu")).toMatchObject({ unhealthySince: null });
   });
 
-  it("I2: the sweep probes a service in outage even when no photo waits, with the ledger's last upscaler; an ok answer closes it", async () => {
+  it("I2 (review P2-1): an outage on a service no photo waits on is closed without a probe, so an idle GPU is never woken", async () => {
     await observe("absent", 0);
     const asked: string[] = [];
-    const a = await assessUpscalerOutages(db, async (upscaler) => { asked.push(upscaler); return "ok"; }, () => at(400));
-    expect(asked).toEqual(["swinir-x2"]);
-    expect(a.services).toEqual([{ service: "gpu", probe: "ok", since: null, outage: false }]);
-    expect(await gpu()).toMatchObject({ unhealthySince: null, healthyAt: at(400) });
+    const a = await assessUpscalerOutages(db, async (upscaler) => { asked.push(upscaler); return "absent"; }, () => at(400));
+    expect(asked).toEqual([]);
+    expect(a.services).toEqual([]);
+    expect(await gpu()).toMatchObject({ unhealthySince: null, lastSymptomAt: null });
   });
 
-  it("I1: the sweep probes the services at once; a probe that throws counts as unknown and the outage stands", async () => {
-    await observe("absent", 0, "gpu");
-    await observe("absent", 0, "cpu");
-    let running = 0, most = 0;
-    const a = await assessUpscalerOutages(db, async (upscaler) => {
-      running++; most = Math.max(most, running);
-      await new Promise((r) => setTimeout(r, 20));
-      running--;
-      if (upscaler.endsWith("+cpu")) throw new Error("boom");
-      return "timeout";
-    }, () => at(400));
-    expect(most).toBe(2);
-    expect(a.services.sort((x, y) => x.service.localeCompare(y.service))).toEqual([
-      { service: "cpu", probe: "unknown", since: at(0), outage: true },
-      { service: "gpu", probe: "timeout", since: at(0), outage: true },
-    ]);
-  });
-
-  it("a busy (429) answer at the sweep is a proof: no outage", async () => {
-    await observe("no_instance", 0);
-    const a = await assessUpscalerOutages(db, async () => "busy", () => at(400));
-    expect(a.services[0]).toMatchObject({ probe: "busy", since: null, outage: false });
+  it("writers finishing out of order: a proof that ends an outage hands on a newer symptom instead of losing it", async () => {
+    await observe("absent", 3);
+    await observe("absent", 10);
+    await observe("call_ok", 5);
+    expect(await gpu()).toMatchObject({ healthyAt: at(5), unhealthySince: at(10) });
+    // An earlier symptom that arrives late moves the start earlier, never before the latest proof.
+    await observe("timeout", 7);
+    expect(await gpu()).toMatchObject({ unhealthySince: at(7) });
+    await observe("timeout", 4);
+    expect(await gpu()).toMatchObject({ unhealthySince: at(7) });
   });
 
   it("the deadline comes from the batch's settings snapshot; no snapshot or a snapshot without the key reads the default 6", async () => {

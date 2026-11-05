@@ -106,6 +106,11 @@ export async function handleSweep(deps: SweepDeps, _body: Record<string, unknown
   // M1-S4b (M1 D13): the upscaler outage pass, before the recovery below so the chunks the deadline unparks are picked
   // up by this sweep's window top-up. A failure here never stops the sweep.
   if (deps.outageProbe && !deps.enlargementOff) await outagePass(deps.db, deps.outageProbe, deps.enqueue ?? enqueueTask, now, deps.now ?? (() => new Date()));
+  // Review P3-4: with the upscaler switched off nothing is probed, and nothing waits: open outage incidents resolve.
+  else {
+    try { await syncOutageIncidents(deps.db, { services: [], at: now }, now); }
+    catch (error) { log("ERROR", "upscaler outage pass failed", { step: "incidents", error: error instanceof Error ? error.message : String(error) }); }
+  }
   // Spec 15 E4: recover only dead chunks (a lapsed lease, or a task lost for 30 minutes) and top up each
   // processing batch's window. A live lease and a recently queued task are never touched. Spec 18 lifecycle 3.8:
   // every live batch (not failed or cancelled, done included: an operator retry or a replacement) with a queued or

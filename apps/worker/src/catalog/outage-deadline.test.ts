@@ -225,15 +225,20 @@ describe("upscaler outage deadline (M1-S4b, M1 D13)", () => {
     expect(await batchIncidents(e.s.batch.id, "enlarge_wait")).toHaveLength(1);
   }, 300_000);
 
-  it("F2: with the upscaler switched off the rows are released, never failed by the deadline", async () => {
+  it("F2: with the upscaler switched off the rows are released, never failed by the deadline, and open outage incidents resolve", async () => {
     const e = await waitingBatch("outage-f2");
     await sweepAt(e, 0);
+    await sweepAt(e, 15);
+    expect((await incidents("service_down")).filter((i) => !i.resolvedAt)).toHaveLength(1);
     e.clock.tick(7 * HOUR);
     e.w.deps.enlarge = undefined;
     await sweep(db, e.w, { enlargementOff: true });
     const rows = await rowsOf(db, e.s.batch.id);
     expect(rows.some((r) => r.errorKind === "outage_deadline")).toBe(false);
     expect(rows.every((r) => !r.wanted)).toBe(true);
+    // Review P3-4: nothing is probed while switched off, and the open outage incidents resolve.
+    expect((await incidents("service_down")).filter((i) => !i.resolvedAt)).toHaveLength(0);
+    expect((await batchIncidents(e.s.batch.id, "enlarge_wait")).filter((i) => !i.resolvedAt)).toHaveLength(0);
   }, 300_000);
 
   it("G1, G3, G4: the deadline is read from the batch's snapshot (2 h; 0 never; a snapshot without the key reads 6 h)", async () => {
