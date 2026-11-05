@@ -408,10 +408,15 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
   const lastCols = { listingId: catalogChangeEvents.listingId, channel: catalogChangeEvents.channel, slot: catalogChangeEvents.slot, kind: catalogChangeEvents.kind, toVersionId: catalogChangeEvents.toVersionId, seq: catalogChangeEvents.seq };
   const lastRows = [
     ...(listings.length ? await db.select(lastCols).from(catalogChangeEvents).where(and(inArray(catalogChangeEvents.listingId, listings.map(l => l.id)), inArray(catalogChangeEvents.slot, slots))).orderBy(desc(catalogChangeEvents.seq)) : []),
-    ...(bare.length ? await db.select(lastCols).from(catalogChangeEvents).where(and(isNull(catalogChangeEvents.listingId), eq(catalogChangeEvents.productId, product.id), inArray(catalogChangeEvents.channel, bare), inArray(catalogChangeEvents.slot, slots))).orderBy(desc(catalogChangeEvents.seq)) : []),
+    // Every touched channel, listed or not: a listing made after a listing-less publish continues from that history.
+    ...await db.select(lastCols).from(catalogChangeEvents).where(and(isNull(catalogChangeEvents.listingId), eq(catalogChangeEvents.productId, product.id), inArray(catalogChangeEvents.channel, touched), inArray(catalogChangeEvents.slot, slots))).orderBy(desc(catalogChangeEvents.seq)),
   ];
   const last = new Map<string, (typeof lastRows)[number]>();
   for (const r of lastRows) if (!last.has(`${targetKey(r.listingId, r.channel)}|${r.slot}`)) last.set(`${targetKey(r.listingId, r.channel)}|${r.slot}`, r);
+  // A listing slot with no event of its own continues from the product's last listing-less event on that channel slot
+  // (D23): the delivery logged before the listing existed is not logged again, and a later change starts from it.
+  const lastOf = (target: { id: string | null; channel: ChannelId }, n: number) =>
+    last.get(`${targetKey(target.id, target.channel)}|image:${n}`) ?? (target.id ? last.get(`${targetKey(null, target.channel)}|image:${n}`) : undefined);
   // The photos behind the images live before this publish, and the version source of each delivered image.
   const photoIds = [...new Set([...live, ...delivered].map(o => o.sourceImageId))];
   const photoSha = new Map((await db.select({ id: catalogSourceImages.id, sha256: catalogSourceImages.sha256 }).from(catalogSourceImages).where(inArray(catalogSourceImages.id, photoIds))).map(p => [p.id, p.sha256]));
@@ -437,7 +442,7 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
     };
     const reason = publishReason(slot, input.rulesKeyVersion(o.channel));
     for (const target of targets.filter(t => t.channel === o.channel)) {
-      const before = last.get(`${targetKey(target.id, target.channel)}|image:${o.n}`);
+      const before = lastOf(target, o.n);
       if (before?.toVersionId === o.contentVersionId) continue;
       const fromVersionId = before ? before.toVersionId : other?.contentVersionId ?? null;
       await write({ ...common, idempotencyKey: `publish:${o.id}:${before ? before.seq : "none"}:${target.id ?? "product"}`, listingId: target.id, channel: target.channel, slot: `image:${o.n}`, fromVersionId,
@@ -446,7 +451,7 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
   }
   for (const o of removed) {
     for (const target of targets.filter(t => t.channel === o.channel)) {
-      const before = last.get(`${targetKey(target.id, target.channel)}|image:${o.n}`);
+      const before = lastOf(target, o.n);
       if (before?.kind === "removed") continue;
       await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${target.id ?? "product"}`, listingId: target.id, channel: target.channel, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
         toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);

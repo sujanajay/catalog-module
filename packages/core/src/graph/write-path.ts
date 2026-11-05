@@ -90,8 +90,13 @@ export interface SourcePhoto {
   bytes: number | null;
 }
 
-/** One brand photo version per product and content: re-sending a photo in a later batch reuses it (F2-R6). */
-export const sourceProducerRef = (productId: string) => `product:${productId}`;
+/**
+ * One brand photo version per product, position and content: re-sending a photo in the same position reuses it (F2-R6);
+ * the same photo sent in another position is a new version with that position and its role (D28).
+ */
+export const sourceProducerRef = (productId: string, n: number) => `product:${productId}:${n}`;
+/** The LIKE pattern of every brand photo version of a product. */
+export const sourceProducerRefsOf = (productId: string) => `product:${productId}:%`;
 
 /**
  * D28: the role the pipeline writes until M2 reads each photo's view: the image's place on the listing, `main` for slot 1
@@ -103,7 +108,7 @@ export function slotRole(n: number): ImageRole {
 
 const sourceVersionRow = (p: SourcePhoto, optionId: string | null, isTest: boolean) => ({
   optionId, scope: "master" as const, component: "image" as const, role: slotRole(p.n), position: p.n, source: "brand" as const,
-  aiGenerated: false, producer: SOURCE_PHOTO_PRODUCER, producerRef: sourceProducerRef(p.productId), assetSha256: p.sha256,
+  aiGenerated: false, producer: SOURCE_PHOTO_PRODUCER, producerRef: sourceProducerRef(p.productId, p.n), assetSha256: p.sha256,
   contentHash: p.sha256, hashKind: "sha256" as const, batchId: p.batchId, isTest, createdBy: PIPELINE_ACTOR,
 });
 

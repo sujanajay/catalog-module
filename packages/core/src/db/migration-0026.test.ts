@@ -1,5 +1,5 @@
 // Tier 2 (PGlite): 0026_graph_role_events.sql applied over a database at the migration before it that already holds a
-// version with role `unknown` and a change event on a listing: both are kept and the widened CHECKs validate over them;
+// version with role `unknown` and a change event on a listing: both are kept (the CHECKs are NOT VALID, never scanned);
 // new versions take `main` and `additional`; an event with no listing needs a product and a channel; a second run of
 // the file changes nothing (R1 exit item 5, M0 decisions D23 revised and D28).
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -81,7 +81,7 @@ describe(`${FILE}.sql`, () => {
       for (const stmt of file.split("--> statement-breakpoint")) await tx.execute(sql.raw(stmt));
     });
     expect(await rows(sql`select count(*)::int as n from catalog_change_events`)).toEqual([{ n: 2 }]);
-    expect(await rows(sql`select conname from pg_constraint where conname in ('catalog_change_events_target_check', 'catalog_change_events_channel_check', 'catalog_content_versions_role_check') and convalidated order by conname`))
+    expect(await rows(sql`select conname from pg_constraint where conname in ('catalog_change_events_target_check', 'catalog_change_events_channel_check', 'catalog_content_versions_role_check') and not convalidated order by conname`))
       .toEqual([{ conname: "catalog_change_events_channel_check" }, { conname: "catalog_change_events_target_check" }, { conname: "catalog_content_versions_role_check" }]);
     expect(await rows(sql`select indexname from pg_indexes where indexname = 'catalog_change_events_product_slot_idx'`)).toHaveLength(1);
   }, 120_000);

@@ -1,6 +1,6 @@
 // Tier 2 (PGlite), M0-S3 write path: the perceptual hash, brand photo versions from ingest, output versions with their
 // parent, and the reason and change type a publish names for each slot.
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
@@ -9,7 +9,7 @@ import { createTestDb } from "../db/testing";
 import { phashFromDb, sha256Hex } from "./index";
 import {
   dhash64, ensureSourceVersion, imageAsset, outputVersionSource, phashDistance, publishChangeSetId, publishChangeType, publishReason,
-  recordOutputVersion, recordSourcePhotoVersions, sourceProducerRef, type PublishedSlot, type SourcePhoto,
+  recordOutputVersion, recordSourcePhotoVersions, sourceProducerRefsOf, type PublishedSlot, type SourcePhoto,
 } from "./write-path";
 
 let db: Db;
@@ -76,7 +76,7 @@ describe("M0-S3 brand photo versions (F2-R1)", () => {
     const photos = [photo(f.product.id, f.batch.id, "front", 1), photo(f.product.id, f.batch.id, "back", 2)].map((p) => ({ ...p, optionId: f.optionId, isTest: true }));
     expect(await recordSourcePhotoVersions(db, [...photos, { ...photos[0]!, sha256: "not-a-sha", n: 3 }])).toBe(2);
     expect(await recordSourcePhotoVersions(db, photos)).toBe(0);
-    const rows = await db.select().from(catalogContentVersions).where(eq(catalogContentVersions.producerRef, sourceProducerRef(f.product.id)));
+    const rows = await db.select().from(catalogContentVersions).where(like(catalogContentVersions.producerRef, sourceProducerRefsOf(f.product.id)));
     expect(rows.map((r) => [r.position, r.source, r.scope, r.role, r.component, r.aiGenerated, r.producer, r.optionId, r.contentHash === r.assetSha256]).sort()).toEqual([
       [1, "brand", "master", "main", "image", false, "M1", f.optionId, true],
       [2, "brand", "master", "additional", "image", false, "M1", f.optionId, true],
@@ -87,6 +87,16 @@ describe("M0-S3 brand photo versions (F2-R1)", () => {
     const again = await ensureSourceVersion(db, photos[0]!, { optionId: f.optionId, isTest: true });
     expect(again).toBe(rows.find((r) => r.position === 1)!.id);
     expect(await ensureSourceVersion(db, { ...photos[0]!, sha256: "not-a-sha" }, { optionId: f.optionId, isTest: true })).toBeNull();
+  });
+
+  it("review P3 of #184: the same photo sent again in the same position reuses its version; in another position it is a new version with that slot's role", async () => {
+    const f = await fixture();
+    const first = { ...photo(f.product.id, f.batch.id, "moved", 2), optionId: f.optionId, isTest: true };
+    expect(await recordSourcePhotoVersions(db, [first])).toBe(1);
+    expect(await recordSourcePhotoVersions(db, [first])).toBe(0);
+    expect(await recordSourcePhotoVersions(db, [{ ...first, n: 1 }])).toBe(1);
+    const rows = await db.select().from(catalogContentVersions).where(like(catalogContentVersions.producerRef, sourceProducerRefsOf(f.product.id)));
+    expect(rows.map((r) => [r.position, r.role, r.contentHash === first.sha256]).sort()).toEqual([[1, "main", true], [2, "additional", true]]);
   });
 
   it("the same photo for two products is one asset and two versions", async () => {
