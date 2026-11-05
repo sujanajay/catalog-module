@@ -1675,6 +1675,15 @@ export const vendorRoutes = pgTable(
     state: text("state", { enum: ROUTE_STATES }).notNull(),
     /** M3-F2-R3: an overflow route's daily spend cap in USD; null on an overflow route means it is never called. */
     dailyCapUsd: money("daily_cap_usd"),
+    /**
+     * M7-F2-R5 kill-switch drill (migration 0027): the state the route goes back to at `restoreAt`. Both null when no
+     * drill runs (with `drillId`). The router reads a route whose `restoreAt` has passed as `restoreState` and writes the restore, so a
+     * drill's "off" never outlives its expiry, even when the drill job is stopped.
+     */
+    restoreState: text("restore_state", { enum: ROUTE_STATES }),
+    restoreAt: timestamp("restore_at", { withTimezone: true }),
+    /** The drill that set `restoreState`/`restoreAt`, so only that drill (or its expiry) ends it. */
+    drillId: text("drill_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -1684,6 +1693,8 @@ export const vendorRoutes = pgTable(
     enumCheck("vendor_routes", "capability", t.capability, CAPABILITIES),
     enumCheck("vendor_routes", "adapter", t.adapter, ROUTE_ADAPTERS),
     enumCheck("vendor_routes", "state", t.state, ROUTE_STATES),
+    enumCheck("vendor_routes", "restore_state", t.restoreState, ROUTE_STATES),
+    check("vendor_routes_drill_fields_check", sql`(${t.restoreState} IS NULL) = (${t.restoreAt} IS NULL) AND (${t.restoreAt} IS NULL) = (${t.drillId} IS NULL)`),
     // M7-F2-R7: a route that sends brand photos is serving only with a written no-training position (not pending).
     check(
       "vendor_routes_serving_needs_terms_check",

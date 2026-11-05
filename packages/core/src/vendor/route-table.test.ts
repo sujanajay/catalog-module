@@ -3,7 +3,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { createTestDb } from "../db/testing";
 import type { Db } from "../db/client";
 import { vendorRouteChanges, vendorRoutes } from "../db/schema";
-import { ensureSeedRoutes, killPrimary, loadRoutes, resetRouting, RouteChangeError, routerFor, setRoute } from "./route-table";
+import { DRILL_EXPIRY_ACTOR, DRILL_MAX_MINUTES, endDrill, ensureSeedRoutes, killPrimary, loadRouteRows, loadRoutes, resetRouting, restoreExpiredDrills, RouteChangeError, routerFor, setRoute, startDrill } from "./route-table";
 import { planRoutes } from "./router";
 import { IMAGE_SEED_ROUTES, NO_TRAINING_PENDING, OPENROUTER_NO_TRAINING_POSITION, OWN_SERVICE_NO_TRAINING_POSITION, PHOTOROOM_MATTE_MODEL, routeId, SEED_ROUTES } from "./routes";
 
@@ -109,5 +109,123 @@ describe("M3-S5 image routes and the overflow switch (M3-F2-R3)", () => {
     const [change] = await db.select().from(vendorRouteChanges).where(and(eq(vendorRouteChanges.routeId, VENDOR), eq(vendorRouteChanges.toState, "serving")));
     expect(change!.reason).toMatch(/overflow on for the test account \(no-training position recorded: test: vendor DPA.*; daily cap USD 1\)/);
     expect((await setRoute(db, VENDOR, {dailyCapUsd: null, changedBy: ADMIN, reason: "cap removed"})).dailyCapUsd).toBeNull();
+  });
+});
+
+describe("R1 exit item 3: the kill-switch drill with a stored expiry (M7-F2-R5)", () => {
+  const JUDGE_1 = () => SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === 1)!.id;
+  /** Move a running drill's expiry into the past, as if its minutes had run out. */
+  const expire = (id: string) => db.execute(sql`update vendor_routes set restore_at = now() - interval '1 minute' where id = ${id}`);
+  const changes = (id: string) => db.select().from(vendorRouteChanges).where(eq(vendorRouteChanges.routeId, id)).orderBy(asc(vendorRouteChanges.at));
+
+  it("turns route 1 off with a stored expiry and logs who, why and until when", async () => {
+    await recordPositions();
+    const drill = await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "R1 drill", runId: "drill-1"});
+    expect(drill.route).toMatchObject({id: JUDGE_1(), rank: 1, state: "off"});
+    const minutes = (drill.restoreAt.getTime() - Date.now()) / 60_000;
+    expect(minutes).toBeGreaterThan(28);
+    expect(minutes).toBeLessThanOrEqual(30.5);
+    const [row] = await loadRouteRows(db, "judge.render");
+    expect(row).toMatchObject({id: JUDGE_1(), state: "off", restoreState: "serving", drillExpired: false});
+    expect(planRoutes(await routerFor(db, {ttlMs: 0}), "judge.render", []).map(r => r.rank)).toEqual([2, 3]);
+    expect((await changes(JUDGE_1())).at(-1)).toMatchObject({fromState: "serving", toState: "off", changedBy: ADMIN, runId: "drill-1", reason: expect.stringMatching(/^R1 drill \(kill-switch drill [0-9a-f-]{36}: back to serving by /)});
+  });
+  it("refuses a second drill, a bad length, a missing who or why, and a drill with no route left to fall back to", async () => {
+    await recordPositions();
+    await expect(startDrill(db, "judge.render", {minutes: 0, changedBy: ADMIN, reason: "x"})).rejects.toBeInstanceOf(RouteChangeError);
+    await expect(startDrill(db, "judge.render", {minutes: DRILL_MAX_MINUTES + 1, changedBy: ADMIN, reason: "x"})).rejects.toBeInstanceOf(RouteChangeError);
+    await expect(startDrill(db, "judge.render", {minutes: 5, changedBy: " ", reason: "x"})).rejects.toBeInstanceOf(RouteChangeError);
+    await startDrill(db, "judge.render", {minutes: 5, changedBy: ADMIN, reason: "first"});
+    await expect(startDrill(db, "judge.render", {minutes: 5, changedBy: ADMIN, reason: "second"})).rejects.toThrow(/already runs/);
+    const visionRoutes = (await loadRoutes(db, "vision.read")).slice(1);
+    for (const r of visionRoutes) await setRoute(db, r.id, {state: "off", changedBy: ADMIN, reason: "only route 1 left"});
+    await expect(startDrill(db, "vision.read", {minutes: 5, changedBy: ADMIN, reason: "x"})).rejects.toThrow(/no other serving route/);
+    expect((await loadRoutes(db, "vision.read"))[0]!.state).toBe("serving");
+  });
+  it("restore: ending the drill puts route 1 back once; a second end is a no-op", async () => {
+    await recordPositions();
+    await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "drill"});
+    expect(await endDrill(db, JUDGE_1(), {changedBy: ADMIN, reason: "batch done"})).toMatchObject({state: "serving", rank: 1});
+    expect(await endDrill(db, JUDGE_1(), {changedBy: ADMIN, reason: "again"})).toBeNull();
+    const [row] = await loadRouteRows(db, "judge.render");
+    expect(row).toMatchObject({state: "serving", restoreState: null, restoreAt: null});
+    expect((await changes(JUDGE_1())).at(-1)).toMatchObject({fromState: "off", toState: "serving", changedBy: ADMIN, reason: "batch done"});
+    expect(planRoutes(await routerFor(db, {ttlMs: 0}), "judge.render", []).map(r => r.rank)).toEqual([1, 2, 3]);
+  });
+  it("expiry: the router reads an expired drill as restored and writes the restore once, with no drill job running", async () => {
+    await recordPositions();
+    await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "drill"});
+    // Not yet expired: the router-side restore leaves it alone.
+    expect(await endDrill(db, JUDGE_1(), {changedBy: DRILL_EXPIRY_ACTOR, reason: "early", onlyExpired: true})).toBeNull();
+    await expire(JUDGE_1());
+    // Read side: even before any restore is written, the table reads route 1 as serving.
+    expect((await loadRoutes(db, "judge.render"))[0]).toMatchObject({rank: 1, state: "serving"});
+    expect(planRoutes(await routerFor(db, {ttlMs: 0}), "judge.render", []).map(r => r.rank)).toEqual([1, 2, 3]);
+    // routerFor wrote the restore, logged by drill-expiry; a second pass finds nothing to do.
+    const [row] = await loadRouteRows(db, "judge.render");
+    expect(row).toMatchObject({state: "serving", restoreState: null, restoreAt: null});
+    expect((await changes(JUDGE_1())).filter(c => c.changedBy === DRILL_EXPIRY_ACTOR)).toHaveLength(1);
+    expect(await restoreExpiredDrills(db)).toEqual([]);
+    // The drill job's own late restore is then a no-op.
+    expect(await endDrill(db, JUDGE_1(), {changedBy: ADMIN, reason: "late"})).toBeNull();
+  });
+  it("a manual set during a drill ends it: the admin's state stays past the old expiry", async () => {
+    await recordPositions();
+    await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "drill"});
+    await setRoute(db, JUDGE_1(), {state: "off", changedBy: ADMIN, reason: "real outage, keep it off"});
+    expect(await restoreExpiredDrills(db)).toEqual([]);
+    const [row] = await loadRouteRows(db, "judge.render");
+    expect(row).toMatchObject({state: "off", restoreAt: null});
+    expect((await changes(JUDGE_1())).at(-1)!.reason).toBe("real outage, keep it off (kill-switch drill ended by this change)");
+  });
+  it("a rank, cap or position change during a drill keeps the drill, so route 1 still comes back (review P2-2)", async () => {
+    await recordPositions();
+    const drill = await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "drill"});
+    await setRoute(db, JUDGE_1(), {rank: 4, changedBy: ADMIN, reason: "reorder"});
+    await setRoute(db, JUDGE_1(), {noTrainingTerms: "test: vendor terms section 5 (2026-11-06)", changedBy: ADMIN, reason: "new position"});
+    expect((await loadRouteRows(db, "judge.render")).find(r => r.id === JUDGE_1())).toMatchObject({state: "off", rank: 4, drillId: drill.drillId, restoreState: "serving"});
+    await expire(JUDGE_1());
+    expect(await restoreExpiredDrills(db)).toEqual([expect.objectContaining({id: JUDGE_1(), state: "serving", rank: 4})]);
+  });
+  it("a change after expiry but before the restore restores first, then applies (review P2-2)", async () => {
+    await recordPositions();
+    await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "drill"});
+    await expire(JUDGE_1());
+    expect(await setRoute(db, JUDGE_1(), {dailyCapUsd: null, changedBy: ADMIN, reason: "cap"})).toMatchObject({state: "serving"});
+    expect((await changes(JUDGE_1())).map(c => c.changedBy).slice(-2)).toEqual([DRILL_EXPIRY_ACTOR, ADMIN]);
+  });
+  it("an expired drill nobody restored does not block the next one (review P3-1)", async () => {
+    await recordPositions();
+    await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "first"});
+    await expire(JUDGE_1());
+    const second = await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "second"});
+    expect(second.route.id).toBe(JUDGE_1());
+    expect((await changes(JUDGE_1())).map(c => `${c.changedBy}:${c.toState}`).slice(-3)).toEqual([`${ADMIN}:off`, `${DRILL_EXPIRY_ACTOR}:serving`, `${ADMIN}:off`]);
+  });
+  it("a late drill job never ends someone else's drill (review P3-2)", async () => {
+    await recordPositions();
+    const first = await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "first"});
+    await expire(JUDGE_1());
+    await restoreExpiredDrills(db);
+    const second = await startDrill(db, "judge.render", {minutes: 30, changedBy: ADMIN, reason: "second"});
+    expect(await endDrill(db, JUDGE_1(), {changedBy: ADMIN, reason: "late first job", drillId: first.drillId})).toBeNull();
+    expect((await loadRouteRows(db, "judge.render"))[0]).toMatchObject({state: "off", drillId: second.drillId});
+    expect(await endDrill(db, JUDGE_1(), {changedBy: ADMIN, reason: "second job", drillId: second.drillId})).toMatchObject({state: "serving"});
+  });
+  it("drills a named route (the batch's own judge), and refuses one outside the capability or not serving", async () => {
+    await recordPositions();
+    const haiku = SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === 2)!.id;
+    const drill = await startDrill(db, "judge.render", {minutes: 10, routeId: haiku, changedBy: ADMIN, reason: "batch judge"});
+    expect(drill.route).toMatchObject({id: haiku, state: "off"});
+    expect(planRoutes(await routerFor(db, {ttlMs: 0}), "judge.render", []).map(r => r.rank)).toEqual([1, 3]);
+    await endDrill(db, haiku, {changedBy: ADMIN, reason: "done", drillId: drill.drillId});
+    await expect(startDrill(db, "vision.read", {minutes: 10, routeId: haiku, changedBy: ADMIN, reason: "x"})).rejects.toThrow(/No vision.read route/);
+    await setRoute(db, haiku, {state: "off", changedBy: ADMIN, reason: "off"});
+    await expect(startDrill(db, "judge.render", {minutes: 10, routeId: haiku, changedBy: ADMIN, reason: "x"})).rejects.toThrow(/no serving route/);
+  });
+  it("the database refuses a half-set drill (restore state without expiry)", async () => {
+    await recordPositions();
+    await expect(db.execute(sql`update vendor_routes set restore_state = 'serving' where id = ${JUDGE_1()}`)).rejects.toThrow();
+    await expect(db.execute(sql`update vendor_routes set restore_state = 'bogus', restore_at = now(), drill_id = 'd' where id = ${JUDGE_1()}`)).rejects.toThrow();
   });
 });

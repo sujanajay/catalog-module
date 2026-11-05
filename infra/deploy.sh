@@ -690,6 +690,9 @@ if [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   # M6-S2: the daily cost reconciliation job follows the new catalog-worker image the same way (only a job that
   # infra/catalog-cost-reconcile.sh already set up; never executed here).
   bash infra/catalog-cost-reconcile.sh job
+  # R1 exit item 3: the route kill switch and drill job follows the new catalog-worker image the same way (only a job
+  # that infra/catalog-route-switch.sh already set up; never executed here).
+  bash infra/catalog-route-switch.sh job
 else
   echo "==> jobs: SKIP (preview never changes the shared jobs)"
 fi
