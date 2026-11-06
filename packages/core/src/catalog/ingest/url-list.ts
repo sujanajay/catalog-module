@@ -33,7 +33,7 @@ export interface PastedTable {
  * A cell that meant to be a link: a scheme or `www.`, or on a row with no link at all, an image file name. Beside a real
  * link, a file name is only a label; other extra cells (a colour, a price) are not photos.
  */
-const LOOKS_LIKE_LINK = /:\/\/|^www\./i;
+const LOOKS_LIKE_LINK = /:\/\/|^www\.\S*\//i;
 const IMAGE_FILE_NAME = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif|avif)$/i;
 
 /** Cells that are never an identifier: blank, `0`, `-` and `n/a`. */

@@ -302,20 +302,31 @@ export function supabaseFolderText(link: SupabaseFolderLink, files: SupabaseFile
 const SYSTEM_FILE = /^(thumbs\.db|desktop\.ini|\.ds_store)$/i;
 
 /**
- * The files under 1 KB as rejects, under a product only when they really name one: a stem a real file has, a stem with
- * a shot number, else the folder. So `X/thumb.jpg` is a file of X and not a product called thumb, and a folder holding
- * only such files reads as a product left out, not as nothing. System files are not listed.
+ * The files under 1 KB as rejects, under a product only when they really name one: a stem a real file has; else the one
+ * product of the folder they sit in; else, in a folder with no real file, a name with a product code or a stem that
+ * matches its folder. So `X/thumb_1.jpg` is a file of X, `thumbnails/a.jpg` is a file of no product, and a folder holding
+ * only a product's tiny files reads as that product left out. System files are not listed.
  */
 export function supabaseSmallRejects(link: SupabaseFolderLink, small: string[], files: SupabaseFile[], mode: "folder" | "filename"): UploadReject[] {
   const own = link.prefix.split("/").pop()!;
   const direct = onlyShapeFolders(files.map((f) => f.path.split("/").slice(0, -1)));
   const itemOf = (path: string) => sourceItemFromPath(direct ? `${own}/${path}` : path, { kind: "gcs", gsUri: "" }, "supabase", "drive_folder");
-  const realStems = new Set(mode === "folder" ? [] : files.map((f) => normalizeKey(itemOf(f.path).identifier)));
+  const dirOf = (path: string) => path.split("/").slice(0, -1).join("/");
+  const productOf = (item: ReturnType<typeof itemOf>) => (mode === "folder" || !normalizeKey(item.identifier) ? folderIdentifier(item) : item.identifier);
+  const realIn = new Map<string, Set<string>>();
+  for (const f of files) realIn.set(dirOf(f.path), (realIn.get(dirOf(f.path)) ?? new Set()).add(productOf(itemOf(f.path)) ?? ""));
+  const realStems = new Set([...realIn.values()].flatMap((ids) => [...ids].map(normalizeKey)));
+  const hasCode = (name: string) => /\d/.test(name);
   return small.filter((path) => !SYSTEM_FILE.test(path.split("/").pop()!)).map((path) => {
     const item = itemOf(path);
-    const stem = normalizeKey(item.identifier);
-    const named = mode !== "folder" && !!stem && (realStems.has(stem) || item.n !== null);
-    const identifier = (named ? item.identifier : folderIdentifier(item)) || "";
+    const stem = mode === "folder" ? "" : item.identifier;
+    const folder = folderIdentifier(item) ?? "";
+    const inFolder = realIn.get(dirOf(path));
+    let identifier = "";
+    if (normalizeKey(stem) && realStems.has(normalizeKey(stem))) identifier = stem;
+    else if (inFolder) identifier = inFolder.size === 1 ? [...inFolder][0]! : "";
+    else if (normalizeKey(stem) && (hasCode(stem) || normalizeKey(stem) === normalizeKey(folder))) identifier = stem;
+    else if (hasCode(folder) || (mode === "folder" && normalizeKey(item.identifier) === normalizeKey(folder))) identifier = folder;
     return { name: path, ...(identifier ? { identifier } : {}), reason: `${path.split("/").pop()!} is under 1 KB, so it was treated as a placeholder, not a photo.` };
   });
 }

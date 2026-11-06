@@ -4,6 +4,7 @@
 import { normalizeKey, parseShotName, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
 import { classifyImageReject } from "./image-check";
+import { linkIdentity } from "./link-identity";
 import { classifyLinkReject } from "./link-reasons";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
 import type { GroupingResult, LeftOutProduct, LeftOutWhy, PreviewRow, SameFile, SourceItem } from "./types";
@@ -191,8 +192,21 @@ export const baseName = (item: SourceItem) => item.originalName.split(/[\\/]/).p
 /** File names for a sentence: base names, or the relative paths when two base names are the same. */
 function namesOf(items: SourceItem[]): string[] {
   const bases = items.map(baseName);
-  const clash = new Set(bases).size < bases.length;
-  return (clash ? items.map((i) => i.originalName) : bases).sort(byText);
+  if (new Set(bases).size === bases.length) return bases.sort(byText);
+  const names = items.map((i) => i.originalName);
+  if (new Set(names).size === names.length) return names.sort(byText);
+  // Links with one file name: their folders are what tells them apart.
+  return items.map(placeOf).sort(byText);
+}
+
+/** The last parts of where a file is, so two files with one name can be told apart. */
+function placeOf(item: SourceItem): string {
+  if (item.bytes.kind !== "url") return item.originalName;
+  try {
+    return decodeURIComponent(new URL(item.bytes.url).pathname).split("/").filter(Boolean).slice(-3).join("/");
+  } catch {
+    return item.originalName;
+  }
 }
 
 function shapeOf(folder: string | undefined): "" | "_rect" | "_square" {
@@ -314,7 +328,7 @@ function pastesInOrder(list: Entry[]): Entry[] {
   for (const e of list) if (e.item.positional && e.raw !== null) pastes.set(e.item.uploadId, [...(pastes.get(e.item.uploadId) ?? []), e]);
   if (pastes.size < 2) return list;
   // Ordered by what the paste holds, never its upload id: an unchanged re-send gets a new id and must keep its shot order.
-  const linksOf = (rows: Entry[]) => rows.map((e) => (e.item.bytes.kind === "url" ? e.item.bytes.url.split("?")[0]! : "")).sort(byText).join("\n");
+  const linksOf = (rows: Entry[]) => rows.map((e) => (e.item.bytes.kind === "url" ? linkIdentity(e.item.bytes.url) : "")).sort(byText).join("\n");
   const inOrder = [...pastes.values()].map((rows) => ({ rows, key: linksOf(rows) })).sort((a, b) => byText(a.key, b.key));
   const after = new Map<Entry, number>();
   let offset = 0;

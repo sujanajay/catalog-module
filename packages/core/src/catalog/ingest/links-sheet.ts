@@ -11,6 +11,7 @@ import { normalizeKey } from "../naming";
 import type { BatchOptions, UploadKind } from "../types";
 import { CANNOT_READ_IDENTIFIER, columnLetter, sheetColumnsSentence } from "./detect-step";
 import { distinct } from "./group";
+import { linkIdentity } from "./link-identity";
 import type { Adapter, CollectInput, Detected, SourceItem, UploadReject } from "./types";
 
 export interface SheetTable { title: string; header: string[]; rows: string[][] }
@@ -297,8 +298,7 @@ export function readLinksSheet(table: SheetTable, options: Pick<BatchOptions, "s
   const rejected: UploadReject[] = [];
   const warnings: string[] = [];
   const rows = sheetDataRows(table, detection.headerRow);
-  // Compared without the query: the same signed link with a new token is the same photo.
-  const linksOf = (cells: string[]) => detection.urlColumns.flatMap((c) => cellUrls(cells[c])).map((url) => url.split("?")[0]!);
+  const linksOf = (cells: string[]) => detection.urlColumns.flatMap((c) => cellUrls(cells[c])).map(linkIdentity);
 
   if (detection.identifierColumn >= 0) {
     const composite = detection.styleColumn !== null && detection.colourColumn !== null;

@@ -130,6 +130,18 @@ describe("collectDriveFolderOnWeb", () => {
     expect(progress[progress.length - 1]).toEqual([4, 4]);
   });
 
+  it("never lets a second file with one stored name overwrite the first: it is named instead", async () => {
+    const { drive, gets } = fakeDrive({ [ROOT]: [{ id: "a", name: "X_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "b", name: "X_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "c", name: "Y#_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "d", name: "Y_1.jpg", mimeType: "image/jpeg", size: "10" }] });
+    const { storage, objects } = fakeStorage();
+    const result = await collectDriveFolderOnWeb(input({ drive, storage }, {}, []));
+    expect(gets.sort()).toEqual(["a", "c"]);
+    expect(objects.get("gs://bucket/catalog-test/anta/b1/uploads/u7/X_1.jpg")!.buf).toEqual(Buffer.from("bytes of a"));
+    expect((result as { rejected: { name: string; reason: string }[] }).rejected).toEqual([
+      { name: "X_1.jpg", reason: "X_1.jpg has the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch." },
+      { name: "Y_1.jpg", reason: "Y_1.jpg has the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch." },
+    ]);
+  });
+
   it("stops before downloading when the folder is larger than DRIVE_FOLDER_MAX_BYTES", async () => {
     const half = String(Math.ceil(DRIVE_FOLDER_MAX_BYTES / 2) + 1);
     const { drive, gets } = fakeDrive({ [ROOT]: [{ id: "x", name: "a_1.jpg", mimeType: "image/jpeg", size: half }, { id: "y", name: "a_2.jpg", mimeType: "image/jpeg", size: half }] });

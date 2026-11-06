@@ -449,11 +449,15 @@ describe("nothing in a Supabase folder is lost without a word (owner, 2026-11-06
   }, 60_000);
 
   it("a tiny file inside a real product is a file of it, not a product of its own; system files are not listed (P2-D)", async () => {
-    const { client } = fakeClient({ "anta/10255347_Black/10255347_Black_1.jpg": undefined, "anta/10255347_Black/thumb.jpg": 300, "anta/10288257_Red/10288257_Red_1.jpg": undefined, "anta/10288257_Red/thumb.jpg": 300, "anta/10288257_Red/Thumbs.db": 200, "anta/OnlyTiny/thumb.jpg": 100 });
+    const { client } = fakeClient({ "anta/10255347_Black/10255347_Black_1.jpg": undefined, "anta/10255347_Black/thumb.jpg": 300, "anta/10288257_Red/10288257_Red_1.jpg": undefined, "anta/10288257_Red/thumb.jpg": 300, "anta/10288257_Red/Thumbs.db": 200, "anta/OnlyTiny/thumb.jpg": 100, "anta/10288257_Red/thumb_1.jpg": 300, "anta/10288257_Red/icon-2.png": 300, "anta/thumbnails/a.jpg": 90, "anta/thumbnails/b.jpg": 90, "anta/10299999_Blue/thumb.jpg": 90 });
     const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
     if (!read.ok || !("small" in read)) throw new Error("not read");
     expect(read.mode).toBe("filename");
-    expect(read.small.map((r) => [r.name, r.identifier])).toEqual([["10255347_Black/thumb.jpg", "10255347_Black"], ["10288257_Red/thumb.jpg", "10288257_Red"], ["OnlyTiny/thumb.jpg", "OnlyTiny"]]);
+    // No false products (P2-F): a file in a real product's folder is of that product, and a folder of only tiny files stands alone only with a product code.
+    expect(read.small.map((r) => [r.name, r.identifier])).toEqual([
+      ["10255347_Black/thumb.jpg", "10255347_Black"], ["10288257_Red/icon-2.png", "10288257_Red"], ["10288257_Red/thumb_1.jpg", "10288257_Red"], ["10288257_Red/thumb.jpg", "10288257_Red"],
+      ["10299999_Blue/thumb.jpg", "10299999_Blue"], ["OnlyTiny/thumb.jpg", undefined], ["thumbnails/a.jpg", undefined], ["thumbnails/b.jpg", undefined],
+    ]);
   });
 
   it("names each file under 1 KB under its product", async () => {

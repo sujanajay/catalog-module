@@ -194,6 +194,12 @@ describe("fetchSourceUrl", () => {
 });
 
 describe("a paste cell that looks like a link and is not one is named (PR 187 review P2-E)", () => {
+  it("a row id that only starts with www is an id, not a bad link", () => {
+    const t = parsePastedLinks("www.brand\thttps://h/a.jpg");
+    expect(t.badLinks).toEqual([]);
+    expect(t.rows[0]!.identifier).toBe("www.brand");
+  });
+
   it("lists it under its row's product; a colour or a price stays an ignored cell; a query never reaches the row", () => {
     const t = parsePastedLinks("X\thtp://h/a.jpg?token=abc\thttps://h/b.jpg\nY\tBlack\thttps://h/c.jpg\nwww.h.com/d.jpg\nZ_1.jpg\thttps://h/z.jpg");
     expect(t.badLinks).toEqual([{ row: 1, cell: "htp://h/a.jpg", identifier: "X" }, { row: 3, cell: "www.h.com/d.jpg", identifier: null }]);

@@ -132,6 +132,15 @@ describe("links-sheet.detectColumns", () => {
     ]);
   });
 
+  it("a repeated row whose photo is named in the query holds a new link, on the record (P1-B)", () => {
+    const rows = (...links: string[]) => read(table([["Option ID", "Image 1"], ...links.map((link) => ["ABC-123", link])]));
+    const byId = rows("https://h/img?id=1", "https://h/img?id=2", "https://h/img?id=3");
+    expect(byId.items).toHaveLength(1);
+    expect(byId.rejected.map((r) => r.name)).toEqual(["Row 3", "Row 4"]);
+    expect(rows("https://drive.google.com/uc?export=download&id=AAA", "https://drive.google.com/uc?export=download&id=BBB").rejected).toHaveLength(1);
+    expect(rows("https://h/a.jpg?X-Amz-Signature=1&X-Amz-Date=2", "https://h/a.jpg?X-Amz-Signature=3&X-Amz-Date=4").rejected).toEqual([]);
+  });
+
   it("a repeated row whose link differs only by its token holds no new link", () => {
     const r = read(table([["Option ID", "Image 1"], ["ABC-123", `${img("ABC123", 1)}?token=a`], ["ABC-123", `${img("ABC123", 1)}?token=b`]]));
     expect(r.rejected).toEqual([]);

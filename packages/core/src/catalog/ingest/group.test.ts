@@ -544,6 +544,19 @@ describe("copies across folders and names (owner, 2026-11-06)", () => {
     expect(photosUnderSeveralProducts(Array.from({ length: 400 }, (_, i) => row(`P${String(i).padStart(3, "0")}`, "chart", `own${i}`)))).toEqual([expect.objectContaining({ products: 400, photos: 1 })]);
   });
 
+  it("two pastes that differ only in the query keep one shot order too (P3-2)", () => {
+    const row = (u: string, id: string) => urlListItems(parsePastedLinks(`X\thttps://h/img?id=${id}`), u);
+    const order = (one: string, two: string) => groupItems([...row(one, "1"), ...row(two, "2")], opts(), undefined, (i) => (i.bytes.kind === "url" ? i.bytes.url : "")).products.get("X")!.map((i) => (i.bytes.kind === "url" ? i.bytes.url : ""));
+    expect(order("u1", "u2")).toEqual(["https://h/img?id=1", "https://h/img?id=2"]);
+    expect(order("zz", "aa")).toEqual(["https://h/img?id=1", "https://h/img?id=2"]);
+  });
+
+  it("a clash across two pastes names the folders, so the sender can tell which to fix (P3-1)", () => {
+    const row = (u: string, dir: string) => urlListItems(parsePastedLinks(`P\thttps://h/${dir}/P/P_1.jpg`), u);
+    const g = groupItems([...row("u1", "vm-ol"), ...row("u2", "vero-moda")], opts(), undefined, (i) => (i.bytes.kind === "url" ? i.bytes.url : ""));
+    expect(g.rejected[0]!.reason).toBe(duplicateShotMessage(1, "P", ["vero-moda/P/P_1.jpg", "vm-ol/P/P_1.jpg"]));
+  });
+
   it("two pastes keep one shot order whatever their upload ids, so a re-send stays unchanged (P2-B)", () => {
     const row = (u: string, dir: string, ...names: string[]) => urlListItems(parsePastedLinks(names.map((n) => `X\thttps://h/${dir}/${n}`).join("\n")), u);
     const order = (one: string, two: string) => groupItems([...row(one, "vm-ol", "a.jpg", "b.jpg"), ...row(two, "vero-moda", "a.jpg", "b.jpg")], opts(), undefined, (i) => (i.bytes.kind === "url" ? i.bytes.url : "")).products.get("X")!.map((i) => (i.bytes.kind === "url" ? i.bytes.url : ""));

@@ -122,10 +122,16 @@ export async function collectDriveFolderOnWeb(input: CollectInput, db?: Db): Pro
 
   const rejected: { name: string; reason: string }[] = [];
   const copy: DriveEntry[] = [];
+  // Drive lets two files in a folder share a name, and names are cleaned for storage: the second must not overwrite the first.
+  const stored = new Set<string>();
   for (const e of entries) {
     if (e.mimeType.startsWith(GOOGLE_APPS_PREFIX)) rejected.push({ name: e.relativePath, reason: `${e.relativePath} is not an image.` });
     else if ((e.size ?? 0) > DRIVE_FILE_MAX_BYTES) rejected.push({ name: e.relativePath, reason: `${e.relativePath} is larger than 40 MB and was skipped.` });
-    else copy.push(e);
+    else if (stored.has(uploadObjectPath(prefix, upload.id, e.relativePath))) rejected.push({ name: e.relativePath, reason: `${e.relativePath} has the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch.` });
+    else {
+      stored.add(uploadObjectPath(prefix, upload.id, e.relativePath));
+      copy.push(e);
+    }
   }
 
   let done = 0;
