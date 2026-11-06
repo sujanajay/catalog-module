@@ -92,6 +92,7 @@ describe("batch copy for the real state of the batch", () => {
   const text = (html: string) => html.replace(/<[^>]+>/g, "");
   it("does not say every image passed every check when photos were kept with Use as is", () => {
     expect(readyText(12, 0)).toBe("All 12 images are live and passed every check. Nothing needs your attention.");
+    expect(readyText(12, 1, 0, { productsLeftOut: 91 })).toBe("All 12 images are live. 1 photo was kept as is after a decision; everything else passed every check. 91 products were left out; the digest says why.");
     expect(readyText(12, 1)).toBe("All 12 images are live. 1 photo was kept as is after a decision; everything else passed every check. Nothing needs your attention.");
     const counts = { ...EMPTY_BATCH_COUNTS, outputs: 12, verified: 12, recheckOk: 12, recheckTotal: 12 };
     expect(text(renderToStaticMarkup(createElement(BatchBanner, { status: "done", counts, keptPhotos: 2 })))).toBe("DoneAll 12 images are live. 2 photos were kept as is after a decision; everything else passed every check. Nothing needs your attention.");

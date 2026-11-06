@@ -10,7 +10,9 @@ import { parseCsv } from "../../csv";
 import { normalizeKey } from "../naming";
 import type { BatchOptions, UploadKind } from "../types";
 import { CANNOT_READ_IDENTIFIER, columnLetter, sheetColumnsSentence } from "./detect-step";
-import type { Adapter, CollectInput, Detected, SourceItem } from "./types";
+import { distinct } from "./group";
+import { linkIdentity } from "./link-identity";
+import type { Adapter, CollectInput, Detected, SourceItem, UploadReject } from "./types";
 
 export interface SheetTable { title: string; header: string[]; rows: string[][] }
 
@@ -274,27 +276,33 @@ export interface LinksSheetResult {
   table: SheetTable;
   detection: ColumnDetection;                 // with options.sheetColumns applied
   items: SheetSourceItem[];
-  rejected: { name: string; reason: string }[];   // "Row <r> has no identifier."
+  rejected: UploadReject[];                       // "Row <r> has no identifier."
   warnings: string[];                             // the duplicate-identifier sentence
   detected: Detected;                             // for catalog_uploads.detected
+}
+
+/** The row sentence for a repeated identifier whose row holds links the first row does not. */
+export function repeatedRowMessage(row: number, identifier: string, links: number): string {
+  return `Row ${row} repeats ${identifier}, so its ${links} new ${links === 1 ? "link was" : "links were"} not used: only the first row of an identifier is read.`;
 }
 
 /**
  * Turn the rows of a links sheet into items. URL column order is shot order and a cell with several
  * URLs continues the numbering; a row without an identifier is rejected; a repeated normalised
- * identifier keeps its first row only.
+ * identifier keeps its first row only; a later row's new links are listed in `rejected`.
  */
 export function readLinksSheet(table: SheetTable, options: Pick<BatchOptions, "sheetColumns">, ctx: { uploadId: string; origin: UploadKind; message?: string }): LinksSheetResult {
   const detection = applySheetColumns(table, detectColumns(table), options.sheetColumns);
   const header = [table.header, ...table.rows][detection.headerRow - 1] ?? [];
   const items: SheetSourceItem[] = [];
-  const rejected: { name: string; reason: string }[] = [];
+  const rejected: UploadReject[] = [];
   const warnings: string[] = [];
   const rows = sheetDataRows(table, detection.headerRow);
+  const linksOf = (cells: string[]) => detection.urlColumns.flatMap((c) => cellUrls(cells[c])).map(linkIdentity);
 
   if (detection.identifierColumn >= 0) {
     const composite = detection.styleColumn !== null && detection.colourColumn !== null;
-    const seen = new Set<string>();
+    const seen = new Map<string, Set<string>>();
     const repeated = new Set<string>();
     for (const { r, cells } of rows) {
       const at = (c: number) => (cells[c] ?? "").trim();
@@ -306,11 +314,16 @@ export function readLinksSheet(table: SheetTable, options: Pick<BatchOptions, "s
         continue;
       }
       const key = normalizeKey(identifier);
-      if (seen.has(key)) {
+      const firstLinks = seen.get(key);
+      if (firstLinks) {
         repeated.add(key);
+        // The first row wins (the same rule as a clash: we do not guess which row is right). Sizes of one colour repeat
+        // the same links, which loses nothing; a link only this row has is a photo left out, so it is counted.
+        const lost = distinct(linksOf(cells)).filter((url) => !firstLinks.has(url));
+        if (lost.length) rejected.push({ name: `Row ${r}`, identifier, reason: repeatedRowMessage(r, identifier, lost.length) });
         continue;
       }
-      seen.add(key);
+      seen.set(key, new Set(linksOf(cells)));
       let n = 0;
       for (const c of detection.urlColumns) {
         for (const url of cellUrls(cells[c])) {

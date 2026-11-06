@@ -9,7 +9,7 @@
 // - Outcomes (F3-R1) are written at finalize and refreshed by the sweep for batches that ended in the last 24 hours,
 //   so a failed or cancelled batch, and an incident or touch that lands after finalize, are counted.
 // No function here throws into its caller's work: the callers wrap them (finalize, the sweep, the API routes).
-import { and, count, countDistinct, desc, eq, gte, inArray, isNotNull, isNull, min, sql } from "drizzle-orm";
+import { and, count, countDistinct, desc, eq, gte, inArray, isNotNull, isNull, min, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import {
   BATCH_OUTCOME_STATUSES,
@@ -239,18 +239,25 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
   const [touches] = await db.select({ n: count() }).from(catalogBatchTouches).where(eq(catalogBatchTouches.batchId, batchId));
   const [incidents] = await db.select({ n: count() }).from(catalogIncidents).where(eq(catalogIncidents.batchId, batchId));
   const [products] = await db.select({ n: count() }).from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId, batchId));
-  const [links] = await db.select({ n: countDistinct(catalogOutputs.productId), first: min(catalogOutputs.publishedAt) }).from(catalogOutputs)
+  const [links] = await db.select({ first: min(catalogOutputs.publishedAt) }).from(catalogOutputs)
     .where(and(eq(catalogOutputs.batchId, batchId), isNotNull(catalogOutputs.publishedAt)));
+  // Products with a live link on the batch's channels, whichever batch made it, as the digest and the sheet count them:
+  // an unchanged product keeps its earlier links (R1 exit 2 finding 5). A product list row without photos has none.
+  const [withLinks] = b.channels.length ? await db.select({ n: countDistinct(catalogOutputs.productId) }).from(catalogOutputs)
+    .innerJoin(catalogBatchProducts, and(eq(catalogBatchProducts.productId, catalogOutputs.productId), eq(catalogBatchProducts.batchId, batchId)))
+    .where(and(eq(catalogOutputs.isLive, true), inArray(catalogOutputs.channel, b.channels), ne(catalogBatchProducts.linkStatus, "missing_images"))) : [{ n: 0 }];
+  // What the batch was given and made nothing of: products, whole inputs or files. Any of them and it is not a clean run.
+  const productsLeftOut = b.counts.productsLeftOut ?? 0, inputLeftOut = productsLeftOut + (b.counts.uploadsNotRead ?? 0) + (b.counts.filesLeftOut ?? 0) > 0;
   const start = b.startedAt ?? b.createdAt;
   const endedAt = status === "done" ? (b.finishedAt ?? now) : b.updatedAt;
   const linksReadyAt = status === "done" ? (existing?.linksReadyAt ?? b.finishedAt ?? now) : (existing?.linksReadyAt ?? null);
   const [overlap] = await db.select({ n: count() }).from(catalogTrafficShifts)
     .where(sql`coalesce(${catalogTrafficShifts.shiftedUntil}, ${catalogTrafficShifts.shiftedAt}) > ${start.toISOString()}::timestamptz AND ${catalogTrafficShifts.shiftedAt} <= ${endedAt.toISOString()}::timestamptz`);
   const touchCount = Number(touches?.n ?? 0), incidentCount = Number(incidents?.n ?? 0);
-  const success = status === "done" && touchCount === 0 && incidentCount === 0;
+  const success = status === "done" && touchCount === 0 && incidentCount === 0 && !inputLeftOut;
   const row = {
     batchId, status, success,
-    cause: success ? null : status !== "done" ? status : touchCount ? "touched" : "incident",
+    cause: success ? null : status !== "done" ? status : touchCount ? "touched" : incidentCount ? "incident" : "input_left_out",
     isTest: b.isTest,
     // Out of the rate (review P2-1): a batch that never started (intake failed or cancelled before Start), and a cancel
     // within QUICK_CANCEL_MS of start.
@@ -258,7 +265,8 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
     startedAt: b.startedAt, firstLinksAt: dateOf(links?.first ?? null), linksReadyAt, endedAt,
     durationMs: linksReadyAt && b.startedAt ? Math.max(0, +linksReadyAt - +b.startedAt) : null,
     touches: touchCount, incidents: incidentCount, deployOverlap: Number(overlap?.n ?? 0) > 0,
-    products: Number(products?.n ?? 0), productsWithLinks: Number(links?.n ?? 0), recordedAt: now,
+    // The digest's total holds the products left out; a batch that ended without one adds them to its product rows.
+    products: b.digest?.products ?? Number(products?.n ?? 0) + productsLeftOut, productsWithLinks: Number(withLinks?.n ?? 0), recordedAt: now,
   };
   const { batchId: _key, ...update } = row;
   const [written] = await db.insert(catalogBatchOutcomes).values(row).onConflictDoUpdate({ target: catalogBatchOutcomes.batchId, set: update }).returning();

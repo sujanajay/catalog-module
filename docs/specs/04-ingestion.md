@@ -61,7 +61,7 @@ Rules for all sources:
   uploads_only` (`PRECEDENCES` from 02; default `uploads_then_links`) decides which wins for the same
   `(identifier, n)`. The card is shown only when both kinds exist.
 - A duplicate `(identifier, n)` inside the same precedence class rejects that product only; nothing
-  else is affected.
+  else is affected. Files with the same bytes are one file, not a duplicate (M1 D39).
 - Shot numbering (defined in 02, restated here because this spec applies it): a shot number has at
   most three digits; a trailing `_<number>` or `-<number>` with four or more digits is part of the
   identifier (`ONLY-SHOES_Autumnwinter_5079628_15380145.jpg` is shot 1 of identifier

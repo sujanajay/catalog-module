@@ -5,7 +5,7 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { detectPastedText } from "./detect";
 import { groupItems } from "./group";
 import {
-  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
+  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, SUPABASE_MAX_FILES, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
   SUPABASE_OFF, SUPABASE_OTHER_PROJECT, SUPABASE_PRIVATE, SUPABASE_TOO_LARGE, SUPABASE_UNREADABLE, supabaseFolderLinks, supabaseFolderText,
   supabaseStorageClient, type SupabaseListState, type SupabaseStorageLike,
 } from "./supabase-folder";
@@ -59,7 +59,7 @@ describe("Supabase folder links (M1-F1-R4)", () => {
     if (!listed.done) throw new Error("not listed in one request");
     expect(listed.files).toHaveLength(1008);
     expect(listed.skipped).toBe(1);
-    expect(listed.truncated).toBe(false);
+    expect(listed.small).toEqual(["ZSKU3/tiny.jpg"]);
     expect(calls).toContain("list softlines anta/Many 1000");
     expect(calls.every((c) => c.startsWith("list") || c.startsWith("bucket"))).toBe(true);
   });
@@ -435,5 +435,39 @@ describe("bounded, jittered Supabase retries (review 2)", () => {
     const { client, calls } = folders((prefix) => (prefix === "brand/P5" ? new SyntaxError("Unexpected token < in JSON") : null));
     expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
     expect(calls.get("brand/P5")).toBe(1);
+  });
+});
+
+describe("nothing in a Supabase folder is lost without a word (owner, 2026-11-06)", () => {
+  it("refuses a folder over the batch limit whole, rather than cut it part way through a product", async () => {
+    const paths: Record<string, number | undefined> = {};
+    for (let i = 0; i <= SUPABASE_MAX_FILES; i++) paths[`anta/P${String(i).padStart(5, "0")}_1.jpg`] = undefined;
+    const { client } = fakeClient(paths);
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    expect(read).toEqual({ ok: false, error: SUPABASE_TOO_LARGE });
+    expect(SUPABASE_TOO_LARGE).toContain("30,000");
+  }, 60_000);
+
+  it("a tiny file inside a real product is a file of it, not a product of its own; system files are not listed (P2-D)", async () => {
+    const { client } = fakeClient({ "anta/10255347_Black/10255347_Black_1.jpg": undefined, "anta/10255347_Black/thumb.jpg": 300, "anta/10288257_Red/10288257_Red_1.jpg": undefined, "anta/10288257_Red/thumb.jpg": 300, "anta/10288257_Red/Thumbs.db": 200, "anta/OnlyTiny/thumb.jpg": 100, "anta/10288257_Red/thumb_1.jpg": 300, "anta/10288257_Red/icon-2.png": 300, "anta/thumbnails/a.jpg": 90, "anta/thumbnails/b.jpg": 90, "anta/10299999_Blue/thumb.jpg": 90 });
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    if (!read.ok || !("small" in read)) throw new Error("not read");
+    expect(read.mode).toBe("filename");
+    // No false products (P2-F): a file in a real product's folder is of that product, and a folder of only tiny files stands alone only with a product code.
+    expect(read.small.map((r) => [r.name, r.identifier])).toEqual([
+      ["10255347_Black/thumb.jpg", "10255347_Black"], ["10288257_Red/icon-2.png", "10288257_Red"], ["10288257_Red/thumb_1.jpg", "10288257_Red"], ["10288257_Red/thumb.jpg", "10288257_Red"],
+      ["10299999_Blue/thumb.jpg", "10299999_Blue"], ["OnlyTiny/thumb.jpg", undefined], ["thumbnails/a.jpg", undefined], ["thumbnails/b.jpg", undefined],
+    ]);
+  });
+
+  it("names each file under 1 KB under its product", async () => {
+    const { client } = fakeClient({ "anta/A/A_1.jpg": undefined, "anta/A/A_2.jpg": 300, "anta/B/B_1.jpg": 200 });
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    if (!read.ok) throw new Error("not read");
+    expect(read.small).toEqual([
+      { name: "A/A_2.jpg", identifier: "A", reason: "A_2.jpg is under 1 KB, so it was treated as a placeholder, not a photo." },
+      { name: "B/B_1.jpg", identifier: "B", reason: "B_1.jpg is under 1 KB, so it was treated as a placeholder, not a photo." },
+    ]);
+    expect(read.message).toContain("2 files under 1 KB skipped.");
   });
 });

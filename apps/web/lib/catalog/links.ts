@@ -95,7 +95,7 @@ async function addSupabaseFolder(id: string, client: SupabaseStorageLike, link: 
   if (resume && prior?.status !== "pending") return folderAnswer(prior);
   const read = await readSupabaseFolder(client, link, { state: listingOf(prior, key) });
   const values: LinkRowValues = read.ok
-    ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: read.mode } } }
+    ? { kind: "url_list", name: read.title, sourceUrl: read.text, status: "uploaded", error: null, detected: { kind: "url_list", fileCount: read.photos, title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: read.mode, ...(read.small.length ? { small: read.small } : {}) } } }
     : read.reading
       ? { kind: "url_list", name: read.title, sourceUrl: read.url, status: "pending", error: null, detected: { kind: "url_list", title: read.title, message: read.message, supabaseFolder: { url: read.url, mode: "filename", listing: read.state } } }
       : read.state

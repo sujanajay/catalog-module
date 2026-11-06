@@ -48,7 +48,7 @@ import { googleSheetAdapter, sheetCopyUri } from "./google-sheet";
 import { allocateShots, shotNumbers, shotRanks } from "./append";
 import { hashedTaskId, INGEST_ROUTE } from "./hand-off";
 import {
-  baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isSameProductReject, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
+  baseName, byText, distinct, fmt, groupItems, isDuplicateReject, isProductRefusal, isSameProductReject, LEFT_OUT_WORDS, leftOutProducts, newestIdentifier, olderSameProductMessage, originalOf, previewRows, sameProductMessage, shotFlags,
   warningSentences, type ItemDimensions,
 } from "./group";
 import { checkImage, classifyImageReject, corruptMessage, imageFlags } from "./image-check";
@@ -59,8 +59,8 @@ import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./link
 import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts, uploadTimes } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
-import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SourceItem } from "./types";
-import { fetchSourceUrl, urlListAdapter } from "./url-list";
+import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SameFile, SourceItem, UploadReject } from "./types";
+import { badLinkRejects, fetchSourceUrl, parsePastedLinks, pastedText, urlListAdapter } from "./url-list";
 import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
 import type { InputRoot, StoredRoot } from "./roots";
@@ -299,6 +299,9 @@ async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "ve
   if (upload.kind === "url_list") detected.rows = items.length;
   // A Supabase folder paste keeps its link and naming mode (M1-F1-R4) for the grouping sentence.
   if (prior?.supabaseFolder) detected.supabaseFolder = prior.supabaseFolder;
+  if (prior?.webRejected?.length) detected.webRejected = prior.webRejected;
+  const lostBefore = [...(prior?.webRejected ?? []), ...(prior?.supabaseFolder?.small ?? []), ...(upload.kind === "url_list" ? badLinkRejects(parsePastedLinks(await pastedText(input))) : [])];
+  if (lostBefore.length) detected.rejected = lostBefore;
   return { items, warnings: [], productList: false, detected };
 }
 
@@ -653,6 +656,17 @@ async function resumeAttempt(
 
 interface ListInput { rows: ProductListRow[]; picked: boolean }
 
+/** A reject row as leftOutProducts reads it. */
+const ledgerRows = (rejected: GroupingResult["rejected"], uploadRejects: readonly UploadReject[]) => [
+  ...rejected.map((r) => ({ identifier: r.item.identifier, name: r.item.originalName, reason: r.reason })),
+  ...uploadRejects.map((r) => ({ identifier: r.identifier ?? "", name: r.name, reason: r.reason })),
+];
+
+/** The sentence for a product list that could not be used: its rows are not checked against the photos. */
+export function listNotReadMessage(name: string): string {
+  return `The product list ${name} could not be read, so nothing could be checked against it. Products in it with no photos are not named. Fix the list and send it in a new batch.`;
+}
+
 interface Assembled {
   grouped: GroupingResult;
   resultOf: (item: SourceItem) => OkResult | undefined;
@@ -664,6 +678,7 @@ interface Assembled {
   missing: string[];
   eans: Map<string, string>;
   listSkuIds: Map<string, string[]>;
+  uploadRejects: UploadReject[];
 }
 
 /** Opptra SKU ids on product list rows: every column whose header holds "opptrasku". */
@@ -681,7 +696,7 @@ function rowKeys(row: ProductListRow): string[] {
  * product), the sheets' warnings, then the product list: token-containment renames applied to the
  * grouping, link statuses, the missing identifiers, EANs and SKU ids per identifier.
  */
-function assemble(manifests: UploadManifest[], lists: ListInput[], options: BatchOptions): Assembled {
+function assemble(manifests: UploadManifest[], lists: ListInput[], options: BatchOptions, listRejects: UploadReject[] = []): Assembled {
   const results = new Map<string, ItemResult>();
   const items: SourceItem[] = [];
   for (const m of manifests) {
@@ -698,8 +713,16 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
     if (!r) unreadable.set(item, `${baseName(item)} could not be read. Add it again.`);
     else if (!r.ok) unreadable.set(item, r.reason);
   }
-  const grouped = groupItems(items, options, unreadable);
+  // Every item was read and hashed before this step, so a same-number clash is judged by its bytes at no extra read.
+  const sha256Of = (item: SourceItem) => {
+    const r = results.get(itemKey(item));
+    return r?.ok ? r.sha256 : null;
+  };
+  const grouped = groupItems(items, options, unreadable, sha256Of);
   for (const m of manifests) pushAll(grouped.warnings, m.warnings);
+  // What the uploads lost before grouping (m.detected holds only those; finalDetected adds the read rejects to the stored copy).
+  const uploadRejects: UploadReject[] = [...manifests.flatMap((m) => (m.productList ? [] : (m.detected.rejected ?? []).map((r) => ({ ...r })))), ...listRejects];
+  for (const r of listRejects) grouped.warnings.push(r.reason);
 
   const list = lists.length ? lists.flatMap((l) => l.rows) : null;
   const byMatchColumn = lists.some((l) => l.picked);
@@ -718,8 +741,26 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
         renamed.set(final, merged);
       }
       grouped.products = new Map([...renamed].sort(([a], [b]) => byText(a, b)));
+      // A rejected file of a renamed product stays with it, so that product is not read as left out.
+      for (const r of grouped.rejected) r.item.identifier = m.renamed.get(r.item.identifier) ?? r.item.identifier;
+      for (const s of grouped.sameFiles ?? []) s.identifier = m.renamed.get(s.identifier) ?? s.identifier;
     }
     statuses = linkStatuses(list, grouped, { byMatchColumn });
+    // A left-out product is matched like a kept one, so its list row (under any of the match rules) is that product and
+    // not a second one: it takes the list's name, and only then is a row with no photos under it.
+    const left = leftOutProducts(ledgerRows(grouped.rejected, uploadRejects), grouped.products.keys()).map((l) => l.identifier);
+    if (left.length) {
+      const named = matchProductList(list, [...grouped.products.keys(), ...left], { byMatchColumn });
+      const finalOf = new Map(left.map((id) => [id, named.renamed.get(id) ?? id]));
+      for (const r of grouped.rejected) r.item.identifier = finalOf.get(r.item.identifier) ?? r.item.identifier;
+      for (const r of uploadRejects) if (r.identifier) r.identifier = finalOf.get(r.identifier) ?? r.identifier;
+      const finals = [...finalOf.values()];
+      statuses = linkStatuses(list, { ...grouped, products: new Map([...grouped.products, ...finals.map((id): [string, SourceItem[]] => [id, []])]) }, { byMatchColumn });
+      for (const id of finals) {
+        if (statuses.get(id) === "ok") statuses.set(id, "missing_images");
+        else statuses.delete(id);
+      }
+    }
     const eanByKey = new Map<string, string>();
     for (const row of list) if (row.ean) for (const k of rowKeys(row)) if (!eanByKey.has(k)) eanByKey.set(k, row.ean);
     for (const [id, rows] of m.byIdentifier) {
@@ -758,15 +799,21 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
     sha256ByItem.set(item, r.sha256);
     dimensions.set(item, { width: r.width, height: r.height });
   }
-  return { grouped, resultOf, sha256ByItem, dimensions, list, byMatchColumn, statuses, missing, eans, listSkuIds };
+  return { grouped, resultOf, sha256ByItem, dimensions, list, byMatchColumn, statuses, missing, eans, listSkuIds, uploadRejects };
 }
 
 /** Rows of every product list upload (a list whose identifier column cannot be told is skipped; step 2 asks). */
-async function readLists(uploads: CatalogUpload[], manifests: Map<string, UploadManifest>, deps: Pick<IngestDeps, "storage">, prefix: string, options: BatchOptions): Promise<ListInput[]> {
+async function readLists(uploads: CatalogUpload[], manifests: Map<string, UploadManifest>, deps: Pick<IngestDeps, "storage">, prefix: string, options: BatchOptions, notRead: UploadReject[] = []): Promise<ListInput[]> {
   const out: ListInput[] = [];
+  const unread = (upload: CatalogUpload) => notRead.push({ name: upload.name, reason: listNotReadMessage(upload.name), upload: true });
   for (const upload of uploads) {
     const m = manifests.get(upload.id);
-    if (!m?.productList || m.detected.cannotRead) continue;
+    if (!m?.productList) continue;
+    // Step 2 asks for the column first; a batch that goes on without an answer has not used this list.
+    if (m.detected.cannotRead) {
+      unread(upload);
+      continue;
+    }
     const input = { batchId: upload.batchId, brandSlug: "", prefix, upload, options, deps: deps as IngestDeps };
     const src = upload.kind === "product_list" ? { gsUri: upload.gcsUri ?? "", name: upload.name } : await sheetSource(input);
     const { buf } = await deps.storage.downloadBuffer(src.gsUri);
@@ -775,6 +822,7 @@ async function readLists(uploads: CatalogUpload[], manifests: Map<string, Upload
       out.push({ rows: await readProductList(buf, src.name, columns), picked: !!columns });
     } catch (err) {
       if (isRetryableStorageError(err)) throw err;
+      unread(upload);
     }
   }
   return out;
@@ -796,6 +844,10 @@ interface PreviewState {
   duplicates: OverwritePreview["duplicates"];
   skus: [string, string[]][];
   topLevelFolders: string[];
+  /** Shots that came as several files with the same bytes (absent on states saved before it). */
+  sameFiles?: SameFile[];
+  /** What the uploads lost before grouping (absent on states saved before it). */
+  uploadRejects?: UploadReject[];
 }
 
 /**
@@ -892,9 +944,6 @@ async function placeRaw(storage: IngestDeps["storage"], bucket: string, target: 
   if (head.exists && head.sha256 === r.sha256) return uri;
   return storage.uploadBuffer(target, (await storage.downloadBuffer(r.uri)).buf, r.mime, { sha256: r.sha256 });
 }
-
-/** findOrCreateProduct's operator sentences (an empty or clashing path); anything else is rethrown. */
-const isProductRefusal = (err: unknown) => err instanceof Error && (/^".+" (cannot be used in an image link|would share image links with)/.test(err.message) || err.message.startsWith("The identifier is empty"));
 
 function mergeSkus(skus: ResolveResult, extra: string[] | undefined): ResolveResult {
   if (!extra?.length) return skus;
@@ -1069,6 +1118,10 @@ interface GroupState {
   linkSource: string;
   /** M1-F1-R2: the roots of a per-root batch with their modes (absent otherwise, and on states saved before it). */
   roots?: StoredRoot[];
+  /** Shots that came as several files with the same bytes (absent on states saved before it). */
+  sameFiles?: SameFile[];
+  /** What the uploads lost before grouping (absent on states saved before it). */
+  uploadRejects?: UploadReject[];
 }
 
 /**
@@ -1131,8 +1184,9 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     const m = await loadJson<UploadManifest>(deps, manifestPath(prefix, u.id));
     if (m) manifests.set(u.id, m);
   }
-  const lists = await readLists(uploads, manifests, deps, prefix, batch.options);
-  const a = assemble([...manifests.values()], lists, batch.options);
+  const listRejects: UploadReject[] = [];
+  const lists = await readLists(uploads, manifests, deps, prefix, batch.options, listRejects);
+  const a = assemble([...manifests.values()], lists, batch.options, listRejects);
   const { grouped } = a;
 
   // Matching and the overwrite preview come first: duplicate spellings leave the grouping here. Every
@@ -1160,6 +1214,8 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     links: linkUploads.reduce((n, u) => n + manifests.get(u.id)!.items.filter((i) => i.bytes.kind === "url").length, 0),
     linkSource: linkSourceWords(linkUploads),
     ...(grouped.roots ? { roots: storedRoots(grouped.roots, uploads, batch.options) } : {}),
+    ...(grouped.sameFiles ? { sameFiles: grouped.sameFiles } : {}),
+    ...(a.uploadRejects.length ? { uploadRejects: a.uploadRejects } : {}),
   };
   await saveJson(deps, groupStatePath(prefix, token), state);
   if (!(await lease.grouping({ groupTotal: state.work.length }, 0))) return lease.stopped();
@@ -1245,8 +1301,8 @@ async function groupProducts(
     try {
       found = await findOrCreateProduct(db, { brandSlug: batch.brandSlug, isTest: batch.isTest, identifier: id, skus, productType: batch.productType, actor: batch.createdBy });
     } catch (err) {
-      if (!isProductRefusal(err)) throw err;
-      refuse(id, (err as Error).message);
+      if (!(err instanceof Error) || !isProductRefusal(err.message)) throw err;
+      refuse(id, err.message);
       continue;
     }
     const isNew = found.isNew || createdHere.has(found.product.id);
@@ -1358,12 +1414,15 @@ async function groupProducts(
     rejected: grouped.rejected.map((r) => ({ item: stored(r.item), reason: r.reason })),
     warnings: grouped.warnings, missing, list: state.list, byMatchColumn: state.byMatchColumn,
     duplicates: [...state.duplicates, ...found2], skus, topLevelFolders: state.topLevelFolders,
+    ...(state.sameFiles ? { sameFiles: state.sameFiles } : {}),
+    ...(state.uploadRejects ? { uploadRejects: state.uploadRejects } : {}),
   };
   const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;
   const existing = state.existing.filter((p) => productOf.has(p.identifier));
   const rejects = grouped.rejected.filter((r) => !isSameProductReject(r.reason));
   // Links that could not be downloaded are counted on their own, not as unsupported files (spec 14b F5).
   const linkRejects = rejects.filter((r) => isLinkReject(r.reason));
+  const leftOut = leftOutProducts(ledgerRows(grouped.rejected, state.uploadRejects ?? []), grouped.products.keys());
   const counts: Partial<BatchCounts> = {
     products: withPhotos.length, sources: shots.length,
     skuResolved: [...withPhotos, ...missing].filter((id) => productOf.get(id)!.resolved || productOf.get(id)!.skuIds.length > 0).length,
@@ -1371,6 +1430,8 @@ async function groupProducts(
     unsupportedFiles: rejects.filter((r) => !isDuplicateReject(r.reason) && !isLinkReject(r.reason)).length,
     linkFailures: linkRejects.length,
     duplicateFiles: rejects.filter((r) => isDuplicateReject(r.reason)).length,
+    // Every product left out, whatever the reason: read by the batch page and the outcome, so "All N products" stays true.
+    productsLeftOut: leftOut.length,
     newProducts: newCount, existingProducts: withPhotos.length - newCount,
     shotsToRemove: existing.reduce((s, p) => s + p.shotsToRemove, 0),
     previewReady: true, failReason: null,
@@ -1378,7 +1439,11 @@ async function groupProducts(
   };
   let failReason: string | null = null;
   if (!shots.length && !state.waitingForColumn) {
-    failReason = noPhotosReason(grouped.rejected, state.uploadErrors, state.links ? { links: state.links, source: state.linkSource } : undefined);
+    // Photos that clash or are badly named were found: that is what the batch says, not "no photos".
+    const named = leftOut.filter((l) => l.why !== "links" && l.why !== "unreadable");
+    failReason = named.length
+      ? `${leftOut.length === 1 ? "The product" : `None of the ${fmt(leftOut.length)} products`} could ${leftOut.length === 1 ? "not " : ""}be used: ${distinct(leftOut.map((l) => LEFT_OUT_WORDS[l.why].text)).join("; ")}. Fix the files and start again.`
+      : noPhotosReason(grouped.rejected, state.uploadErrors, state.links ? { links: state.links, source: state.linkSource } : undefined);
   }
   const place: PlaceState = { version: 1, token, shots, preview, counts, uploadIds: state.uploadIds, failReason, waitingForColumn: state.waitingForColumn };
   await saveJson(deps, placeStatePath(prefix, token), place);

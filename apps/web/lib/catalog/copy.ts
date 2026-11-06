@@ -1,6 +1,6 @@
 // Pure copy helpers shared by server pages and client components (no server imports here).
 import { RUPEES_NOT_CONFIGURED } from "@catalog/core/catalog/cost";
-import { intakeTimeText, PHASE_WORDS, phaseCount, shownPhase, styliSkipText } from "@catalog/core/catalog/pipeline/status";
+import { intakeTimeText, leftOutText, PHASE_WORDS, phaseCount, shownPhase, styliSkipText, type LeftOutCounts } from "@catalog/core/catalog/pipeline/status";
 import type { BatchCounts, BatchStatus } from "@catalog/core/catalog/types";
 
 /** The operator's sentence when the ingest hand-off to the worker queue failed for a transient reason. */
@@ -57,9 +57,11 @@ export function estimateText(estimate: CostEstimate | null | undefined): string 
  * The Ready banner for a batch where an operator kept flagged photos with "Use as is" (spec 07 4.7:
  * those photos are live "kept as is"); the plain "passed every check" sentence would be untrue then.
  */
-export function readyText(images: number, keptPhotos: number, styliSkipped = 0): string {
+export function readyText(images: number, keptPhotos: number, styliSkipped = 0, leftOut: LeftOutCounts = {}): string {
   const live = `All ${count(images)} ${plural(images, "image is", "images are")} live`;
-  const tail = styliSkipped > 0 ? styliSkipText(styliSkipped) : "Nothing needs your attention.";
+  const skip = styliSkipped > 0 ? styliSkipText(styliSkipped) : "";
+  const out = leftOutText(leftOut);
+  const tail = out ? [out, skip].filter(Boolean).join(" ") : skip || "Nothing needs your attention.";
   if (keptPhotos <= 0) return `${live} and passed every check. ${tail}`;
   return `${live}. ${count(keptPhotos)} ${plural(keptPhotos, "photo was", "photos were")} kept as is after a decision; everything else passed every check. ${tail}`;
 }
