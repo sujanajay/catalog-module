@@ -179,6 +179,19 @@ row, call and determinism entry, and a round fails when Cloud Run turned away mo
 problem). Every non-200 failure and every FAILED determinism line now names its reason (for example
 "1 non-200: platform 503 after 2 retries" or "1 non-200: HTTP 503").
 
+A forced deploy on 2026-11-06 stopped at the CPU `catalog-upscale` gate on one x4 determinism call with "1 non-200: HTTP
+502" and 0 platform retries (catalog-check-upscale-pbm8w). The status was not in the rule, and neither was the time: the
+call's report entry says the 502 came after 250 s. The container did see that call. The 12 x4 requests in the request log
+are all 200, and the only inference the probe got no answer for (130.84 s on instance 53428619) finished 14 s after the
+client's 502, so the 502 came from between the probe and a healthy container; attempt 2 passed unchanged. A 2 s limit
+cannot apply to a failure like this, so a non-JSON 502 now counts as a platform rejection at any elapsed time, on /matte,
+/upscale and /health alike, with the same limits (2 retries per call, more than 2 rejections per round fails). A late one
+prints its time in the retry line. A non-JSON 429 or 503 keeps the 2 s limit, because Cloud Run documents an instance killed
+for memory or a lost connection to it as a 500 or 503. The service has no 502 of its own, and a JSON 502 stays a failure. What this gives up: a
+failure that does end in a late non-JSON 502 passes the gate if its retry works and it stays within the limits, so read
+the `retries` list of a gate report when one appears. `probe_get` in infra/lib/services.sh (curl, web and worker) has its
+own rule and still treats a 502 as a real answer.
+
 ### Laptop network blips while a gate waits (2026-11-05)
 
 Two gates failed because the laptop lost DNS while `gcloud run jobs execute --wait` was waiting, although the job

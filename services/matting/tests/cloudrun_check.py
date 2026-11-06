@@ -47,15 +47,15 @@ def request(url, token=None, data=None, content_type=None, timeout=TIMEOUT, limi
 # gate failed on one GET /health that Cloud Run answered 503 in 0.7 ms while it retired an idle instance; every
 # measurement had passed and /health answered 200 again 3 s later. A probe's /health read is therefore tried up to
 # TRANSIENT_ATTEMPTS times, TRANSIENT_DELAYS_S apart and within TRANSIENT_MAX_S, but only after a clearly passing
-# platform error (transient_reason): a 429 or 503 whose body is not the service's own JSON answer (the matting service
-# answers every error of its own as a JSON object, services/matting/app.py), a connection error before the request was
-# sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
+# platform error (transient_reason): a 429, 502 or 503 whose body is not the service's own JSON answer (the matting service
+# answers every error of its own as a JSON object and has no 502, services/matting/app.py), a connection error before the
+# request was sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
 # any other status, the service's own error body, a read timeout (a slow candidate) and a malformed answer. The measured
 # /matte and /upscale calls have their own, narrower rule (PLATFORM_RETRIES below).
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_DELAYS_S = (5, 10)
 TRANSIENT_MAX_S = 90
-TRANSIENT_STATUSES = (429, 503)
+TRANSIENT_STATUSES = (429, 502, 503)
 
 
 def transient_reason(error):
@@ -108,22 +108,36 @@ def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.mo
 # /matte or /upscale call is tried again, up to PLATFORM_RETRIES times, PLATFORM_RETRY_DELAYS_S apart, only after a
 # platform rejection: an HTTP 429 or 503 whose body is not the service's own JSON answer (transient_reason) that came back
 # within PLATFORM_REJECTION_MAX_S (a call turned away at the front door; an instance that crashes during inference fails
-# the call after its run time, and that stays a failure). Each retry is printed and recorded; only the attempt a container
-# answered is timed. Never retried: the service's own error (a JSON body), any other status, a transport failure or
+# the call after its run time, and that stays a failure), or such a 502 at any time (below). Each retry is printed and
+# recorded; only the attempt a container answered is timed. Never retried: the service's own error (a JSON body), any other status, a transport failure or
 # timeout, a wrong answer. A round (one burst of calls at once) fails when Cloud Run turned away more than
 # PLATFORM_REJECTIONS_PER_ROUND of its attempts, so a real capacity problem still fails the gate; the gate runs have seen
 # at most 1 (7g6tv) and before that 0 in 8 GPU gate runs.
+#
+# A 502 (2026-11-06, catalog-check-upscale-pbm8w, 12 x4 determinism calls on the CPU service): one call got a 502 after
+# 250 s. Its request was on instance 53428619, which finished 14 s later and logged a 200, 130.84 s of inference, so the
+# client's 502 came from between the probe and a healthy container. The time limit cannot tell this one apart: it is
+# what a long call looks like, however it ends. So a 502 is a platform rejection at any elapsed time, on the body alone
+# (not the service's own JSON answer). That is safe where a late 503 is not: the service has no 502 of its own, and
+# Cloud Run documents an instance killed for memory or a lost connection to it as a 500 or 503
+# (run/docs/troubleshooting), both still failures when late.
+# A late one names its time in the printed retry, and the per-call and per-round limits above apply to it too.
 PLATFORM_RETRIES = 2
 PLATFORM_RETRY_DELAYS_S = (5, 10)
 PLATFORM_REJECTION_MAX_S = 2.0
 PLATFORM_REJECTIONS_PER_ROUND = 2
+PLATFORM_ANY_TIME_STATUSES = (502,)
 
 
 def platform_rejection(error, elapsed):
-    """Why a measured call's `error` is Cloud Run turning the call away before any container took it, or None."""
-    if not isinstance(error, urllib.error.HTTPError) or elapsed > PLATFORM_REJECTION_MAX_S:
+    """Why a measured call's `error` came from the platform and not from a container's answer, or None."""
+    if not isinstance(error, urllib.error.HTTPError):
         return None
-    return transient_reason(error)
+    late = elapsed > PLATFORM_REJECTION_MAX_S
+    if late and error.code not in PLATFORM_ANY_TIME_STATUSES:
+        return None
+    reason = transient_reason(error)
+    return f"{reason} after {elapsed:.1f} s" if reason and late else reason
 
 
 def served_call(call, label, sleep=time.sleep, log=None, busy_retries=0, busy_sleep_s=0):

@@ -72,11 +72,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # What Cloud Run's front end answers when the instance is gone (2026-11-05: an instance shutting down), unlike the
 # service's own JSON errors.
 PLATFORM_503 = b"<html><head><title>503 Service Unavailable</title></head><body>Service Unavailable</body></html>"
+# The service has no 502 of its own, and the probe never kept the body of the 2026-11-06 one: this stands for any non-JSON body.
+PLATFORM_502 = b"<html><head><title>502 Server Error</title></head><body>Error: Server Error</body></html>"
+OWN_502 = b'{"error": "upstream failed"}'
 
 
 def platform_answer(handler, fake):
-    """Answers the next GET from `fake.health_answers` when one is left: "503" or "429" as the platform (HTML), "503-own"
-    as the service's own JSON error, "500" as a service error, "reset" closes the connection without an answer."""
+    """Answers the next GET from `fake.health_answers` when one is left: "503", "502" or "429" as the platform (HTML),
+    "503-own" and "502-own" as the service's own JSON error, "500" as a service error, "reset" closes the connection
+    without an answer."""
     with fake.lock:
         kind = fake.health_answers.pop(0) if fake.health_answers else None
     if kind is None:
@@ -85,7 +89,8 @@ def platform_answer(handler, fake):
         handler.close_connection = True
         handler.connection.shutdown(socket.SHUT_RDWR)
         return True
-    status, body, content = {"503": (503, PLATFORM_503, "text/html"), "429": (429, b"Rate exceeded.", "text/plain"),
+    status, body, content = {"503": (503, PLATFORM_503, "text/html"), "502": (502, PLATFORM_502, "text/html"),
+                             "502-own": (502, OWN_502, "application/json"), "429": (429, b"Rate exceeded.", "text/plain"),
                              "503-own": (503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json"),
                              "500": (500, b'{"error": "health failed"}', "application/json")}[kind]
     handler.send_response(status)
@@ -102,10 +107,13 @@ PEAKS = {"birefnet-general": 5000, "birefnet-general-lite": 3000, "birefnet-hrso
 class FakeMatting:
     """One instance with `resident` cut-out slots (least recently used out), per-model VRAM and optional failures."""
 
-    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=(), platform_calls=()):
+    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=(), platform_calls=(),
+                 platform_502_calls=(), own_502_calls=()):
         self.resident, self.fail_model, self.advertised, self.target = resident, fail_model, advertised or resident, target
         # POST numbers (from 1) that Cloud Run's front end turns away (PLATFORM_503) before the service sees them.
         self.platform_calls, self.posts = set(platform_calls), 0
+        # POST numbers answered 502 by the front end (HTML) or by the service itself (JSON).
+        self.platform_502_calls, self.own_502_calls = set(platform_502_calls), set(own_502_calls)
         self.health_extra = health_extra or {}
         self.health_answers = list(health_answers)
         self.sessions, self.loads, self.calls, self.health_queries = ["birefnet-general"], {"birefnet-general": 1}, [], []
@@ -140,9 +148,13 @@ class FakeMatting:
                 model = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["model"][0]
                 with fake.lock:
                     fake.posts += 1
-                    rejected = fake.posts in fake.platform_calls
+                    rejected, posts = fake.posts in fake.platform_calls, fake.posts
                 if rejected:
                     return self.reply(503, PLATFORM_503, "text/html")
+                if posts in fake.platform_502_calls:
+                    return self.reply(502, PLATFORM_502, "text/html")
+                if posts in fake.own_502_calls:
+                    return self.reply(502, OWN_502, "application/json")
                 with fake.lock:
                     fake.calls.append(model)
                     if model in fake.sessions:
@@ -291,10 +303,12 @@ class FakeUpscale:
     count)`, when given, is the X-Upscale-Ms header of each answer (the service's inference time; None leaves it out)."""
 
     def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None, health_answers=(),
-                 platform_calls=(), own_503_calls=()):
+                 platform_calls=(), own_503_calls=(), platform_502_calls=(), own_502_calls=()):
         self.mode, self.calls, self.loaded, self.work_ms = mode, [], False, work_ms
         # Call numbers (from 1) answered 503 by Cloud Run's front end (HTML, no instance) or by the service itself (JSON).
         self.platform_calls, self.own_503_calls = set(platform_calls), set(own_503_calls)
+        # The same for a 502.
+        self.platform_502_calls, self.own_502_calls = set(platform_502_calls), set(own_502_calls)
         self.health_answers = list(health_answers)
         self.instances, self.busy_calls, self.uptime, self.health_delay = list(instances), set(busy_calls), uptime, health_delay
         self.health_calls = 0
@@ -341,10 +355,16 @@ class FakeUpscale:
                     return self.reply(503, PLATFORM_503, "text/html")
                 if count in fake.own_503_calls:
                     return self.reply(503, b'{"error": "upscale failed"}', "application/json")
+                if count in fake.platform_502_calls:
+                    return self.reply(502, PLATFORM_502, "text/html")
+                if count in fake.own_502_calls:
+                    return self.reply(502, OWN_502, "application/json")
                 if fake.mode == "busy":
                     return self.reply(503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json")
                 if fake.mode == "platform-503":
                     return self.reply(503, PLATFORM_503, "text/html")
+                if fake.mode == "platform-502":
+                    return self.reply(502, PLATFORM_502, "text/html")
                 with Image.open(io.BytesIO(data)) as source:
                     factor = 1 if fake.mode == "wrong-size" else int(self.path.rsplit("scale=", 1)[1])
                     out = source.convert("RGB").resize((source.width * factor, source.height * factor), Image.Resampling.NEAREST)
@@ -1048,7 +1068,10 @@ def test_transient_reason_names_only_passing_platform_errors():
     assert probe.transient_reason(http_error(429, b"Rate exceeded.")) == "HTTP 429 from the platform, not the service"
     assert probe.transient_reason(http_error(503, b"")) is not None
     assert probe.transient_reason(http_error(503, b'{"error": "upscale model swinir-x4 unavailable"}')) is None
-    for code in (400, 401, 403, 404, 500, 502, 504):
+    assert probe.transient_reason(http_error(502, PLATFORM_502)) == "HTTP 502 from the platform, not the service"
+    assert probe.transient_reason(http_error(502, b"")) is not None
+    assert probe.transient_reason(http_error(502, OWN_502)) is None
+    for code in (400, 401, 403, 404, 500, 504):
         assert probe.transient_reason(http_error(code, b"<html></html>")) is None
     assert probe.transient_reason(urllib.error.URLError(ConnectionRefusedError())) is not None
     assert probe.transient_reason(urllib.error.URLError(socket.timeout("timed out"))) == "connection failed before the request was sent"
@@ -1153,14 +1176,106 @@ def test_measured_round_retries_one_platform_503_and_times_only_the_answered_att
     assert "platform retries swinir-x2 64x96: 1 in 3 calls (not timed; at most 2 per round)" in capsys.readouterr().out
 
 
-def test_platform_rejection_is_a_fast_non_json_429_or_503_only():
+def test_platform_rejection_is_a_fast_non_json_429_or_503_or_any_non_json_502():
     assert probe.platform_rejection(http_error(503, PLATFORM_503), 0.1) == "HTTP 503 from the platform, not the service"
     assert probe.platform_rejection(http_error(429, b"Rate exceeded."), 0.1) == "HTTP 429 from the platform, not the service"
     # Slower than PLATFORM_REJECTION_MAX_S: possibly an instance that crashed during the call; never retried.
     assert probe.platform_rejection(http_error(503, PLATFORM_503), probe.PLATFORM_REJECTION_MAX_S + 0.1) is None
     assert probe.platform_rejection(http_error(503, b'{"error": "upscale failed"}'), 0.1) is None
     assert probe.platform_rejection(http_error(500, PLATFORM_503), 0.1) is None
+    assert probe.platform_rejection(http_error(504, PLATFORM_502), 0.1) is None
     assert probe.platform_rejection(urllib.error.URLError(ConnectionRefusedError()), 0.1) is None
+    # A 502 has no time limit (2026-11-06: 250 s), and a late one says how late.
+    assert probe.platform_rejection(http_error(502, PLATFORM_502), 0.1) == "HTTP 502 from the platform, not the service"
+    assert probe.platform_rejection(http_error(502, PLATFORM_502), 250.0) == "HTTP 502 from the platform, not the service after 250.0 s"
+    # The service's own 502 is a real answer, fast or late.
+    assert probe.platform_rejection(http_error(502, OWN_502), 0.1) is None
+    assert probe.platform_rejection(http_error(502, OWN_502), 250.0) is None
+
+
+# 2026-11-06 (catalog-check-upscale-pbm8w): one determinism call got a 502 after 250 s while its container was still
+# working. These run with every attempt past PLATFORM_REJECTION_MAX_S, as that one was.
+@pytest.fixture
+def every_attempt_is_late(monkeypatch):
+    monkeypatch.setattr(probe, "PLATFORM_REJECTION_MAX_S", -1.0)
+
+
+def test_determinism_round_passes_after_one_late_platform_502_retried(fake_upscale, capsys, every_attempt_is_late):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_502_calls={8})
+    [entry] = report["determinism"]
+    assert code == 0 and report["passed"] is True, report["failures"]
+    assert len(entry["calls"]) == 12 and all(c["status"] == 200 for c in entry["calls"]) and len(fake.calls) == 2 + 13
+    assert entry["platformRetries"] == 1 and slept == [probe.PLATFORM_RETRY_DELAYS_S[0]]
+    [retry] = report["retries"]
+    assert retry["status"] == 502 and retry["nextInS"] == 5 and retry["reason"].startswith("HTTP 502 from the platform, not the service after ")
+    assert "12 calls, 1 platform retries, 2 instances, 1 distinct outputs (byte-identical): passed" in out
+
+
+def test_determinism_round_still_fails_the_services_own_502(fake_upscale, capsys, every_attempt_is_late):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, own_502_calls={8})
+    [entry] = report["determinism"]
+    assert code == 1 and report["failures"] == ["swinir-x4 800x1200 determinism: 1 non-200: HTTP 502"]
+    assert report["retries"] == [] and len(fake.calls) == 2 + 12 and entry["platformRetries"] == 0 and slept == []
+    assert "FAILED (1 non-200: HTTP 502)" in out
+
+
+def test_a_fast_own_502_is_not_retried_either(fake_upscale, capsys):
+    code, report, fake, *_ = run_7g6tv_shape(fake_upscale, capsys, own_502_calls={8})
+    assert code == 1 and report["retries"] == [] and len(fake.calls) == 2 + 12
+
+
+def test_determinism_round_still_fails_a_late_platform_503(fake_upscale, capsys, every_attempt_is_late):
+    # Cloud Run documents an instance killed for memory or a lost connection to it as a 500 or 503, so the time limit stays.
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_calls={8})
+    assert code == 1 and report["failures"] == ["swinir-x4 800x1200 determinism: 1 non-200: HTTP 503"] and report["retries"] == []
+
+
+def test_more_than_the_cap_of_platform_502s_in_one_round_still_fails(fake_upscale, capsys, every_attempt_is_late):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_502_calls={4, 5, 6})
+    [entry] = report["determinism"]
+    assert code == 1 and all(c["status"] == 200 for c in entry["calls"]) and entry["platformRetries"] == 3
+    assert report["failures"] == ["swinir-x4 800x1200 determinism round 1: Cloud Run turned away 3 attempts in one round of 12 calls "
+                                  "(at most 2); a capacity problem, not a passing rejection"]
+    code, report, *_ = run_7g6tv_shape(fake_upscale, capsys, platform_502_calls={4, 5})
+    assert code == 0 and report["determinism"][0]["platformRetries"] == 2
+
+
+def test_a_service_that_only_answers_platform_502s_stops_the_probe(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(mode="platform-502")
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["passed"] is False
+    assert any("platform 502 after 2 retries" in failure for failure in report["failures"]), report["failures"]
+
+
+def test_measured_upscale_round_retries_one_late_platform_502(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(platform_502_calls={2})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
+    row = reports[0][1]["rows"][0]
+    assert code == 0 and row["non200"] == 0 and row["platformRetries"] == 1 and len(fake.calls) == 4
+
+
+def test_matting_probe_retries_a_late_platform_502_and_still_fails_its_own(fake_matting, every_attempt_is_late):
+    fake = fake_matting(resident=4, platform_502_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 0, report["failures"]
+    assert report["rows"][0]["platformRetries"] == 1 and report["rows"][0]["non200"] == 0
+    assert [(r["call"], r["status"]) for r in report["retries"]] == [("bria-rmbg /matte", 502)]
+    fake = fake_matting(resident=4, own_502_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and report["failures"] == ["bria-rmbg: 1 non-200: HTTP 502"] and report["retries"] == []
+
+
+def test_health_read_retries_a_platform_502_but_not_the_services_own(fake_upscale):
+    slept, reports = [], []
+    fake = fake_upscale(health_answers=["502"])
+    args = ["--probe-upscale", fake.url, "--sizes", "64x96", "--rounds", "1", "--run", "up-run", *BUCKET]
+    code = probe.probe_upscale_main(args, report_writer=lambda run, report, file: (reports.append(report), "gs://x")[1], sleep=slept.append)
+    assert code == 0 and slept == [probe.TRANSIENT_DELAYS_S[0]]
+    assert reports[0]["retries"][0]["reason"] == "HTTP 502 from the platform, not the service"
+    fake = fake_upscale(health_answers=["502-own"])
+    args[1] = fake.url
+    assert probe.probe_upscale_main(args, report_writer=lambda run, report, file: "gs://x", sleep=slept.append) == 1
 
 
 def test_matting_probe_retries_a_platform_503_on_a_matte_call_and_still_fails_its_own_error(fake_matting, capsys):
