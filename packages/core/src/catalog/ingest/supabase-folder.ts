@@ -8,6 +8,7 @@ import { byText, folderIdentifier } from "./group";
 import { sourceItemFromPath } from "./local-files";
 import { fileRootMode, onlyShapeFolders } from "./roots";
 import { canonicalFolderUrl, parseSupabaseFolderLink, type SupabaseFolderLink } from "./supabase-link";
+import type { UploadReject } from "./types";
 
 export { canonicalFolderUrl, parseSupabaseFolderLink, supabaseFolderLinks, withoutSupabaseFolders, type SupabaseFolderLink } from "./supabase-link";
 
@@ -32,7 +33,7 @@ export const SUPABASE_OTHER_PROJECT = "This Supabase link is from a project we c
 export const SUPABASE_PRIVATE = "This Supabase folder is private, so its photos cannot be read by link. Download the photos and drop them here.";
 export const SUPABASE_EMPTY = "This Supabase folder has no photos. Check the link, then paste again.";
 export const SUPABASE_UNREADABLE = "This Supabase folder could not be read. Check the link, then paste again.";
-export const SUPABASE_TOO_LARGE = "This Supabase folder is too large to read by link. Paste a smaller folder inside it, or download the photos and drop them here.";
+export const SUPABASE_TOO_LARGE = "This Supabase folder is too large for one batch (more than 30,000 photos or 10,000 folders), so none of it was read. Paste the smaller folders inside it, one batch each.";
 export const SUPABASE_PAUSED = "Supabase stopped answering while this folder was being read. Press Try again, or paste the link again, to carry on from where it stopped.";
 export const SUPABASE_PAUSED_CONTINUE = "A Supabase folder stopped part way. Press Try again on it, or remove it, then continue.";
 
@@ -139,12 +140,14 @@ async function withListSlot<T>(call: () => Promise<T>): Promise<T> {
 /** Where a folder listing got to: folders still to list (paths below the folder link), files found, counts. */
 export interface SupabaseListState {
   pending: string[]; files: SupabaseFile[]; skipped: number; folders: number;
+  /** The paths of the files under 1 KB (`skipped` counts them), so they can be listed by name. */
+  small?: string[];
   /** How many times each folder paused the listing so far (absent: never). */
   pauses?: Record<string, number>;
 }
 
 export type SupabaseListing =
-  | { done: true; files: SupabaseFile[]; skipped: number; truncated: boolean }
+  | { done: true; files: SupabaseFile[]; skipped: number; small: string[] }
   | { done: false; state: SupabaseListState };
 
 export interface SupabaseListOptions {
@@ -161,8 +164,9 @@ export interface SupabaseListOptions {
 
 /**
  * Every file below the folder (sub-folders included), name sorted. Dotfiles and Supabase's
- * `.emptyFolderPlaceholder` are left out; files under 1 KB are skipped and counted. Stops at
- * SUPABASE_MAX_FILES (`truncated`). Folders are listed SUPABASE_LIST_CONCURRENCY at a time (and at most
+ * `.emptyFolderPlaceholder` are left out; files under 1 KB are skipped, counted and named. Past SUPABASE_MAX_FILES (what one
+ * batch takes, M1-F1-R7) the listing throws TooLarge: cutting a folder part way would deliver part of a product, and a later
+ * re-send would then remove its live shots past the cut. Folders are listed SUPABASE_LIST_CONCURRENCY at a time (and at most
  * SUPABASE_GLOBAL_CONCURRENCY list calls per instance); when the slice time is up, no new folder is started and
  * the state is returned (`done: false`) for the next request. A folder's entries count only once all its pages
  * are read, so a state never holds half a folder. Each list call is tried SUPABASE_LIST_ATTEMPTS times on a
@@ -178,8 +182,8 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
   const pending = [...(opts.state?.pending ?? [""])];
   const files = [...(opts.state?.files ?? [])];
   let skipped = opts.state?.skipped ?? 0;
+  const small = [...(opts.state?.small ?? [])];
   let folders = opts.state?.folders ?? 0;
-  let truncated = files.length >= SUPABASE_MAX_FILES;
   let failure: unknown = null;
   const failed: string[] = [];
   let started = 0;
@@ -202,7 +206,7 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
     const prefix = [link.prefix, rel].filter(Boolean).join("/");
     const found: SupabaseFile[] = [];
     const dirs: string[] = [];
-    let small = 0;
+    const tiny: string[] = [];
     for (let offset = 0; ; offset += PAGE) {
       const page = await listPage(prefix, offset);
       for (const entry of page) {
@@ -213,27 +217,23 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
           continue;
         }
         const size = typeof entry.metadata?.size === "number" ? entry.metadata.size : null;
-        if (size !== null && size < SUPABASE_PLACEHOLDER_BYTES) small++;
+        if (size !== null && size < SUPABASE_PLACEHOLDER_BYTES) tiny.push(path);
         else found.push({ path, size });
       }
       if (page.length < PAGE) break;
     }
     // The whole folder is read: only now does it count.
     pending.push(...dirs);
-    skipped += small;
-    for (const file of found) {
-      if (files.length >= SUPABASE_MAX_FILES) {
-        truncated = true;
-        break;
-      }
-      files.push(file);
-    }
+    skipped += tiny.length;
+    small.push(...tiny);
+    if (files.length + found.length > SUPABASE_MAX_FILES) throw new TooLarge();
+    files.push(...found);
   };
 
   const inFlight = new Set<Promise<void>>();
   for (;;) {
     // Each request starts at least one folder, so a listing always moves forward.
-    while (failure === null && !truncated && pending.length && inFlight.size < concurrency && (now() < stopAt || started === 0)) {
+    while (failure === null && pending.length && inFlight.size < concurrency && (now() < stopAt || started === 0)) {
       // Too many folders: a sentence instead of reading without end.
       if (++folders > SUPABASE_MAX_FOLDERS) {
         failure = new TooLarge();
@@ -262,11 +262,11 @@ export async function listSupabaseFolder(client: SupabaseStorageLike, link: Supa
     for (const rel of failed) pauses[rel] = (pauses[rel] ?? 0) + 1;
     const stuck = failed.find((rel) => pauses[rel]! >= SUPABASE_MAX_PAUSES);
     if (stuck !== undefined) throw new FolderKeepsFailing(stuck);
-    throw new ListPaused({ pending: [...failed, ...pending], files, skipped, folders: folders - failed.length, pauses });
+    throw new ListPaused({ pending: [...failed, ...pending], files, skipped, small, folders: folders - failed.length, pauses });
   }
   const pauses = opts.state?.pauses;
-  if (!truncated && pending.length) return { done: false, state: { pending, files, skipped, folders, ...(pauses ? { pauses } : {}) } };
-  return { done: true, files: files.sort((a, b) => byText(a.path, b.path)), skipped, truncated };
+  if (pending.length) return { done: false, state: { pending, files, skipped, small, folders, ...(pauses ? { pauses } : {}) } };
+  return { done: true, files: files.sort((a, b) => byText(a.path, b.path)), skipped, small: small.sort(byText) };
 }
 
 /** The public object URL of a file in the folder (each path segment encoded). */
@@ -296,6 +296,39 @@ export function supabaseFolderText(link: SupabaseFolderLink, files: SupabaseFile
     return url;
   });
   return { text: lines.join("\n"), mode };
+}
+
+/** What a system writes beside photos: not a photo anyone sent. */
+const SYSTEM_FILE = /^(thumbs\.db|desktop\.ini|\.ds_store)$/i;
+
+/**
+ * The files under 1 KB as rejects, under a product only when they really name one: a stem a real file has; else the one
+ * product of the folder they sit in; else, in a folder with no real file, a name with a product code or a stem that
+ * matches its folder. So `X/thumb_1.jpg` is a file of X, `thumbnails/a.jpg` is a file of no product, and a folder holding
+ * only a product's tiny files reads as that product left out. System files are not listed.
+ */
+export function supabaseSmallRejects(link: SupabaseFolderLink, small: string[], files: SupabaseFile[], mode: "folder" | "filename"): UploadReject[] {
+  const own = link.prefix.split("/").pop()!;
+  const direct = onlyShapeFolders(files.map((f) => f.path.split("/").slice(0, -1)));
+  const itemOf = (path: string) => sourceItemFromPath(direct ? `${own}/${path}` : path, { kind: "gcs", gsUri: "" }, "supabase", "drive_folder");
+  const dirOf = (path: string) => path.split("/").slice(0, -1).join("/");
+  const productOf = (item: ReturnType<typeof itemOf>) => (mode === "folder" || !normalizeKey(item.identifier) ? folderIdentifier(item) : item.identifier);
+  const realIn = new Map<string, Set<string>>();
+  for (const f of files) realIn.set(dirOf(f.path), (realIn.get(dirOf(f.path)) ?? new Set()).add(productOf(itemOf(f.path)) ?? ""));
+  const realStems = new Set([...realIn.values()].flatMap((ids) => [...ids].map(normalizeKey)));
+  const hasCode = (name: string) => /\d/.test(name);
+  return small.filter((path) => !SYSTEM_FILE.test(path.split("/").pop()!)).map((path) => {
+    const item = itemOf(path);
+    const stem = mode === "folder" ? "" : item.identifier;
+    const folder = folderIdentifier(item) ?? "";
+    const inFolder = realIn.get(dirOf(path));
+    let identifier = "";
+    if (normalizeKey(stem) && realStems.has(normalizeKey(stem))) identifier = stem;
+    else if (inFolder) identifier = inFolder.size === 1 ? [...inFolder][0]! : "";
+    else if (normalizeKey(stem) && (hasCode(stem) || normalizeKey(stem) === normalizeKey(folder))) identifier = stem;
+    else if (hasCode(folder) || (mode === "folder" && normalizeKey(item.identifier) === normalizeKey(folder))) identifier = folder;
+    return { name: path, ...(identifier ? { identifier } : {}), reason: `${path.split("/").pop()!} is under 1 KB, so it was treated as a placeholder, not a photo.` };
+  });
 }
 
 /**
@@ -344,19 +377,18 @@ export function isReadCall(method: string, path: string): boolean {
 }
 
 /** What the paste box says for a listed folder. */
-export function supabaseFolderMessage(link: SupabaseFolderLink, files: SupabaseFile[], skipped: number, truncated: boolean, mode: "folder" | "filename"): string {
+export function supabaseFolderMessage(link: SupabaseFolderLink, files: SupabaseFile[], skipped: number, mode: "folder" | "filename"): string {
   const folders = new Set(files.map((f) => f.path.split("/").slice(0, -1).join("/")).filter(Boolean)).size;
   const fmt = (n: number) => n.toLocaleString("en-US");
   const where = `Supabase folder ${[link.bucket, link.prefix].filter(Boolean).join("/")}`;
   const parts = [`${where}: ${fmt(files.length)} ${files.length === 1 ? "photo" : "photos"}${folders ? ` in ${fmt(folders)} ${folders === 1 ? "folder" : "folders"}` : ""}, grouped ${mode === "folder" ? "by folder name" : "by file name"}.`];
   if (skipped) parts.push(`${fmt(skipped)} ${skipped === 1 ? "file" : "files"} under 1 KB skipped.`);
-  if (truncated) parts.push(`Only the first ${fmt(SUPABASE_MAX_FILES)} photos are read; make a second batch for the rest.`);
   return parts.join(" ");
 }
 
 /** What a pasted folder link gives: the paste text, a listing still under way, or the sentence why it cannot be read. */
 export type SupabaseFolderRead =
-  | { ok: true; url: string; text: string; mode: "folder" | "filename"; photos: number; message: string; title: string }
+  | { ok: true; url: string; text: string; mode: "folder" | "filename"; photos: number; message: string; title: string; small: UploadReject[] }
   | { ok: false; reading: true; url: string; state: SupabaseListState; photos: number; message: string; title: string }
   | { ok: false; reading?: false; error: string; url?: string; title?: string; state?: SupabaseListState };
 
@@ -381,10 +413,10 @@ export async function readSupabaseFolder(client: SupabaseStorageLike | null, lin
     if (!(await client.isPublic(parsed.bucket))) return { ok: false, error: SUPABASE_PRIVATE };
     const listed = await listSupabaseFolder(client, parsed, opts);
     if (!listed.done) return { ok: false, reading: true, url: canonicalFolderUrl(parsed), state: listed.state, photos: listed.state.files.length, message: supabaseReadingMessage(parsed, listed.state), title };
-    const { files, skipped, truncated } = listed;
+    const { files, skipped, small } = listed;
     if (!files.length) return { ok: false, error: SUPABASE_EMPTY };
     const { text, mode } = supabaseFolderText(parsed, files);
-    return { ok: true, url: canonicalFolderUrl(parsed), text, mode, photos: files.length, message: supabaseFolderMessage(parsed, files, skipped, truncated, mode), title };
+    return { ok: true, url: canonicalFolderUrl(parsed), text, mode, photos: files.length, message: supabaseFolderMessage(parsed, files, skipped, mode), title, small: supabaseSmallRejects(parsed, small, files, mode) };
   } catch (err) {
     // A listing that paused on Supabase errors keeps where it got to, so pasting the link again carries on.
     // Nothing read at all (the folder link itself failed) is unreadable, as before.

@@ -118,16 +118,30 @@ describe("collectDriveFolderOnWeb", () => {
     ]);
     expect(objects.get("gs://bucket/catalog-test/anta/b1/uploads/u7/Shoes/2.heic")).toEqual({ buf: Buffer.from("bytes of s2"), mime: "image/heic" });
     expect(gets.sort()).toEqual(["a1", "r1", "s1", "s2"]);
+    const skipped = [
+      { name: "Notes", reason: "Notes is not an image." },
+      { name: "Shoes/huge.tif", reason: "Shoes/huge.tif is larger than 40 MB and was skipped." },
+    ];
     expect(result).toEqual({
       kind: "drive_folder", fileCount: 4, topLevelFolders: ["Rectangle Shots", "Shoes"],
-      rejected: [
-        { name: "Notes", reason: "Notes is not an image." },
-        { name: "Shoes/huge.tif", reason: "Shoes/huge.tif is larger than 40 MB and was skipped." },
-      ],
+      rejected: skipped, webRejected: skipped,
       message: "Drive folder, 4 files copied.",
     });
     expect(progress[0]).toEqual([0, 4]);
     expect(progress[progress.length - 1]).toEqual([4, 4]);
+  });
+
+  it("never lets a second file with one stored name overwrite the first: it is named instead", async () => {
+    // Listed second by Drive, "a" still wins: the winner is the lowest file id, on every send (P2-G).
+    const { drive, gets } = fakeDrive({ [ROOT]: [{ id: "b", name: "X_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "a", name: "X_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "c", name: "Y#_1.jpg", mimeType: "image/jpeg", size: "10" }, { id: "d", name: "Y_1.jpg", mimeType: "image/jpeg", size: "10" }] });
+    const { storage, objects } = fakeStorage();
+    const result = await collectDriveFolderOnWeb(input({ drive, storage }, {}, []));
+    expect(gets.sort()).toEqual(["a", "c"]);
+    expect(objects.get("gs://bucket/catalog-test/anta/b1/uploads/u7/X_1.jpg")!.buf).toEqual(Buffer.from("bytes of a"));
+    expect((result as { rejected: { name: string; reason: string }[] }).rejected).toEqual([
+      { name: "X_1.jpg", reason: "X_1.jpg would be stored under the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch." },
+      { name: "Y_1.jpg", reason: "Y_1.jpg would be stored under the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch." },
+    ]);
   });
 
   it("stops before downloading when the folder is larger than DRIVE_FOLDER_MAX_BYTES", async () => {

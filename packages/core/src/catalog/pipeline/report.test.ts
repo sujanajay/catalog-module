@@ -9,6 +9,12 @@ it("keeps rejected images without DB rows in the final report",async()=>{
   expect(result!.unsupportedFiles).toEqual([expect.objectContaining({name:"A.bmp",identifier:"A"})]);
   expect(result!.duplicates).toHaveLength(2);
 });
+it("lists the products left out in the ledger, reading a state stored before this field existed",async()=>{
+  const ledger={products:[{identifier:"OK",items:[]}],rejected:[{item:{item:{originalName:"B_1.jpg",identifier:"B"}},reason:"Two files claim shot 1 of B: B_1.jpg, B-1.jpg. Rename one and re-upload."},{item:{item:{originalName:"OK_2.bmp",identifier:"OK"}},reason:"OK_2.bmp is a BMP file. Save it as JPEG or PNG and add it again."}]};
+  const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))},"catalog/x/batch");
+  expect(result!.leftOutProducts).toMatchObject([{identifier:"B",why:"same_shot",photos:1,files:["B_1.jpg"]}]);
+  expect(result!.sameFiles).toEqual([]);
+});
 it("lists links that could not be downloaded apart from the unsupported files, as the counts do (spec 14b F5)",async()=>{
   const ledger={rejected:[{item:{item:{originalName:"A.bmp",identifier:"A"}},reason:"A.bmp is a BMP file. Save it as JPEG or PNG and add it again."},{item:{item:{originalName:"L_1.jpg",identifier:"L"}},reason:"Row 2, column 1: https://example.com/L_1.jpg did not return an image (got text/plain, HTTP 404)."}]};
   const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))},"catalog-test/anta/batch");
@@ -50,4 +56,24 @@ it("notes a product whose type could not be checked once, first, with no model i
   expect(note).not.toMatch(/gemini|claude|haiku|qwen|anthropic|google|openrouter|model/i);
   const flush="Photos 1 and 2: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image";
   expect(mergeNotes(null,["Noon img 2: Skipped.",note,flush])).toBe(`${note}; ${flush}; Noon img 2: Skipped.`);
+});
+it("carries what the uploads lost before grouping: under 1 KB files, sheet rows and lists not read, each under its product",async()=>{
+  const ledger={products:[{identifier:"OK",items:[]}],rejected:[],uploadRejects:[
+    {name:"A/A_1.jpg",identifier:"A",reason:"A_1.jpg is under 1 KB, so it was treated as a placeholder, not a photo."},
+    {name:"Row 3",identifier:"OK",reason:"Row 3 repeats OK, so its 1 new link was not used: only the first row of an identifier is read."},
+    {name:"items.csv",upload:true,reason:"The product list items.csv could not be read, so nothing could be checked against it."},
+  ]};
+  const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))} as never,"p");
+  expect(result!.unsupportedFiles.map(r=>(r as {name:string}).name)).toEqual(["A/A_1.jpg","Row 3","items.csv"]);
+  expect(result!.leftOutProducts).toMatchObject([{identifier:"A",why:"unreadable",photos:1,files:["A/A_1.jpg"]}]);
+});
+it("an older spelling's photo is out unless the product carrying on holds the same bytes, and a copy merged in a product later left out is not reported (P2-C, P3-1)",async()=>{
+  const reason="X_Black_3.jpg is the same product as X-Black. Only the newest photos are used.";
+  const ledger={products:[{identifier:"X-Black",items:[{rawUri:null,sha256:"kept",item:{originalName:"X-Black_1.jpg",origin:"image",bytes:{kind:"gcs"}}}]}],sameFiles:[{identifier:"Gone",n:1,kept:"a",dropped:["b"]},{identifier:"X-Black",n:1,kept:"c",dropped:["d"]}],rejected:[
+    {item:{sha256:"kept",item:{originalName:"X_Black_1.jpg",identifier:"X_Black"}},reason},
+    {item:{sha256:"only-here",item:{originalName:"X_Black_3.jpg",identifier:"X_Black"}},reason},
+  ]};
+  const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))} as never,"p");
+  expect(result!.unsupportedFiles).toEqual([expect.objectContaining({name:"X_Black_1.jpg",copyOfKept:true}),expect.not.objectContaining({copyOfKept:true})]);
+  expect(result!.sameFiles!.map(s=>s.identifier)).toEqual(["X-Black"]);
 });

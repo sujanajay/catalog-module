@@ -13,7 +13,9 @@ import { CHANNEL_IDS, UPSCALED_SENTENCE, type ChannelId, type LinkStatus, type C
 import { outputNote, type Output } from "./publish";
 import { flagDetails } from "../qa/reasons";
 import type { RecheckResult } from "../recheck/index";
-import { isDuplicateReject } from "../ingest/group";
+import { isDuplicateReject, isOlderSpelling, leftOutProducts, photosUnderSeveralProducts, type SharedPhotos } from "../ingest/group";
+import type { LeftOutProduct, SameFile, UploadReject } from "../ingest/types";
+import { normalizeKey } from "../naming";
 import { isLinkReject } from "../ingest/link-reasons";
 import type * as storage from "../../storage";
 export function batchSheetStatus(member: { linkStatus: LinkStatus; change: ChangeKind }): SheetStatus {
@@ -93,18 +95,21 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
 }
 /** The batch exports; `exceptionsCsv` and `notesCsv` (M1-S5) are the digest sheets as csv, absent on older batches. */
 export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean; exceptionsCsv?:string; notesCsv?:string }
-export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}> }
+export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}>;leftOutProducts?:LeftOutProduct[];sameFiles?:SameFile[];sharedPhotos?:SharedPhotos[] }
 /** The reject ledger written by ingest includes files that have no product/source DB row. */
 export async function readIngestReport(store:Pick<typeof storage,"headObject"|"downloadBuffer"|"getBucketName">,prefix:string):Promise<IngestReport|undefined> {
   const uri=`gs://${store.getBucketName()}/${prefix}/derived/_ingest/preview-state.json`;
   if(!(await store.headObject(uri)).exists) return undefined;
-  type StoredOrigin={rawUri:string|null;item:{originalName:string;origin:string;bytes:{kind:string;url?:string}}};
-  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{items:StoredOrigin[]}[]};
-  const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason}));
+  type StoredOrigin={rawUri:string|null;sha256?:string|null;item:{originalName:string;origin:string;bytes:{kind:string;url?:string}}};
+  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{sha256?:string|null;item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{identifier?:string;items:StoredOrigin[]}[];sameFiles?:SameFile[];uploadRejects?:UploadReject[]};
+  // An older spelling's photo is out unless the product carrying on already holds the same bytes.
+  const keptShas=new Map((state.products ?? []).map(p=>[normalizeKey(p.identifier ?? ""),new Set(p.items.map(i=>i.sha256))] as const));
+  const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason,...(isOlderSpelling(r.reason) && r.item.sha256 && keptShas.get(normalizeKey(r.item.item.identifier))?.has(r.item.sha256) ? {copyOfKept:true}:{})}));
+  const uploadRejects=state.uploadRejects ?? [];
   const sourceOrigins:NonNullable<IngestReport["sourceOrigins"]>={};
   for(const source of (state.products ?? []).flatMap(p=>p.items)) if(source.rawUri) sourceOrigins[source.rawUri]={origin:source.item.origin,...(source.item.bytes.kind==="url" ? {sourceUrl:source.item.bytes.url}:{relativePath:source.item.originalName})};
   // Links that could not be downloaded are listed on their own, as counts.linkFailures counts them (spec 14b F5).
-  return {unsupportedFiles:rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),linkFailures:rejected.filter(r=>isLinkReject(r.reason)),duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins};
+  return {unsupportedFiles:[...rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),...uploadRejects.filter(r=>!isLinkReject(r.reason))],linkFailures:[...rejected.filter(r=>isLinkReject(r.reason)),...uploadRejects.filter(r=>isLinkReject(r.reason))],duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins,leftOutProducts:leftOutProducts([...rejected,...uploadRejects.map(r=>({identifier:r.identifier ?? "",name:r.name,reason:r.reason}))],(state.products ?? []).flatMap(p=>p.identifier ? [p.identifier]:[])),sameFiles:(state.sameFiles ?? []).filter(s=>keptShas.has(normalizeKey(s.identifier)) || !state.products),sharedPhotos:photosUnderSeveralProducts(state.products ?? [])};
 }
 export async function workbookCsvSheets(bytes:Buffer):Promise<{name:string;csv:string}[]> {
   const workbook=new ExcelJS.Workbook(); await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
@@ -191,21 +196,35 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const qaCap=selected.some(output=>output.flags.includes("qa_cap"));
   const delivery=deliveredLinks({batchId,channels:batch.channels,heldProductIds:new Set(pairs.filter(p=>p.pair.change==="pending_attention").map(p=>p.product.id)),outputs});
   const split=splitRecheck(extra.recheck,delivery.carried);
+  const uploadRejects=uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected as {name?:unknown;reason?:unknown;identifier?:unknown}[]:[]);
+  const isLink=(r:{reason?:unknown})=>typeof r.reason==="string" && isLinkReject(r.reason);
+  // What an upload rejected before grouping (a sheet row with no identifier, a Drive file over the limit or not copied)
+  // is not in the grouping's ledger on older batches, and an upload that failed gave no items at all: all are listed.
+  const keyOf=(r:unknown)=>{ const f=r as {name?:unknown;reason?:unknown}; return `${String(f.name)}|${String(f.reason)}`; };
+  const ledger=new Set([...(extra.ingest?.unsupportedFiles ?? []),...(extra.ingest?.linkFailures ?? [])].map(keyOf));
+  const uploadOnly=uploadRejects.filter(r=>!ledger.has(keyOf(r)));
+  const failedUploads=uploads.flatMap(u=>u.status==="failed" ? [{name:u.name,reason:u.error ?? `${u.name} could not be read.`,upload:true}]:[]);
+  const unsupportedFiles=[...(extra.ingest?.unsupportedFiles ?? []),...uploadOnly.filter(r=>!isLink(r)),...failedUploads],linkFailures=[...(extra.ingest?.linkFailures ?? []),...uploadOnly.filter(isLink)];
+  // What the batch was given and made nothing of, counted once each: by product, else by whole input, else by file. An
+  // older spelling's file that the product carrying on already holds is only a copy.
+  const leftOut=extra.ingest?.leftOutProducts ?? [],leftOutKeys=new Set(leftOut.map(l=>normalizeKey(l.identifier)));
+  const notUsed=[...unsupportedFiles,...linkFailures] as {reason?:unknown;identifier?:unknown;upload?:unknown;copyOfKept?:unknown}[];
+  const uploadsNotRead=notUsed.filter(f=>f.upload===true).length;
+  const filesLeftOut=notUsed.filter(f=>f.upload!==true && f.copyOfKept!==true && !(typeof f.identifier==="string" && leftOutKeys.has(normalizeKey(f.identifier)))).length;
   // qaCapped is a jsonb-only key (not in BatchCounts) read by deriveBatchState for the 07 4.5 banner.
-  const counts = {...batch.counts,qaCapped:qaCap,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,heldLinks:delivery.held,provisional:selected.filter(o=>o.status==="verified" && o.flags.includes("provisional")).length,recheckOk:split.ok,recheckTotal:split.total,recheckCarriedOk:split.carriedOk,recheckCarriedTotal:split.carriedTotal};
+  const counts = {...batch.counts,...(extra.ingest?.leftOutProducts ? {productsLeftOut:leftOut.length}:{}),filesLeftOut,uploadsNotRead,qaCapped:qaCap,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,heldLinks:delivery.held,provisional:selected.filter(o=>o.status==="verified" && o.flags.includes("provisional")).length,recheckOk:split.ok,recheckTotal:split.total,recheckCarriedOk:split.carriedOk,recheckCarriedTotal:split.carriedTotal};
   const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:(selectedOf.get(product.id) ?? []).filter(output=>output.decision!=="replaced")}))});
   const cost={...batch.cost,identifiers:line.identifiers,usdPerIdentifier:line.usdPerIdentifier,inrPerIdentifier:line.inrPerIdentifier};
   const judged = selected.filter(o=>o.qaScores), autoActions = Object.fromEntries(["none","note","drop","hold"].map(a=>[a,judged.filter(o=>(autoActionOf(o) ?? "none")===a).length]));
   const qa = {judgedOutputs:judged.length,autoActions,productsHeld:counts.attentionProducts,products:pairs.length,attentionRate:attentionRate(counts.attentionProducts,pairs.length)};
-  const uploadRejects=uploads.flatMap(u=>Array.isArray(u.detected?.rejected) ? u.detected.rejected as {reason?:unknown}[]:[]);
-  const isLink=(r:{reason?:unknown})=>typeof r.reason==="string" && isLinkReject(r.reason);
-  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
+  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts,productsLeftOut:counts.productsLeftOut ?? 0,filesLeftOut,uploadsNotRead},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
     products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:batchSheetStatus(pair),change:pair.change,changedAt:rowByIdentifier.get(product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:(sourcesOf.get(product.id) ?? []).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:(s.uploadId ? uploadById.get(s.uploadId)?.kind:undefined) ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:(outputsOf.get(product.id) ?? []).filter(o=>o.batchId===batchId || o.isLive).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason,qa:qaReportEntry(o),autoActions:autoActionsOf(o.compliance)}))})),
     overwrites:events.filter(e=>["overwritten","shots_removed","reordered","channel_added"].includes(e.kind)).flatMap((e):Record<string,unknown>[]=> {
       const identifier=identifierOf.get(e.productId);
       const changes=Array.isArray(e.details.changes) ? e.details.changes as Record<string,unknown>[]:[];
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
     }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:identifierOf.get(e.productId),...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
-    unsupportedFiles:extra.ingest?.unsupportedFiles ?? uploadRejects.filter(r=>!isLink(r)),linkFailures:extra.ingest?.linkFailures ?? uploadRejects.filter(isLink),duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
+    leftOutProducts:extra.ingest?.leftOutProducts ?? [],sameFiles:extra.ingest?.sameFiles ?? [],sharedPhotos:extra.ingest?.sharedPhotos ?? [],
+    unsupportedFiles,linkFailures,duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
   return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried,rows:{pairs,outputs}};
 }
