@@ -52,8 +52,11 @@ import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { changeOnePixel } from "./catalog-real-fixtures";
 import { parseArgs } from "./catalog-output-evals-args";
 import { recordJobRun } from "@catalog/core/job-cost";
+import { matteProofCommand, recutCommand } from "./catalog-matte-proof";
 
 const USAGE = `Usage: catalog:output-evals <command>
+  proof [--limit <n>]      (M1 D40: the matte agreement on the 19 real photos and 8 controls, live judge; only with LIVE_SMOKE=1)
+  recut --batch <id> --photos <identifier_n,...>      (M1 D42: cuts delivered photos out again, through the worker)
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
   upload [--manifest <golden-manifest.json>] [--root name=path ...]      (copies the pinned photos under catalog-test/evals/golden/)
   run [--resume <run>] [--sets <brand.category,...>] [--limit <products>] [--brand <slug>] [--bakeoff-sample <n>] [--skip-bakeoff] [--skip-overwrite] [--write-policy]
@@ -560,10 +563,10 @@ async function main() {
   if (command === "build-golden") return buildGoldenCommand(flags);
   if (command === "upload") return uploadCommand(flags);
   if (command === "check-folder") return checkFolderCommand(flags);
-  if (command !== "run") { print(USAGE); process.exitCode = 2; return; }
+  if (command !== "run" && command !== "proof" && command !== "recut") { print(USAGE); process.exitCode = 2; return; }
   const db = getDb(), startedAt = Date.now();
   let outcome: "ok" | "failed" = "failed";
-  try { await runCommand(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
+  try { await (command === "proof" ? matteProofCommand : command === "recut" ? recutCommand : runCommand)(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
     // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
     await recordJobRun(db, { startedAt, outcome, isTest: true });
     await closeDb();

@@ -12,8 +12,13 @@ describe("M1-F3-R1 auto-decide rules", () => {
     expect(DEFAULT_AUTO_DECIDE_RULES.map(r => r.cause)).toEqual([...HOLD_CAUSES]);
     const sql = readFileSync(path.join(import.meta.dirname, "..", "..", "drizzle", "0014_auto_decide_rules.sql"), "utf8");
     const seeded = [...sql.matchAll(/\('([a-z_]+):\*', '([a-z_]+)', '\*', '(deliver|drop)', 'seed'\)/g)].map(m => ({ id: `${m[1]}:*`, cause: m[2], channel: "*", action: m[3] }));
-    expect(seeded.sort((a, b) => a.id.localeCompare(b.id))).toEqual([...DEFAULT_AUTO_DECIDE_RULES].sort((a, b) => a.id.localeCompare(b.id)));
-    // Product truth and unreadable photos are dropped; everything else is delivered provisional.
+    // M1 D40: migration 0029 adds visible_defect (hold) and changes unusable to hold.
+    const later = readFileSync(path.join(import.meta.dirname, "..", "..", "drizzle", "0029_auto_decide_hold.sql"), "utf8");
+    expect(later).toContain("('visible_defect:*', 'visible_defect', '*', 'hold', 'seed')");
+    expect(later).toMatch(/SET "action" = 'hold' WHERE "id" = 'unusable:\*' AND "updated_by" = 'seed'/);
+    const after = [...seeded.map(r => r.cause === "unusable" ? { ...r, action: "hold" } : r), { id: "visible_defect:*", cause: "visible_defect", channel: "*", action: "hold" }];
+    expect(after.sort((a, b) => a.id.localeCompare(b.id))).toEqual([...DEFAULT_AUTO_DECIDE_RULES].sort((a, b) => a.id.localeCompare(b.id)));
+    // Product truth and unreadable photos are dropped; an uncut photo and a visible defect are held (D40); everything else is delivered provisional.
     expect(DEFAULT_AUTO_DECIDE_RULES.filter(r => r.action === "drop").map(r => r.cause).sort()).toEqual(["collage", "corrupt", "wrong_item"]);
   });
 

@@ -48,7 +48,7 @@ const provisionalPlainO = sql.raw(`o.flags @> '["provisional", "enlargement_fail
  * Review round 3 (P2-1): a product in a draft batch whose preview is ready (the operator is about to Start it) is not
  * improved, so a background try never makes Start refuse the operator's batch with the product's lock.
  */
-function awaitingStart(productId: SQL) {
+export function awaitingStart(productId: SQL) {
   return sql`EXISTS (SELECT 1 FROM catalog_batch_products AS bp JOIN catalog_batches AS d ON d.id = bp.batch_id
     WHERE bp.product_id = ${productId} AND d.status = 'draft' AND coalesce((d.counts->>'previewReady')::boolean, false))`;
 }

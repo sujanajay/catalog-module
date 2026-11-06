@@ -44,7 +44,7 @@ function fakeClient() {
 afterEach(() => vi.useRealTimers());
 
 describe("TaskRoute", () => {
-  it("TASK_ROUTES lists exactly the ten routes of the type", () => {
+  it("TASK_ROUTES lists exactly the routes of the type", () => {
     expectTypeOf<(typeof TASK_ROUTES)[number]>().toEqualTypeOf<TaskRoute>();
     expect(TASK_ROUTES).toHaveLength(10);
     expect(ENLARGE_TASK_ROUTES).toEqual(["/tasks/catalog/enlarge"]);

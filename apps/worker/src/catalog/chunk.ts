@@ -22,10 +22,11 @@ import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { holdsAtRender } from "@catalog/core/catalog/qa/triage";
 import { flagReason } from "@catalog/core/catalog/types";
-import { autoActionsOf, busyBackgroundHold, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { AGREED_VARIANT, agreedMatte, autoActionsOf, busyBackgroundHold, withAutoActions, type AutoAction } from "@catalog/core/catalog/auto-resolve";
+import { recutRequested } from "@catalog/core/catalog/recut";
 import { BUSY_BACKGROUND_DETAILS } from "@catalog/core/catalog/qa/reasons";
 import { BREAKER_COOLDOWN_MS, MATTING_TIMEOUT_MS, type MattingTrace } from "@catalog/core/catalog/matte";
-import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte } from "@catalog/core/catalog/matte-guard";
+import { detectTextImage, GUARD_PAD_FRACTION, heldInHand, resolveMatte, thirdOpinionModel } from "@catalog/core/catalog/matte-guard";
 import { DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import { resolvePhoto } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -380,7 +381,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           if (!startPhoto()) return;
           try {
             const mattePath = derivedPath(derivedPrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
-            if (cached.exists) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); return; }
+            // M1 D42: a re-cut replaces the stored matte, so it is not reused.
+            if (cached.exists && !pending.some(row=>recutRequested(row.compliance))) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); return; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
@@ -424,11 +426,12 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             const deadline=deadlineAt-MATTING_TIMEOUT_MS-MATTE_RETRY_MARGIN_MS, firstModel=matte.model;
             const guardStart=Date.now(), matteBefore=steps.matte;
             const resolved = await resolveMatte({prepared:p,first:matte,handRule:product.productType!=="apparel_model" && product.productType!=="apparel_flat",soleStrip:product.productType==="footwear",attempt:async variant=>{
-              const model = variant==="padded_first" ? firstModel : productPolicy.matteModelSecond;
+              const third = variant==="third" && +deps.now()<=deadline ? thirdOpinionModel((await deps.matting.health()).models.map(m=>m.id),[firstModel,...(productPolicy.matteModelSecond ? [productPolicy.matteModelSecond]:[])]):null;
+              const model = variant==="padded_first" ? firstModel : variant==="third" ? third : productPolicy.matteModelSecond;
               if (!model || (variant!=="padded_first" && model===firstModel) || +deps.now()>deadline) return null;
               if (!(await deps.matting.health()).models.some(m=>m.id===model)) return null;
               await underClaim(async()=>{});
-              const next = await deps.matteFor(p,deps.matting,model,variant==="second" ? {}:{padFraction:GUARD_PAD_FRACTION},trace);
+              const next = await deps.matteFor(p,deps.matting,model,variant==="padded_first" || variant==="padded_second" ? {padFraction:GUARD_PAD_FRACTION}:{},trace);
               mattingMs += next.ms;
               note(matteRow(productId,source.id,next,++matteCalls,next.source==="model" ? "ok":"failed"));
               return next.source==="model" ? next:null;
@@ -509,7 +512,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               await underClaim(async tx=>tx.update(catalogOutputs).set({contentVersionId:await recordOutputVersion(tx,{output,source,product,batch,asset}),stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue;
             }
             const renderStart = +deps.now();
-            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:shadowAllowed,identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,channelRules:rules,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
+            // M1 D40: a cut-out the guard doubted and two models agreed on: its source shadow can be floor, so it is left out from the start.
+            const agreed = agreedMatte(output.compliance);
+            const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:agreed ? false:shadowAllowed,...(agreed ? {keepSourceShadow:false}:{}),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,channelRules:rules,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;
             // Ledger: worker time per output (ms only; the per-chunk compute row carries the money) without the
             // photo's one upscale call, which gets its own row priced at the rate of the service that made it (spec 16:
@@ -526,7 +531,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             // one that fell back to the plain path goes back to the plain key).
             if (rendered.upscale) deps.log("catalog upscale",{batchId:batch.id,productId,sourceImageId:source.id,channel:output.channel,n:source.n,upscaleMs:rendered.upscale.reused ? 0:rendered.upscale.ms,reused:!!rendered.upscale.reused});
             const flags = [...new Set([...source.flags,...rendered.flags])], status = rendered.status==="skipped" ? "skipped":!rendered.compliance.ok || holdsAtRender(flags) ? "needs_attention":rendered.jpeg ? "staged":"failed";
-            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`,rulesVersion:rules.keyVersion(output.channel)})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
+            const patch = {canvasW:rendered.plan.w,canvasH:rendered.plan.h,scale:rendered.plan.scale,placedX:rendered.plan.placedX,placedY:rendered.plan.placedY,bytes:rendered.bytes,quality:rendered.quality,flags,compliance:{...rendered.compliance,...(agreed ? {variant:AGREED_VARIANT}:{}),auto_actions:autoActionsOf(output.compliance)},renderKey:rerenderedKey(output,rendered.upscale?.model,()=>renderKey({sourceSha256:source.sha256,channel:output.channel,n:source.n,policyKey:`default|${productPolicy.matteModel}`,rulesVersion:rules.keyVersion(output.channel)})),reason:[...(busyBackgroundHold(output.compliance) ? [`${BUSY_BACKGROUND_DETAILS.why} ${BUSY_BACKGROUND_DETAILS.whatToDo}`]:[]),...rendered.notes].join("; ") || (flags.includes("small_source") ? flagReason("small_source"):null),updatedAt:deps.now()};
             await underClaim(async tx=>{await tx.update(catalogOutputs).set(patch).where(eq(catalogOutputs.id,output.id));await flush(tx);});
             if (rendered.jpeg) { const jpeg=rendered.jpeg; await underClaim(async()=>deps.storage.uploadBuffer(path,jpeg,"image/jpeg",{cacheControl:deps.storage.PUBLIC_CACHE_CONTROL})); }
             const staged = rendered.jpeg ? await deps.storage.headObject(uri):null;

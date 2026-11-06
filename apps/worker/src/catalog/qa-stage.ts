@@ -6,9 +6,9 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { actionsOn, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
-import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
+import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import { recordCostEvent, type CostEventInput } from "@catalog/core/cost-events";
 import { qaCallCost } from "@catalog/core/catalog/cost";
@@ -147,7 +147,8 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
   const first=group[0]!,source=sources.find(s=>s.id===first.sourceImageId)!;
   const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,source.productId));
   if(!product) return;
-  if(!sampledForQa(product.identifier,policy.qaSampleRate)) {
+  // M1 D40: an agreed cut-out is always judged, whatever the sample rate: the judge is what stands behind it.
+  if(!sampledForQa(product.identifier,policy.qaSampleRate) && !group.some(row=>agreedMatte(row.compliance))) {
    await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});return;
   }
   try {
@@ -306,6 +307,15 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
   await deps.repairOwnDefects(candidates.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})),{deps,batch,policy,productId,underClaim});
   outputs=await read();
  }
+ await decideOutputs(deps,batch,productId,underClaim,outputs);
+ // M1 D40: image 1 held on every channel and another photo passed: that photo becomes image 1 and the held photo, at its
+ // new number, is decided again (with enough good photos left it is simply left out, and nobody has to look at it).
+ if(!autoDecideOf(batch.options)) return;
+ const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
+ if(product && await promoteOverHeldPhoto(deps,{batch,product,policy,underClaim})) await decideOutputs(deps,batch,productId,underClaim,await read());
+}
+/** Triage and the auto-decide rules over one product's outputs, as read. */
+async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,outputs:Output[]):Promise<void> {
  const sources=await deps.db.select({id:catalogSourceImages.id,n:catalogSourceImages.n,replacesId:catalogSourceImages.replacesId}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batch.id),eq(catalogSourceImages.productId,productId)));
  const replaced=new Set(sources.flatMap(s=>s.replacesId ? [s.replacesId]:[]));
  const shots=new Set(sources.filter(s=>!replaced.has(s.id)).map(s=>s.n));
@@ -313,7 +323,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
  const keptLive=live.filter(l=>shots.has(l.n) && !outputs.some(o=>o.channel===l.channel && o.n===l.n && o.decision!=="replaced"));
  const current=outputs.filter(o=>!replaced.has(o.sourceImageId));
  const decisions=triageProduct(current,keptLive);
- // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional) or drop; none waits.
+ // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional), drop or, rarely, a photo held for a person (M1 D40); the batch never waits.
  const auto=autoDecideOf(batch.options);
  await underClaim(async tx=>{
   for(const o of current) {
@@ -324,7 +334,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
    const cause=auto && decision.action==="hold" ? decision.cause ?? (o.status==="failed" ? undefined:"not_publishable"):undefined;
    if(o.status==="failed" && !cause) continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
-   const lead=leadFlag(o.flags),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
+   const plain=plainPassthrough(o.compliance),lead=leadFlag(o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
    const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
    const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
@@ -335,11 +345,14 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
     const d=autoDecide(auto,cause,o);
     // A failed source has no flag to name it; its read error is the reason.
     const problem=why ?? (o.status==="failed" ? o.reason:null);
+    // M1 D40: `hold` keeps the image staged but unpublished, so a person can still "Use as is"; the batch does not wait.
     patch=d.action==="deliver"
      ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
-     : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
+     : d.action==="hold"
+      ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem)}
+      : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
     patch.compliance={...(o.compliance ?? {}),auto_decide:autoDecideRecord(cause,d)};
-    if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":"drop",holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
+    if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":d.action,holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
     await tx.update(catalogOutputs).set({...patch,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
     continue;
    }

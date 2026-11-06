@@ -8772,12 +8772,12 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
+    "attention": false,
     "flags": [
      "leftover_background"
     ],
     "detector": "code",
-    "reason": "A lifestyle photo on a tennis court (non-uniform background): the background cannot be removed, so the render holds the product for a person."
+    "reason": "A lifestyle photo on a tennis court (non-uniform background): the background cannot be removed and the cut-outs keep court inside the rackets, so the photo is left out; the product has five other good photos (M1 D40)."
    }
   },
   {

@@ -210,7 +210,7 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     const w = world(), s = await seed(w, "apparel_flat", [block(HALO_ALWAYS), block(PLAIN), block(PLAIN)]);
     const o = s.outputs.find(row => row.n === 1)!;
     expect(steps(autoActionsOf(o.compliance))).toEqual(["second_matte:failed"]);
-    expect(o).toMatchObject({ status: "needs_attention", qaScores: { autoAction: "hold", holdCause: "photo_one" } });
+    expect(o).toMatchObject({ status: "needs_attention", qaScores: { autoAction: "hold", holdCause: "visible_defect" } });
     expect(o.flags).toContain("halo");
     expect(s.held.map(p => p.photos.map(photo => photo.n))).toEqual([[1]]);
     expect(s.held[0]!.photos[0]!.why).toContain("We tried a second cut-out and could not fix it.");
@@ -317,17 +317,17 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
   }, 180_000);
 
   it("a photo on a busy background no cut-out keeps is held whole with its card sentence, never published (FC ZEE79259BBFD83FFA1DB0Z shot 5)", async () => {
-    // A hedge across the top of the frame and a textured racket on the court; every model keeps the dark model in the middle only.
+    // A hedge across the top of the frame and a textured racket on the court; the policy's first model keeps the dark model in the middle, the others a different part of it, so they do not agree (M1 D40).
     const model = (x: number, y: number) => x >= 300 && x < 500 && y >= 200 && y < 800;
     const scene: Shot = { draw: rgb => rect(rgb, 0, 0, W, H, (x, y) => model(x, y) ? [clamp(30 + grain(x, y)), clamp(30 + grain(x, y)), 34] : y < 120 || (x >= 560 && x < 640 && y >= 500 && y < 580) ? [clamp(70 + grain(x, y) * 2), clamp(110 + grain(x, y) * 2), clamp(50 + grain(x, y))] : [233, 124, 86]) };
-    const keepsModel = (name: string): Matte => { const alpha = Buffer.alloc(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (model(x, y)) alpha[y * W + x] = 255; return { alpha, width: W, height: H, model: name, ms: 5, source: "model", target: "cpu", sentLongSide: 1024 }; };
+    const keepsModel = (name: string): Matte => { const alpha = Buffer.alloc(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (model(x, y) && (name === "birefnet-general" || y >= 500)) alpha[y * W + x] = 255; return { alpha, width: W, height: H, model: name, ms: 5, source: "model", target: "cpu", sentLongSide: 1024 }; };
     const w = world();
     w.matteFor.mockImplementation(async (p, _client, name) => p.rgb[0] === BG ? fakeMatte(p.rgb, name ?? "first") : keepsModel(name ?? "first"));
     const s = await seed(w, "apparel_model", [block(PLAIN), scene], ["noon", "amazon"]);
     const busy = s.outputs.filter(o => o.n === 2);
     expect(busy).toHaveLength(2);
     for (const o of busy) {
-      expect(steps(autoActionsOf(o.compliance)).slice(0, 5)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_passthrough:failed"]);
+      expect(steps(autoActionsOf(o.compliance)).slice(0, 6)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_agreement:failed", "matte_passthrough:failed"]);
       expect(o.flags).toContain("leftover_background");
       expect(busyBackgroundHold(o.compliance)).toBe(true);
       expect(o.flags).not.toContain("matte_passthrough");

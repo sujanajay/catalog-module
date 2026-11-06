@@ -1,5 +1,5 @@
 import type { ChannelId, HoldCause, OutputFlag } from "../types";
-import { busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS } from "../auto-resolve";
+import { agreedMatte, busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS, plainPassthrough } from "../auto-resolve";
 
 /**
  * Information flags (07 4.6): they never hold the publish gate and never create an attention item on
@@ -32,6 +32,12 @@ export const LEFT_OUT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["cha
 export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa_unavailable", "qa_cap"]);
 
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
+/**
+ * A defect a shopper would see on the image itself, still there after the repair loop: part of the product gone, a rough
+ * edge, background left in, or a mark on the output (M1 D40). Never delivered with a warning: the photo is dropped when
+ * the channel has enough other good photos, otherwise it waits for a person (cause `visible_defect`).
+ */
+export const VISIBLE_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["product_removed", "halo", "leftover_background", "text_or_watermark"]);
 
 export type AutoAction = "none" | "note" | "drop" | "hold";
 export type { HoldCause };
@@ -45,11 +51,11 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
 
 /**
  * Turns the problems of one product's outputs in this batch into automatic actions (07 4.1 v2).
- * Hard holds: a confirmed different item, a collage, a photo whose background could not be removed
- * (`leftover_background` from the matte stage, busyBackgroundHold), a corrupt file (status `failed`), photo 1 with
+ * Hard holds: a confirmed different item, a collage, a corrupt file (status `failed`), photo 1 with
  * a problem, and every photo of a channel with a problem; plus the "no verdict" holds (`qa_cap`,
  * `qa_unavailable`) and an image that cannot be published (not made, or failing the channel rules)
- * when it cannot be dropped. Any other problem is dropped with a note when the photo is not photo 1
+ * when it cannot be dropped. A photo whose background could not be removed (`leftover_background` from the matte stage,
+ * busyBackgroundHold) is dropped when the channel keeps two good photos, else held. Any other problem is dropped with a note when the photo is not photo 1
  * and at least two good photos remain on that channel, else published with a note. Our own defects
  * (`OWN_DEFECT_FLAGS`, still there after the re-render loop) are dropped the same way or held, never noted.
  * A size chart or text-only image (`LEFT_OUT_FLAGS`) is always left out with a note, never held, and
@@ -72,25 +78,37 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     const hold = (cause: HoldCause) => result.set(o.id, {action:"hold",cause,flags:problems});
     if (o.status === "failed") { hold("corrupt"); continue; }
     if (leftOut(o)) { result.set(o.id, {action:"drop",flags:problems}); continue; }
-    if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : "none",flags:[]}); continue; }
+    if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : plainPassthrough(o.compliance) ? "note" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
     // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
     if (problems.includes("enlargement_failed")) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
-    if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) { hold("unusable"); continue; }
-    if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) { hold("unchecked"); continue; }
+    // M1 D40: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
+    if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) {
+      if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
+      continue;
+    }
+    if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) {
+      // M1 D40: the judge is what stands behind an agreed cut-out, so one it did not see is never delivered on trust: it is
+      // left out when the channel can do without it, otherwise it waits for a person. Any other unseen image follows the `unchecked` rule.
+      if (!agreedMatte(o.compliance)) hold("unchecked");
+      else if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems});
+      else hold("unusable");
+      continue;
+    }
     // A broken encoder setting (dims, format, ...) survived its re-render: a code fault, not the photo. Held for the
     // technical team, never dropped, so it cannot hide (07 4.6a).
     if (problems.includes("failed_compliance") && encoderFault(o.compliance)) { hold("code_fault"); continue; }
-    if (o.n === photoOne) { hold("photo_one"); continue; }
+    const visible = problems.some(flag => VISIBLE_DEFECT_FLAGS.has(flag));
+    if (o.n === photoOne) { hold(visible ? "visible_defect" : "photo_one"); continue; }
     const others = goodShots(o.channel, o.n);
-    if (others === 0) { hold("every_photo"); continue; }
+    if (others === 0) { hold(visible ? "visible_defect" : "every_photo"); continue; }
     if (others >= 2) { result.set(o.id, {action:"drop",flags:problems}); continue; }
     // Our own defects (halo, leftover background, a broken channel rule) are never published with a
     // note: the re-render loop already tried, so the photo is dropped above or held here.
-    const publishable = !!o.stagingUri && !problems.includes("fallback_matte") && !problems.some(flag => OWN_DEFECT_FLAGS.has(flag));
-    if (publishable) result.set(o.id, {action:"note",flags:problems}); else hold("not_publishable");
+    const publishable = !!o.stagingUri && !problems.includes("fallback_matte") && !visible && !problems.some(flag => OWN_DEFECT_FLAGS.has(flag));
+    if (publishable) result.set(o.id, {action:"note",flags:problems}); else hold(visible ? "visible_defect" : "not_publishable");
   }
   return result;
 }

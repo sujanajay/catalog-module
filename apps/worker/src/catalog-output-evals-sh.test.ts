@@ -47,6 +47,20 @@ test("repeated values (--limit 3 --bakeoff-sample 3) reach the CLI as unique tok
   expect(parseArgs(tokens)).toEqual({ words: ["run"], flags: { limit: "3", "bakeoff-sample": "3", brand: "anta", sets: "anta.footwear,anta.apparel_flat", "skip-overwrite": true } });
 }, 60_000);
 
+const runCommandLine = (words: string[]) =>
+  execute(bash, ["-c", 'export PATH="$1:$PATH"; shift; exec bash "$@"', "output-evals-args", shellPath(dir), shellPath(path.resolve("infra/catalog-output-evals.sh")), ...words], { env: { ...process.env, CAPTURE_ARGS: shellPath(capture) } });
+
+test("proof always runs with LIVE_SMOKE for that execution; recut never does", async () => {
+  await runCommandLine(["proof", "--limit", "2"]);
+  const proof = await passedArgs();
+  expect(proof.tokens).toEqual(["proof", "--limit=2"]);
+  expect(proof.lines).toContain("--update-env-vars=LIVE_SMOKE=1");
+  await runCommandLine(["recut", "--batch", "b1", "--photos", "a_1,b_2"]);
+  const recut = await passedArgs();
+  expect(recut.tokens).toEqual(["recut", "--batch=b1", "--photos=a_1,b_2"]);
+  expect(recut.lines.join()).not.toContain("LIVE_SMOKE");
+}, 60_000);
+
 test("--live sets LIVE_SMOKE for the execution only and is not passed to the CLI", async () => {
   await run(["--live", "--resume", "evals-20261020013422-a1b2c3", "--write-policy"]);
   const { lines, tokens } = await passedArgs();

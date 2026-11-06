@@ -220,3 +220,35 @@ test("M1-F2 test 4: Wait during the countdown keeps the batch a draft with one S
   // Start writes the chunk rows and queues the first ones; on the in-process harness this alone can take a minute.
   await page.waitForURL(new RegExp(`/catalog/${id}$`), { timeout: 150_000 });
 });
+
+// M1 D40: "A hold that nobody can act on is a silent loss." The path a person takes from the digest of a finished batch to the
+// decision, on the real page: the banner says a photo waits, the digest links to its card, and the button answers.
+test("M1 D40: a held photo on a finished batch is reached from the digest and decided on the page", async ({ page }) => {
+  const seeded = await page.request.post("/harness/held-photo");
+  expect(seeded.ok()).toBe(true);
+  const { id } = (await seeded.json()) as { id: string };
+  await page.goto(`/catalog/${id}`);
+  await expect(page.getByText("1 photo waits for you to decide.")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText("did not pass the independent re-check")).toHaveCount(0);
+  await page.getByRole("link", { name: "See the products that need you" }).click();
+  await expect(page.getByRole("tab", { name: /Needs attention/ })).toHaveAttribute("aria-selected", "true", { timeout: 60_000 });
+  // The tab arrives as a full page, and a click before the page hydrates is lost, so click until the decision is really sent.
+  await expect(async () => {
+    const sent = page.waitForRequest(r => r.url().endsWith("/decision") && r.method() === "POST", { timeout: 3_000 });
+    await page.getByRole("button", { name: "Use as is" }).click({ timeout: 3_000 });
+    await sent;
+  }).toPass({ timeout: 60_000 });
+  await expect(page.getByText("Resolved", { exact: true })).toBeVisible({ timeout: 60_000 });
+});
+
+// M1 D40: every photo held, so the product has no link and publish leaves it `failed`, as the worker does. The card is still reachable.
+test("M1 D40: a product with every photo held is reached from the digest", async ({ page }) => {
+  const seeded = await page.request.post("/harness/held-photo?all=1");
+  expect(seeded.ok()).toBe(true);
+  const { id } = (await seeded.json()) as { id: string };
+  await page.goto(`/catalog/${id}`);
+  await expect(page.getByText("2 photos wait for you to decide.")).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("link", { name: "See the products that need you" }).click();
+  await expect(page.getByRole("tab", { name: /Needs attention/ })).toHaveAttribute("aria-selected", "true", { timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Use as is" })).toHaveCount(2);
+});

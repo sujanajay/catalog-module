@@ -283,8 +283,9 @@ The owner's folders are read only. Sources, seed 10:
   two model photos cut at 85% height (`cut_edge`, must not be held).
 - Per-shot expectations (`overrides.<identifier>.shots.<n>`): `ZEE79259BBFD83FFA1DB0Z` shot 5 is a
   lifestyle photo on a tennis court (non-uniform background, eval run 2 defect A1: published as a broken
-  pass-through, headless on the square canvases). It expects a hold for `leftover_background` with the
-  reason "background could not be removed", detected by code; the product's expectation is its first shot
+  pass-through, headless on the square canvases). It expects `leftover_background`, detected by code, and
+  is left out without a hold (M1 D40: the product has five other good photos; the families agree on a cut with
+  court inside the rackets, and the busy-scene veto refuses it, spec 05). A product's expectation is its first shot
   that expects a hold. An entry's `expect.reason` documents why and is never asserted. `Z659062EFB3FB0720BF56Z` shot 7 (and
   its planted copy's shot 7) and `ZC467A7AF2809283D3CC1Z` shot 6 are size charts: they expect the flag `chart_image`
   without a hold, detected by code (`attention.expected_flags`); a planted copy keeps such a per-shot expectation on

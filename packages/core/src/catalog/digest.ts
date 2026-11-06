@@ -6,7 +6,7 @@
 import { asc, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatchProducts, catalogImprovements, catalogOutputs, catalogProducts } from "../db/schema";
-import { autoDecideRecordOf } from "./auto-decide";
+import { autoDecideRecordOf, heldForPerson } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
 import { batchCostFigure, type BatchCostFigure } from "./cost-report";
 import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
@@ -46,6 +46,7 @@ const SENT_REASON: Record<HoldCause, string> = {
   wrong_item: "a different product may be in the photo",
   collage: "several photos in one",
   corrupt: "the photo file is damaged",
+  visible_defect: "a visible problem on the image",
 };
 /** Why a photo was left out, by the auto-decide cause that dropped it. */
 const LEFT_OUT_REASON: Record<HoldCause, string> = {
@@ -59,6 +60,7 @@ const LEFT_OUT_REASON: Record<HoldCause, string> = {
   every_photo: "every photo of the product had a problem",
   not_publishable: "the image did not meet the channel's rules",
   code_fault: "the image could not be made",
+  visible_defect: "a visible problem on the image",
 };
 const LEFT_OUT_FIX: Partial<Record<HoldCause, string>> = {
   wrong_item: "Send a photo of this product in a new batch.",
@@ -73,6 +75,10 @@ const FIX_FILE = "Send the file again in a new batch, as a photo or a working li
 const NOT_MADE = "the image could not be made";
 const HELD_REASON = "Held for you to decide before the photos are sent.";
 const FIX_HELD = "Decide on the Needs you tab.";
+/** M1 D40: one photo waiting for a person; the product's other photos are delivered. */
+const PHOTO_HELD_GROUP = "one photo has no link until you decide";
+export const AMAZON_NO_WHITE_FIRST = "Amazon needs a white first image and this listing has none until you decide.";
+const FIX_PHOTO_HELD = "Open this batch and follow the link to the products that need you. Replace the photo, use it as it is, or remove it.";
 const NOT_ADDED_TAKEN_GROUP = "another batch's photo already has this place";
 const NOT_ADDED_LIMIT = "the channel takes no more images of this product";
 const FIX_TAKEN = "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.";
@@ -164,12 +170,14 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     }
     if (pair.change === "unchanged") unchanged++;
     let productExceptions = 0, productNotes = 0;
-    if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged")) {
+    // M1 D40: a product whose every photo is held has no link (publish marks it failed) and still waits for a person: it counts under "Needs you" below.
+    if (!mine.some(heldForPerson) && (pair.change === "failed" || (!withLinks && pair.change !== "unchanged"))) {
       const reason = pair.notes?.split("; ")[0] || NO_DELIVERABLE_PHOTO;
       exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason, fix: FIX_PRODUCT, group: `No image on any channel: ${shortReason(reason)}` });
       for (const o of mine) if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: leftOutReason(o) });
       continue;
     }
+    let productHeld = false;
     for (const o of mine) {
       if (o.status === "verified" && o.isLive && o.flags.includes("provisional")) {
         const record = autoDecideRecordOf(o.compliance);
@@ -186,6 +194,15 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
         continue;
       }
       if (o.status !== "skipped" && o.status !== "failed" && o.status !== "needs_attention") continue;
+      // M1 D40: the rare photo held for a person. The product counts once under "Needs you", each slot is an Exceptions row.
+      if (heldForPerson(o)) {
+        if (!productHeld) { productHeld = true; needsYou++; }
+        // M1 D40: no photo could take image 1's place, so on Amazon the listing starts with a grey image and no white first image.
+        const noWhiteFirst = o.channel === "amazon" && !o.isLive && o.n === Math.min(...mine.filter(m => m.channel === "amazon").map(m => m.n));
+        exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: `${o.reason ?? PHOTO_HELD_GROUP}${noWhiteFirst ? ` ${AMAZON_NO_WHITE_FIRST}` : ""}`, fix: FIX_PHOTO_HELD, group: `Waiting for you: ${PHOTO_HELD_GROUP}` });
+        productExceptions++;
+        continue;
+      }
       // M1-S6 (M1 D30): a follow-up photo that was not added. Checked before the link check: its place may show another
       // batch's live photo, which is not this photo's link.
       if (o.status === "skipped" && o.flags.includes("not_added")) {

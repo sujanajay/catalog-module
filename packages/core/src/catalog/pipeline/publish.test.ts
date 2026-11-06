@@ -2,8 +2,15 @@ import {expect,it,vi} from "vitest";
 import {outputNote,planPublish,type Output} from "./publish";
 import {assertWithinProduct} from "../naming";
 vi.mock(import("../naming"),async original=>{const module=await original();return{...module,assertWithinProduct:vi.fn(module.assertWithinProduct)};});
-function output(channel:Output["channel"],n:number,patch:Partial<Output>={}):Output {return {id:`${channel}${n}`,channel,n,objectPath:`catalog/anta/A/${channel}/A_${n}.jpg`,generation:20,status:"verified",decision:null,...patch} as Output;}
+function output(channel:Output["channel"],n:number,patch:Partial<Output>={}):Output {return {id:`${channel}${n}`,channel,n,objectPath:`catalog/anta/A/${channel}/A_${n}.jpg`,generation:20,status:"verified",decision:null,flags:[],...patch} as Output;}
 it("plans preconditions and scoped deletes, keeps unchanged pairs and leaves other channels alone",()=>{const live=[output("noon",1),output("noon",2),output("noon",3),output("amazon",1)];const updated=output("noon",1,{id:"new1",status:"staged"}),removed=output("noon",2,{decision:"remove"});const plan=planPublish({brandSlug:"anta",pathKey:"A",isTest:false,channels:["noon"],sources:[{n:1},{n:2}],outputs:[updated,removed],live});expect(plan.copies.map(c=>[c.output.id,c.ifGenerationMatch])).toEqual([["new1",20]]);expect(plan.deletes.map(c=>c.output.n)).toEqual([2,3]);expect(plan.deletes.every(c=>c.output.channel==="noon")).toBe(true);expect(vi.mocked(assertWithinProduct)).toHaveBeenCalledTimes(3);});
+it("M1 D42: a re-cut left held takes its old image down, except image 1, which stays until a person decides",()=>{
+  const held=(n:number)=>output("noon",n,{status:"needs_attention",isLive:true,compliance:{auto_decide:{rule:"visible_defect:*",cause:"visible_defect",action:"hold"}}} as never);
+  const plan=(outputs:Output[],live:Output[])=>planPublish({brandSlug:"anta",pathKey:"A",isTest:false,channels:["noon"],sources:[{n:1},{n:2}],outputs,live}).deletes.map(d=>d.output.n);
+  expect(plan([held(2),output("noon",1)],[output("noon",1),held(2)])).toEqual([2]);
+  expect(plan([held(1),output("noon",2)],[held(1),output("noon",2)])).toEqual([]);
+  expect(plan([output("noon",1,{status:"skipped",decision:"remove"}),output("noon",2)],[output("noon",1),output("noon",2)])).toEqual([1]);
+});
 it("uses zero only for new paths and counts kept pairs",()=>{vi.mocked(assertWithinProduct).mockClear();const plan=planPublish({brandSlug:"anta",pathKey:"A",isTest:false,channels:["noon"],sources:[{n:1},{n:2}],outputs:[output("noon",2,{status:"staged"})],live:[output("noon",1)]});expect(plan.copies[0]!.ifGenerationMatch).toBe(0);expect(plan.kept).toHaveLength(1);});
 it("refuses a live delete path outside its product",()=>expect(()=>planPublish({brandSlug:"anta",pathKey:"A",isTest:false,channels:["noon"],sources:[],outputs:[],live:[output("noon",1,{objectPath:"catalog/anta/OTHER/noon/OTHER_1.jpg"})]})).toThrow());
 it("writes sheet notes with the channel label, as the report does",()=>{expect(outputNote({channel:"styli",n:2,reason:"Skipped for Styli: the photo is smaller than Styli needs.",decision:null,decidedBy:null})).toBe("Styli img 2: Skipped for Styli: the photo is smaller than Styli needs.");expect(outputNote({channel:"sixthstreet",n:1,reason:"soft",decision:"use_as_is",decidedBy:"ops@x"})).toBe("6thStreet img 1: kept as is by ops@x: soft");});

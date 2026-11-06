@@ -142,7 +142,7 @@ it("M12-S1: every image a batch makes records the batch's settings version set, 
   expect(outputsA.length).toBe(2);expect(outputsB.length).toBe(1);
   expect(outputsA.map(o=>o.settingsSnapshotId)).toEqual([snapA.id,snapA.id]);
   expect(outputsB.map(o=>o.settingsSnapshotId)).toEqual([snapB.id]);
-  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("deliver");
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("hold");
   expect(settingFrom((await loadSettingsSnapshot(db,outputsB[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("drop");
 },60_000);
 it("R1 exit 2 finding 1: a product grouping left out is on the digest, the exceptions sheet, report.json and the outcome",async()=>{
@@ -628,7 +628,7 @@ it("spec07 v2 placement never comes from the judge, and a photo flag applies to 
  expect(t.deps.judgeOutput).toHaveBeenCalledTimes(1);
  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,text.batch.id));
  expect(outputs.map(o=>o.channel).sort()).toEqual(["amazon","noon"]);
- for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"photo_one",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
+ for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"visible_defect",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
 },60_000);
 it("spec07 v2 an output defect on one channel re-checks the photo's other channels and applies the strictest result",async()=>{
  const w=world(),s=await seed(w,"qa-v2-recheck",{shots:["a","b","c","d"],channels:["noon","amazon"]});

@@ -14,7 +14,7 @@ import { verifyPublic } from "./verify";
 import { CHANNEL_IMAGE_LIMITS } from "../ingest/append";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
-import { autoDecideNote, autoDecideOf } from "../auto-decide";
+import { autoDecideNote, autoDecideOf, heldForPerson } from "../auto-decide";
 import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
@@ -112,7 +112,10 @@ export function planPublish(input: { brandSlug: string; pathKey: string; isTest:
     if (input.append && target) assertOwnedByBatch(target, input.batchId, output.n);
     return { output, objectPath, ifGenerationMatch: target?.generation ?? 0 };
   });
-  const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && x.decision === "remove");
+  // M1 D40: a live row a re-cut left held for a person or left out (only recutPhotos resets a live row without keeping it): the bad image it replaces comes down.
+  // Image 1 held stays until the person decides: a listing with no first image is worse than the image it had.
+  const first = input.sources.length ? Math.min(...input.sources.map(s => s.n)) : null;
+  const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && (x.decision === "remove" || (x.id === o.id && ((heldForPerson(x) && x.n !== first) || x.flags.includes("auto_dropped")))));
   const deletes = selected.filter(o => input.append ? o.batchId === input.batchId && removes(o) : !input.sources.some(s => s.n === o.n) || removes(o)).map(output => {
     assertWithinProduct(output.objectPath, scope);
     if (input.append) assertOwnedByBatch(output, input.batchId, output.n);
@@ -186,7 +189,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const keys = key ? [...renderKeys({...key,rulesVersion:rules.keyVersion(channel)}),...renderKeys(key)] : null;
       return !keys || !live.some(output=>output.channel===channel && output.n===source.n && keys.includes(output.renderKey));
     }));
-    if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
+    // A live row a decision just removed (a re-cut's image 1, M1 D42) still has its delete to do.
+    if (product.lastBatchId === batchId && outputs.every(o=>(o.status === "verified" || o.status === "skipped") && !(o.status === "skipped" && o.isLive))) {
       let alreadyPublished = true;
       for (const output of outputs.filter(o=>o.status === "verified")) {
         const head = await deps.storage.headObject(storage.toGsUri(deps.storage.getPublicBucketName(),output.objectPath));
@@ -214,7 +218,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         return { outcome:"failed", batch:found };
       }
       const now = deps.now();
-      for (const o of outputs.filter(o => o.status !== "failed" && (undecided(o) || unjudged(o)))) {
+      // M1 D40: a photo a rule held for a person stays held, with no link; the product goes on without it.
+      for (const o of outputs.filter(o => o.status !== "failed" && !heldForPerson(o) && (undecided(o) || unjudged(o)))) {
         const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason), updatedAt:now };
         await tx.update(catalogOutputs).set(dropped).where(eq(catalogOutputs.id,o.id));
         Object.assign(o, dropped);
@@ -279,7 +284,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     if (!failure) for (const target of plan.deletes) {
       if (append) assertOwnedByBatch(target.output, batchId, target.output.n);
       await deps.storage.deletePublicObject(target.objectPath,productPrefix(product.brandSlug,product.pathKey,product.isTest),{ifGenerationMatch:target.ifGenerationMatch});
-      await tx.update(catalogOutputs).set({isLive:false,status:"skipped",supersededAt:now,reason:`Removed in batch ${batch.name}`,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
+      const stillHeld = outputs.find(o => o.id === target.output.id && heldForPerson(o));
+      await tx.update(catalogOutputs).set(stillHeld ? {isLive:false,supersededAt:now,updatedAt:now} : {isLive:false,status:"skipped",supersededAt:now,reason:`Removed in batch ${batch.name}`,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
       removed.push(target.output);
     }
     // M0-F3-R1, R2: the change log, in this transaction (one event per changed slot of each listing), inside a savepoint:
@@ -318,7 +324,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
-    const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
+    const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>heldForPerson(o) && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set(publisherOf(batchId, append)).where(eq(catalogProducts.id,productId));
     return { outcome: failure || nothingDelivered ? "failed" : "published", batch: found, changed: !failure && !nothingDelivered && change !== "unchanged" };

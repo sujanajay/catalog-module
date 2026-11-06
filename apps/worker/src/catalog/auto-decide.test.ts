@@ -16,6 +16,12 @@ import { workerCatalogDeps, type CatalogDeps } from "./deps";
 import { currentChunkTask, handleChunkTask } from "./chunk";
 import { handlePublishTask } from "./publish";
 import { handleFinalizeTask } from "./finalize";
+import { recutProductPhotos } from "./recut";
+import { buildReport } from "@catalog/core/catalog/pipeline/report";
+import { applyDecision } from "@catalog/core/catalog/decisions";
+import { listAttention } from "@catalog/core/catalog/attention";
+import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
+import { enqueueFinalize } from "./deps";
 
 let db: Db, close: () => Promise<void>;
 const bucketEnv = { BUCKET: process.env.BUCKET, PUBLIC_BUCKET: process.env.PUBLIC_BUCKET };
@@ -210,3 +216,249 @@ it("F3-R2: a product whose only photo is a different item is an exception (faile
   expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
   expect(await lockOf(s.product.id)).toBeNull();
 }, 120_000);
+
+// M1 D40, the owner's words of 2026-11-06: only in very exceptional cases should a person be asked. Such a photo has no link, the rest is delivered and the batch finishes.
+const FLAGGED = (input: { model: string }, flags: string[]) => ({ scores: { ...PASS, no_text_or_watermark: 10, overall: 80 }, verdict: "flag" as const, reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: flags as never });
+const GOOD = (input: { model: string }) => ({ scores: PASS, view: "front", verdict: "pass" as const, reasons: [], isCollage: false, costUsd: 0, calls: 0, usage: {}, model: input.model, flags: [] });
+
+it("D40: a visible defect the channel cannot do without is held: no link, the other photo delivered, the batch finished, the lock released", async () => {
+  const w = world(), s = await seed(w, "auto-held-defect", { shots: ["a", "m"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 2 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  await stages(w, s);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  const [one, two] = await outputsOf(s.batch.id);
+  expect(one).toMatchObject({ status: "verified", isLive: true });
+  expect(two).toMatchObject({ status: "needs_attention", isLive: false });
+  expect(autoDecideRecordOf(two!.compliance)).toEqual({ rule: "visible_defect:*", cause: "visible_defect", action: "hold" });
+  expect(w.copy).toHaveBeenCalledTimes(1);
+  expect((await pairOf(s.batch.id)).change).not.toBe("pending_attention");
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+  expect(await lockOf(s.product.id)).toBeNull();
+}, 120_000);
+
+it("D40: a product with every photo held has no link and still reaches a person: in the needs-you count and the list the page shows", async () => {
+  const w = world(), s = await seed(w, "auto-all-held", { shots: ["m", "n"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => FLAGGED(input, ["text_or_watermark"]));
+  await stages(w, s);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("failed");
+  expect((await pairOf(s.batch.id)).change).toBe("failed");
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+  const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+  expect(batch!.digest).toMatchObject({ needsYou: 1 });
+  expect(batch!.counts.needsAttention).toBe(2);
+  expect((await listAttention(db, s.batch.id, async uri => uri)).flatMap(p => p.photos).length).toBeGreaterThan(0);
+}, 120_000);
+
+it("D40: with two good photos left, the same defect is simply left out and nobody is asked", async () => {
+  const w = world(), s = await seed(w, "auto-left-out", { shots: ["a", "b", "m"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 3 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  await stages(w, s);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect((await outputsOf(s.batch.id)).map(o => o.status)).toEqual(["verified", "verified", "skipped"]);
+}, 120_000);
+
+it("D40: image 1 held and another photo passed: the photos change places, and the held one, with two good photos left, is left out", async () => {
+  const w = world(), s = await seed(w, "auto-promoted", { shots: ["m", "b", "c"], auto: true });
+  // The judge reads the photo by its raw byte: "m" carries the mark, whatever number it has.
+  const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id));
+  const marked = sources.find(x => x.sha256 === "m")!.id;
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 1 && (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.id, marked)))[0]!.n === 1 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  await stages(w, s);
+  expect((await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.id, marked)))[0]!.n).toBeGreaterThan(1);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  const outputs = await outputsOf(s.batch.id);
+  expect(outputs.find(o => o.sourceImageId === marked)).toMatchObject({ status: "skipped", isLive: false });
+  const first = outputs.find(o => o.n === 1)!;
+  expect(first).toMatchObject({ status: "verified", isLive: true });
+  expect(first.sourceImageId).not.toBe(marked);
+  expect(first.objectPath).toMatch(/_1\.jpg$/);
+  expect((first.compliance as { auto_actions?: { step: string }[] }).auto_actions?.map(a => a.step)).toContain("photo_promoted");
+}, 120_000);
+
+it("D42: a re-cut replaces a live image at the same link, on the batch's channels; a later publisher wins; a held result takes the old image down", async () => {
+  const w = world(), s = await seed(w, "auto-recut", { shots: ["a", "b"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => GOOD(input));
+  await stages(w, s);
+  await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+  await handleFinalizeTask(w.deps, { batchId: s.batch.id });
+  const [, liveTwo] = await outputsOf(s.batch.id), source = liveTwo!.sourceImageId!;
+  // Bad request: a product locked by another batch is left alone.
+  const [other] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name: "other", isTest: true, createdBy: "t@opptra.com", status: "matting", channels: ["noon"], options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null }, counts: EMPTY_BATCH_COUNTS }).returning();
+  await db.update(catalogProducts).set({ lockBatchId: other!.id }).where(eq(catalogProducts.id, s.product.id));
+  expect((await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: [source] })).outcome).toBe("busy");
+  await db.update(catalogProducts).set({ lockBatchId: null }).where(eq(catalogProducts.id, s.product.id));
+
+  const matteCalls = vi.mocked(w.deps.matteFor).mock.calls.length;
+  expect((await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: [source] })).outcome).toBe("recutting");
+  // Sent twice: the second changes nothing, and no second chunk is queued.
+  const rowsAfterFirst = await outputsOf(s.batch.id);
+  expect((await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: [source] })).outcome).toBe("busy");
+  expect(await outputsOf(s.batch.id)).toEqual(rowsAfterFirst);
+  expect(await db.select().from(catalogChunks).where(and(eq(catalogChunks.batchId, s.batch.id), eq(catalogChunks.status, "queued")))).toHaveLength(1);
+  const [chunk] = await db.select().from(catalogChunks).where(and(eq(catalogChunks.batchId, s.batch.id), eq(catalogChunks.status, "queued")));
+  // The defect now found on the new image holds it.
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 2 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  for (let i = 0; i < 3; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk!.id))).httpStatus).toBe(200);
+  // The stored matte is not used again.
+  expect(vi.mocked(w.deps.matteFor).mock.calls.length).toBeGreaterThan(matteCalls);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  const [one, two] = await outputsOf(s.batch.id);
+  expect(one).toMatchObject({ status: "verified", isLive: true });
+  expect(two).toMatchObject({ status: "needs_attention", isLive: false });
+}, 180_000);
+
+/** Runs one product through to a finished batch. */
+const finished = async (w: ReturnType<typeof world>, s: Awaited<ReturnType<typeof seed>>) => {
+  await stages(w, s);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+};
+/** A later batch of the same product, at the same photos by default, run to its publish. */
+async function secondBatch(w: ReturnType<typeof world>, s: Awaited<ReturnType<typeof seed>>, name: string, shots: string[]) {
+  const autoDecide = await autoDecideSnapshot(db);
+  const [batch] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name, isTest: true, createdBy: "test@opptra.com", status: "matting", channels: ["noon"],
+    options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null, autoDecide }, counts: { ...EMPTY_BATCH_COUNTS, products: 1, sources: shots.length, outputs: shots.length } }).returning();
+  await db.update(catalogProducts).set({ lockBatchId: batch!.id }).where(eq(catalogProducts.id, s.product.id));
+  await db.insert(catalogBatchProducts).values({ batchId: batch!.id, productId: s.product.id, change: "new" });
+  for (const [i, sha] of shots.entries()) {
+    const rawUri = await w.upload(`catalog-test/anta/${batch!.id}/raw/${name}/${i + 1}.jpg`, Buffer.from([255, 216, 255, sha.charCodeAt(0)]), "image/jpeg");
+    await db.insert(catalogSourceImages).values({ batchId: batch!.id, productId: s.product.id, n: i + 1, sha256: sha, originalName: `${name}_${i + 1}.jpg`, rawUri, mime: "image/jpeg", width: 800, height: 800 });
+  }
+  const [chunk] = await db.insert(catalogChunks).values({ batchId: batch!.id, index: 0, stage: "matte", productIds: [s.product.id] }).returning();
+  return { batch: batch!, product: s.product, chunk: chunk! };
+}
+const liveOf = async (productId: string) => (await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId, productId), eq(catalogOutputs.isLive, true)))).sort((a, b) => a.n - b.n);
+
+it("D40: a held photo reads as waiting, never as a failed re-check; a person's decision publishes it on the finished batch", async () => {
+  const w = world(), s = await seed(w, "auto-held-decide", { shots: ["a", "m"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 2 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  await finished(w, s);
+  let [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+  expect(deriveBatchState({ status: "done", counts: batch!.counts })).toMatchObject({ state: "attention", pill: "1 photo needs you" });
+  const { report } = await buildReport(db, s.batch.id, { recheck: { ok: 1, total: 1, failures: [] }, exports: {} as never });
+  expect(report.summary).toMatchObject({ linksPlanned: 1, linksVerified: 1, linksHeld: 1, photosHeld: 1 });
+  const [, held] = await outputsOf(s.batch.id);
+  // The rule that makes this reachable: the card is on the batch page, listed although the product itself is not held.
+  expect((await listAttention(db, s.batch.id, async uri => uri)).flatMap(c => c.photos.map(photo => photo.outputId))).toEqual([held!.id]);
+  await applyDecision(db, { outputId: held!.id, decision: "use_as_is", actor: "op@opptra.com" });
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect((await outputsOf(s.batch.id))[1]).toMatchObject({ status: "verified", isLive: true });
+  await enqueueFinalize(w.deps, s.batch.id, undefined, { reopen: true });
+  expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
+  [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+  expect(deriveBatchState({ status: "done", counts: batch!.counts }).state).toBe("ready");
+  expect(await lockOf(s.product.id)).toBeNull();
+}, 180_000);
+
+it("D40: an agreed cut-out is judged whatever the sample rate", async () => {
+  const agreement = { auto_actions: [{ step: "matte_agreement", trigger: ["product_removed"], result: "passed", channels: [], rejudged: false }] };
+  const run = async (name: string) => {
+    const w = world(), s = await seed(w, name, { shots: ["a", "b"], auto: true });
+    vi.mocked(w.deps.resolvePolicy).mockResolvedValue({ matteModel: "fixture", qaModel: "test/judge", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 0, source: "default" } as never);
+    vi.mocked(w.deps.judgeOutput).mockImplementation(async input => GOOD(input));
+    for (let i = 0; i < 2; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    const rows = await outputsOf(s.batch.id);
+    await db.update(catalogOutputs).set({ compliance: { ...(rows[1]!.compliance as object), ...agreement } as never }).where(eq(catalogOutputs.id, rows[1]!.id));
+    expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    return { w, s };
+  };
+  const seen = await run("auto-agreed-sampled");
+  // The product is out of the sample; its agreed photo is judged all the same.
+  const judged = vi.mocked(seen.w.deps.judgeOutput).mock.calls.map(c => c[0].n);
+  expect(judged).toContain(2);
+  expect((await outputsOf(seen.s.batch.id))[1]!.flags).not.toContain("qa_sampled_out");
+  expect((await buildReport(db, seen.s.batch.id, { recheck: { ok: 0, total: 0, failures: [] }, exports: {} as never })).report.qa).toMatchObject({ agreedCutOuts: 1 });
+}, 180_000);
+
+it("D42: a later batch published the product: a re-cut of the older batch is refused every time and changes nothing; the last publisher's re-cut leaves the older batch's images alone", async () => {
+  const w = world(), s = await seed(w, "auto-recut-later", { shots: ["a", "b", "c"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => GOOD(input));
+  await finished(w, s);
+  const [, keptTwo, replacedThree] = await outputsOf(s.batch.id);
+  // The later batch sends photo 1 and 2 unchanged, a new photo 3 and a new photo 4.
+  const later = await secondBatch(w, s, "auto-recut-later", ["a", "b", "z", "y"]);
+  await stages(w, later);
+  expect((await handlePublishTask(w.deps, { batchId: later.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect((await handleFinalizeTask(w.deps, { batchId: later.batch.id })).outcome).toBe("done");
+  await db.update(catalogBatches).set({ status: "done" }).where(eq(catalogBatches.id, s.batch.id));
+  const state = async () => ({ outputs: (await db.select().from(catalogOutputs).where(eq(catalogOutputs.productId, s.product.id))).sort((x, y) => x.id.localeCompare(y.id)), sources: (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.productId, s.product.id))).sort((x, y) => x.id.localeCompare(y.id)), chunks: (await db.select().from(catalogChunks).where(eq(catalogChunks.batchId, s.batch.id))).length, product: (await db.select().from(catalogProducts).where(eq(catalogProducts.id, s.product.id)))[0]! });
+  const before = await state();
+  expect(before.product.lastBatchId).toBe(later.batch.id);
+  expect((await liveOf(s.product.id)).map(o => [o.n, o.batchId === s.batch.id])).toEqual([[1, true], [2, true], [3, false], [4, false]]);
+  // Sent again and again, for a photo the later batch kept and for one it replaced, and both at once: nothing is written.
+  for (const ids of [[keptTwo!.sourceImageId!], [replacedThree!.sourceImageId!], [keptTwo!.sourceImageId!, replacedThree!.sourceImageId!], [keptTwo!.sourceImageId!]]) {
+    const refused = await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: ids });
+    expect(refused.outcome).toBe("superseded");
+    expect(Object.values(refused.photos!)).toEqual(ids.map(() => "superseded"));
+    expect(await state()).toEqual(before);
+  }
+  // The last publisher's own re-cut, sent twice in a row: its image is replaced, the older batch's stay, and it stays the last publisher.
+  const liveBefore = await liveOf(s.product.id);
+  const laterFour = (await outputsOf(later.batch.id)).find(o => o.n === 4);
+  for (let round = 0; round < 2; round++) {
+    const result = await recutProductPhotos(w.deps, { batchId: later.batch.id, sourceImageIds: [laterFour!.sourceImageId!] });
+    expect(result.outcome).toBe("recutting");
+    const [chunk] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, result.chunkId!));
+    for (let i = 0; i < 3; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, chunk!.id))).httpStatus).toBe(200);
+    expect((await handlePublishTask(w.deps, { batchId: later.batch.id, productId: s.product.id })).outcome).toBe("published");
+    await db.update(catalogBatches).set({ status: "matting" }).where(eq(catalogBatches.id, later.batch.id));
+    expect((await handleFinalizeTask(w.deps, { batchId: later.batch.id })).outcome).toBe("done");
+    const after = await liveOf(s.product.id);
+    expect(after.map(o => [o.n, o.batchId])).toEqual(liveBefore.map(o => [o.n, o.batchId]));
+    expect(after.slice(0, 2).map(o => o.generation)).toEqual(liveBefore.slice(0, 2).map(o => o.generation));
+    expect((await db.select().from(catalogProducts).where(eq(catalogProducts.id, s.product.id)))[0]).toMatchObject({ lastBatchId: later.batch.id, lockBatchId: null });
+  }
+  expect(await db.select({ sha: catalogSourceImages.sha256 }).from(catalogSourceImages).where(and(eq(catalogSourceImages.productId, s.product.id), eq(catalogSourceImages.isCurrent, true), eq(catalogSourceImages.n, 3)))).toEqual([{ sha: "z" }]);
+}, 300_000);
+
+it("D42: two photos of one product share one chunk, and a person's decision is left alone", async () => {
+  const w = world(), s = await seed(w, "auto-recut-two", { shots: ["a", "b", "c"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => GOOD(input));
+  await finished(w, s);
+  const [, two, three] = await outputsOf(s.batch.id);
+  await db.update(catalogOutputs).set({ decision: "use_as_is", decidedBy: "op@opptra.com" }).where(eq(catalogOutputs.id, three!.id));
+  const result = await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: [two!.sourceImageId!, three!.sourceImageId!] });
+  expect(result).toMatchObject({ outcome: "recutting", outputs: 1, photos: { [two!.sourceImageId!]: "recutting", [three!.sourceImageId!]: "nothing_to_recut" } });
+  const [chunk] = await db.select().from(catalogChunks).where(eq(catalogChunks.id, result.chunkId!));
+  expect(chunk!.sourceImageIds).toEqual([two!.sourceImageId]);
+  expect((await outputsOf(s.batch.id))[2]).toMatchObject({ decision: "use_as_is", status: "verified" });
+}, 120_000);
+
+it("D42: a re-cut of image 1 held by the judge keeps the live image 1 until a person decides", async () => {
+  const w = world(), s = await seed(w, "auto-recut-one", { shots: ["a", "b"], auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => GOOD(input));
+  await finished(w, s);
+  const [one] = await outputsOf(s.batch.id);
+  const result = await recutProductPhotos(w.deps, { batchId: s.batch.id, sourceImageIds: [one!.sourceImageId!] });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.n === 1 ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  for (let i = 0; i < 3; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, result.chunkId!))).httpStatus).toBe(200);
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  const [after] = await outputsOf(s.batch.id);
+  expect(after).toMatchObject({ status: "needs_attention", isLive: true, n: 1 });
+  expect(w.deps.storage.deletePublicObject).not.toHaveBeenCalled();
+  // "Remove" is then what takes it down.
+  await applyDecision(db, { outputId: after!.id, decision: "remove", actor: "op@opptra.com" });
+  expect((await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect((await outputsOf(s.batch.id))[0]).toMatchObject({ isLive: false });
+  expect(vi.mocked(w.deps.storage.deletePublicObject).mock.calls.map(c => c[0])).toEqual([one!.objectPath]);
+}, 180_000);
+
+it("D40: a product re-sent after a promotion keeps its delivered order: image 1 and image 2 never show one photo", async () => {
+  const w = world(), s = await seed(w, "auto-promoted-resend", { shots: ["m", "b"], auto: true });
+  const shaOf = async (batchId: string, n: number) => (await db.select({ sha: catalogSourceImages.sha256 }).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, batchId), eq(catalogSourceImages.n, n))))[0]!.sha;
+  // The judge names the mark on "m" (whatever number it has), read from the bytes it is shown as the original.
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => input.original[3] === "m".charCodeAt(0) ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+  await finished(w, s);
+  expect(await shaOf(s.batch.id, 1)).toBe("b");
+  const live = await liveOf(s.product.id);
+  expect(live.map(o => o.n)).toEqual([1]);
+  // The same file again, in its own order: "m" first.
+  const again = await secondBatch(w, s, "auto-promoted-resend", ["m", "b"]);
+  await stages(w, again);
+  expect((await handlePublishTask(w.deps, { batchId: again.batch.id, productId: s.product.id })).outcome).toBe("published");
+  expect(await shaOf(again.batch.id, 1)).toBe("b");
+  const after = await liveOf(s.product.id);
+  expect(after.map(o => o.n)).toEqual([1]);
+  const shas = await db.select({ id: catalogSourceImages.id, sha: catalogSourceImages.sha256 }).from(catalogSourceImages).where(eq(catalogSourceImages.productId, s.product.id));
+  expect(after.map(o => shas.find(x => x.id === o.sourceImageId)!.sha)).toEqual(["b"]);
+}, 240_000);

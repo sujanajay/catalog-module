@@ -131,7 +131,7 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
 }
 
 /** Every step a record may carry: the repairs, the matte stage's integrity ladder (`matte_check`, `padded_matte`), `flush_cut`, `matte_retry`, and the retired ladder's `smaller_fit` and `apply` on old rows. */
-export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte";
+export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte" | "matte_agreement" | "photo_promoted";
 /** One entry of an output's `auto_actions` list (kept in `catalog_outputs.compliance`, no schema change). */
 export interface AutoAction {
   step: AutoActionKind;
@@ -144,6 +144,8 @@ export interface AutoAction {
   rejudged: boolean;
   /** A short technical note for the report and evals; never shown to operators. */
   detail?: string;
+  /** `matte_passthrough` only: the photo does not fill the frame, so no cut-out could be trusted on a photo that should have had one (plainPassthrough). */
+  notCloseUp?: boolean;
 }
 
 /** Stop the loop (for example the judge's spending limit was reached); the photo keeps its flags. */
@@ -193,6 +195,22 @@ export const encoderFault = (compliance: unknown): boolean => failureCodes(failu
 export function busyBackgroundHold(compliance: unknown): boolean {
   return autoActionsOf(compliance).some(a => a.step === "matte_passthrough" && a.result === "failed" && a.trigger.includes("leftover_background"));
 }
+/**
+ * M1 D40: the matte stage kept the cut-out two models agreed on although the guard's own estimate doubted it. The floor
+ * inside such a cut-out can read as a source shadow, so its first render already leaves the source shadow out.
+ */
+export function agreedMatte(compliance: unknown): boolean {
+  return autoActionsOf(compliance).some(a => a.step === "matte_agreement" && a.result === "passed");
+}
+/**
+ * M1 D40, requirement 3: the pass-through was used on a photo with a backdrop, so only what looks like the plain backdrop was replaced. A
+ * gap the mask could not see can stay as a box (Vero Moda 5715909), and the judge has missed one: such an image is never delivered without a note.
+ */
+export function plainPassthrough(compliance: unknown): boolean {
+  return autoActionsOf(compliance).some(a => a.step === "matte_passthrough" && a.result === "passed" && a.notCloseUp === true);
+}
+/** The render options of an agreed cut-out, kept with the row so every later render of it uses them too. */
+export const AGREED_VARIANT: RenderVariant = Object.freeze({ matte: "first", fitScale: 1, keepSourceShadow: false, synthesiseShadow: false });
 /** `compliance` with more actions appended to its `auto_actions` list. */
 export function withAutoActions(compliance: Record<string, unknown> | null | undefined, actions: readonly AutoAction[]): Record<string, unknown> {
   return { ...(compliance ?? {}), auto_actions: [...autoActionsOf(compliance), ...actions] };
