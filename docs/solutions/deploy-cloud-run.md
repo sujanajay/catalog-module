@@ -191,8 +191,8 @@ Not known: the cause, the 502's body (the probe keeps none), and what a client r
 call. No crash has been observed here, and Cloud Run's troubleshooting page does not mention 502.
 
 So the probes do not treat a non-JSON 502 as harmless. It gets a separate allowance (`Unexplained502s`): 1 in a whole
-probe run, on /matte, /upscale and /health, at any elapsed time and in any round size. That one is tried again. The next
-is not retried and fails the gate. The fast 429 and 503 rule above is unchanged, and a JSON 502 always fails. Each job run
+probe run, on /matte, /upscale and /health, at any elapsed time and in any round size, the cold start step included. That
+one is tried again (the cold start step only counts it). The next is not retried and fails the gate. The fast 429 and 503 rule above is unchanged, and a JSON 502 always fails. Each job run
 is one gate, so a deploy gets 1 per probed service. The allowed attempt stays in the row's timing, and its size gives up
 the outlier trim of the cap timeout check, so a retry does not improve either number. The gate prints "unexplained 502s:
 <n>" and a passing gate that used the allowance is listed in the deploy report above DEPLOY_OK. An intermittent crash that

@@ -138,8 +138,9 @@ PLATFORM_REJECTIONS_PER_ROUND = 2
 # call. No crash has been observed here, and Cloud Run's troubleshooting page does not mention 502. So a non-JSON 502 cannot
 # be told apart from a lost call, and timing does not help: it is not taken to be harmless.
 # A blip costs one rerun of a gate and a shipped crash costs far more, so the allowance is small: UNEXPLAINED_502_ALLOWANCE
-# for a whole probe run, on every path (/matte, /upscale and /health, any elapsed time, any round size). Within it the
-# call is tried again; the next one is not retried and fails the gate. An intermittent crash that happens to give at most
+# for a whole probe run, on every path (/matte, /upscale and /health, any elapsed time, any round size, the cold start step
+# too). Within it the call is tried again, except on the cold start step, which only counts it; the next one is not retried
+# and fails the gate. An intermittent crash that happens to give at most
 # one such 502 in a run still passes: the allowance narrows that gap and does not close it. The line this prints reaches
 # the deploy report (gate_probe_lines in infra/lib/gate.sh). The attempt a 502 ended stays in the row's timing, and its size
 # gives up the outlier trim of the cap timeout check (timing_p95), so a retry never improves either number.
@@ -940,11 +941,12 @@ class UpscaleProbe:
                 + [f"{self.model}: {problem}" for problem in dict.fromkeys(self.problems)])
 
 
-def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=COLD_START_HOLD_S, sleep=time.sleep):
+def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=COLD_START_HOLD_S, sleep=time.sleep, unexplained=None):
     """Spec 18 gate (plan 7.2): the time from GET /health to its 200 on a fresh instance. A long /upscale call first
     holds an instance (concurrency 1), so /health needs another one; the wait counts only when that instance started
     while the probe waited (its uptimeS is below the wait). Up to COLD_START_ATTEMPTS tries, each holding one more
-    instance (a warm idle instance takes the next hold). Returns the report entry and the failures."""
+    instance (a warm idle instance takes the next hold). Nothing here is retried, but a non-JSON 502 on a hold or a /health
+    read counts in `unexplained` like any other in the run. Returns the report entry and the failures."""
     scale, data = UPSCALE_PROBE_MODELS.get(model, 2), upscale_image(*size)
     holds, attempts, measured = [], [], None
     with ThreadPoolExecutor(max_workers=COLD_START_ATTEMPTS) as pool:
@@ -960,13 +962,21 @@ def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=
                 uptime = health.get("uptimeS")
                 fresh = isinstance(uptime, (int, float)) and uptime <= waited
                 attempts.append({"attempt": attempt, "waitS": seconds(waited), "instance": health.get("instanceId"), "uptimeS": uptime, "fresh": fresh})
-            except Exception:  # noqa: BLE001 - recorded as an unmeasured try; no detail is printed
+            except Exception as error:  # noqa: BLE001 - recorded as an unmeasured try; no detail is printed
                 attempts.append({"attempt": attempt, "waitS": seconds(time.perf_counter() - started), "instance": None, "uptimeS": None, "fresh": False, "error": True})
                 fresh, waited = False, None
+                if unexplained is not None and isinstance(error, urllib.error.HTTPError) and error.code == 502:
+                    reason = platform_rejection(error, time.perf_counter() - started)
+                    if reason:
+                        unexplained.allows(f"{model} cold start /health", reason)
             if fresh:
                 measured = waited
                 break
         held = [h.result() for h in holds]
+    if unexplained is not None:
+        for hold in held:
+            if hold.status == 502 and hold.rejection:
+                unexplained.allows(f"{model} cold start hold", hold.rejection)
     entry = {"model": model, "size": f"{size[0]}x{size[1]}", "coldStartS": seconds(measured), "limitS": limit_s, "attempts": attempts,
              "holds": [{"status": a.status, "s": seconds(a.seconds), "instance": a.instance} for a in held]}
     failures = []
@@ -984,8 +994,9 @@ def timing_p95(values, trim=True):
     the second slowest: one outlier passes, two slow calls (15%, a real tail) or a slow model fail. Fewer calls are
     judged whole (a single call is its own p95). None for no values.
     trim=False (a 502 ended one of this size's attempts): nothing is set aside. The lost attempt has no inference time
-    to judge and it may have been a slow one, so it uses up the one outlier the size is allowed: with at most one lost
-    attempt the answer is never below what the size would have got had that attempt been answered."""
+    to judge and it may have been a slow one, so it uses up the one outlier the size is allowed. With fewer than 20 calls,
+    as on the CPU gate, the answer is then never below what the size would have got had that attempt been answered; at
+    20, 40, 60, 80 or 100 calls it can be."""
     ordered = sorted(values)
     if trim and len(ordered) >= TIMING_TRIM_MIN_CALLS:
         ordered = ordered[:-1]
@@ -1114,7 +1125,8 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
     unexplained, lost = Unexplained502s(), set()
     # First, before any call warms the candidate (spec 18 gate, plan 7.2).
     if args.cold_start_max:
-        cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep)
+        cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep,
+                                                       unexplained=unexplained)
         failures += cold_failures
     # One model after the other (the service runs one tile at a time; a concurrency 1 shape must never see two models).
     for model in args.models:

@@ -1215,6 +1215,38 @@ def test_the_pbm8w_shape_passes_retries_on_another_instance_and_says_so(fake_ups
     assert "unexplained 502s: 1 (at most 1 in one gate run): swinir-x4 800x1200 /upscale: non-JSON HTTP 502 after " in out
 
 
+def test_a_502_on_a_cold_start_hold_and_another_later_fails_the_gate(fake_upscale, every_attempt_is_late):
+    # The re-review's repro: the hold (call 1) and the measured round (warm call 2, round call 3) each got a 502, and this
+    # exited 0 with one counted.
+    fake = fake_upscale(uptime=0.0, platform_502_calls={1, 3})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["coldStart"]["holds"][0]["status"] == 502 and len(report["unexplained502s"]["seen"]) == 2
+    assert any(OVER_ALLOWANCE in failure for failure in report["failures"]), report["failures"]
+
+
+def test_one_502_on_a_cold_start_hold_uses_the_allowance_and_says_so(fake_upscale, capsys, every_attempt_is_late):
+    fake = fake_upscale(uptime=0.0, platform_502_calls={1})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    assert code == 0 and reports[0][1]["unexplained502s"]["seen"][0].startswith("swinir-x2 cold start hold: non-JSON HTTP 502 after ")
+    assert "unexplained 502s: 1 (at most 1 in one gate run): swinir-x2 cold start hold: " in capsys.readouterr().out
+
+
+def test_a_502_on_the_cold_start_health_read_counts_too(fake_upscale, every_attempt_is_late):
+    # The 502 ends the first try, so a second hold (calls 1 and 2) comes before the warm call 3 and the round call 4.
+    fake = fake_upscale(uptime=0.0, health_answers=["502"], platform_502_calls={4})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["unexplained502s"]["seen"][0].startswith("swinir-x2 cold start /health: ")
+    assert any(OVER_ALLOWANCE in failure for failure in report["failures"]), report["failures"]
+
+
+def test_the_services_own_502_on_a_hold_does_not_use_the_allowance(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(uptime=0.0, own_502_calls={1})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    assert reports[0][1]["unexplained502s"]["seen"] == []
+
+
 def test_a_clean_run_prints_none_used(fake_upscale, capsys):
     code, report, *_, out = run_7g6tv_shape(fake_upscale, capsys)
     assert code == 0 and report["unexplained502s"] == {"allowance": 1, "seen": []}
