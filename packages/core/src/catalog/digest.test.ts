@@ -330,7 +330,7 @@ describe("a photo held for a person (M1 D40)", () => {
     expect(digest.digest.needsYou).toBe(1);
     const rows = digest.exceptions.filter(e => e.group.startsWith("Waiting for you"));
     expect(rows.map(r => r.channel).sort()).toEqual(["namshi", "noon"]);
-    expect(rows[0]).toMatchObject({ image: 2, fix: expect.stringContaining("replace the photo") });
+    expect(rows[0]).toMatchObject({ image: 2, fix: expect.stringContaining("Replace the photo") });
     expect(JSON.stringify(rows)).not.toMatch(/birefnet|bria/);
   }, 120_000);
 });
