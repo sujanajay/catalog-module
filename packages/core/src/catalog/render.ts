@@ -692,13 +692,13 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     const drawShadow = async () => {
       foregroundMask.fill(0);
       for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
-      const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
+      let drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
       floorPatch = undefined;
       if (drawn.layer && !drawn.flags.includes("shadow_synthesised")) {
-        // A kept shadow that leaves floor tone on the canvas is left out here, like `source_shadow_off`: a clean image, automatically, with no flag for triage and no person.
+        // A kept shadow that leaves floor tone on the canvas is left out here, like `source_shadow_off`: the synthesis rule then decides as if none could be measured, so apparel is clean and a shoe still gets its shadow, with no hold and no person.
         const share = floorPatchShare(await sharp(drawn.layer).toColourspace("b-w").raw().toBuffer(), plan.w, plan.h, rgbColor, product), dropped = share >= FLOOR_PATCH_MAX_SHARE;
         floorPatch = { share, dropped };
-        if (dropped) return { layer: null, flags: ["no_shadow_source" as const] };
+        if (dropped) drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, false);
       }
       // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
       // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product

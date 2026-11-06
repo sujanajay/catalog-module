@@ -38,7 +38,7 @@ export function analyseBackground(rgb: Buffer, width: number, height: number): P
  * Only dark components connected to the contact line, inside the band around it, can be a preserved shadow; past the
  * band they fade (continueBeyondBand). This holds for apparel too: searching the whole frame let a toned studio floor
  * (a few levels under the border's colour) flood-connect from the contact line and stay on the canvas as a large faint
- * patch that ended on the source frame (2026-11-07, Vero Moda: 47 of 533 kept shadows). Inside the band an apparel
+ * patch that ended on the source frame (2026-11-07, Vero Moda: 45 of 533 kept shadows). Inside the band an apparel
  * shadow is also read against the floor's own tone beside it (floorTone), or the tone stays as a soft slab around the feet.
  */
 export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: ProductType): Buffer | null {
@@ -91,12 +91,16 @@ const FLOOR_TONED = 0.01;
 const FLOOR_SAMPLE_WIDTH = 0.02;
 /** Rows of the floor sample smoothed together, as a share of the photo's height, so a row's noise does not print as a line. */
 const FLOOR_SAMPLE_ROWS = 0.01;
+/** A row needs this much background at the frame's edges for them to stand for the floor. */
+const FLOOR_EDGE_MIN_PIXELS = 3;
 
 /**
  * The tone of the floor itself under a band (darkness, 0..1), row by row: the median of the background beside the band,
  * past the reach of a contact shadow, on each side, and a straight line between the two sides, since studio light makes
  * one side darker. The canvas stands for the floor, so only what is darker than this is the product's shadow. A side
- * with no background to read (the product fills it) takes the other side's tone; with neither, the tone is 0.
+ * with no background to read (the product fills it) takes the other side's tone. With neither, as on a garment wide enough
+ * that both samples fall off the frame, the row reads the background at the frame's edges; with none there either, the
+ * tone is 0.
  */
 function floorTone(p: Prepared, matte: Matte, band: { x0: number; y0: number; x1: number; y1: number }, reach: number, bg: number, luma: (r: number, g: number, b: number) => number): (x: number, y: number) => number {
   const width = Math.max(4, Math.round(p.width * FLOOR_SAMPLE_WIDTH)), rows = Math.max(1, Math.round(p.height * FLOOR_SAMPLE_ROWS));
@@ -119,11 +123,21 @@ function floorTone(p: Prepared, matte: Matte, band: { x0: number; y0: number; x1
   const leftEnd = Math.max(0, band.x0 - reach), rightStart = Math.min(p.width, band.x1 + reach);
   const left = smooth(median(Math.max(0, leftEnd - width), leftEnd)), right = smooth(median(rightStart, Math.min(p.width, rightStart + width)));
   const leftX = leftEnd - width / 2, rightX = rightStart + width / 2;
+  const darkOf = (i: number) => (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg;
+  const medianOf = (values: number[]) => values.length ? values.sort((a, b) => a - b)[values.length >> 1]! : Number.NaN;
+  // The background a row shows from each frame edge up to the product, at most one sample's width on each side.
+  const atEdges = smooth(Float32Array.from({ length: count }, (_, at) => {
+    const values: number[] = [], rowStart = (y0 + at) * p.width;
+    for (let x = 0; x < Math.min(width, p.width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x++) values.push(darkOf(rowStart + x));
+    for (let x = p.width - 1; x >= Math.max(0, p.width - width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x--) values.push(darkOf(rowStart + x));
+    return values.length >= FLOOR_EDGE_MIN_PIXELS ? medianOf(values) : Number.NaN;
+  }));
   return (x, y) => {
     const at = y - y0;
     if (at < 0 || at >= count) return 0;
     const l = left[at]!, r = right[at]!;
-    if (Number.isNaN(l)) return Number.isNaN(r) ? 0 : r;
+    if (Number.isNaN(l) && Number.isNaN(r)) return Number.isNaN(atEdges[at]!) ? 0 : atEdges[at]!;
+    if (Number.isNaN(l)) return r;
     if (Number.isNaN(r)) return l;
     const t = Math.min(1, Math.max(0, (x - leftX) / (rightX - leftX)));
     return l + (r - l) * t;

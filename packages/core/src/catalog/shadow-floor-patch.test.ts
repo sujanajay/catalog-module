@@ -27,6 +27,38 @@ function studio(floorLevels: number, inX: (x: number) => boolean = () => true, c
   };
 }
 
+/** A garment laid flat, nearly as wide as the frame, on a floor `floorLevels` under the wall, with a real shadow under the middle of its hem. */
+function wideGarment(boxW: number, floorLevels: number): { prepared: Prepared; matte: Matte } {
+  const rgb = Buffer.alloc(W * H * 3, WALL), alpha = Buffer.alloc(W * H), x0 = (W - boxW) >> 1, bottom = BOX.y + BOX.h;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    let v = WALL;
+    if (y >= 500) v -= floorLevels;
+    if (((x - W / 2) / 100) ** 2 + ((y - bottom) / 30) ** 2 < 1) v = 170;
+    rgb.fill(v, i * 3, i * 3 + 3);
+    if (x >= x0 && x < x0 + boxW && y >= BOX.y && y < bottom) { rgb.set([40, 60, 90], i * 3); alpha[i] = 255; }
+  }
+  return {
+    prepared: { rgb, width: W, height: H, sourceMime: "image/png", alphaSource: null, background: analyseBackground(rgb, W, H), flags: [] },
+    matte: { alpha, width: W, height: H, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null },
+  };
+}
+
+/** A tall boot on a plain floor with a real shadow so soft and wide that its fade reads as floor tone beside the product. */
+function softBoot(sigma: number): { prepared: Prepared; matte: Matte } {
+  const size = 800, x0 = 340, x1 = 460, y0 = 140, y1 = 660;
+  const rgb = Buffer.alloc(size * size * 3, WALL), alpha = Buffer.alloc(size * size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = y * size + x, d = Math.exp(-0.5 * (((x - 400) / sigma) ** 2 + ((y - y1) / 26) ** 2));
+    rgb.fill(Math.round(WALL - 40 * d), i * 3, i * 3 + 3);
+    if (x >= x0 && x < x1 && y >= y0 && y < y1) { rgb.set([40, 30, 25], i * 3); alpha[i] = 255; }
+  }
+  return {
+    prepared: { rgb, width: size, height: size, sourceMime: "image/png", alphaSource: null, background: analyseBackground(rgb, size, size), flags: [] },
+    matte: { alpha, width: size, height: size, model: "synthetic", ms: 0, source: "model", target: "cpu", sentLongSide: null },
+  };
+}
+
 describe("a toned floor is not a contact shadow", () => {
   for (const type of ["apparel_model", "apparel_flat"] as ProductType[]) {
     it(`${type}: keeps the shadow at the feet and none of the floor far from them`, () => {
@@ -74,6 +106,22 @@ describe("a toned floor is not a contact shadow", () => {
     const kept = preservedDarkness(prepared, matte, box, "apparel_model")!;
     // x 331 to 335 is inside the band, beside the product; only the way round leads there.
     expect(kept[640 * W + 333]).toBeGreaterThan(0);
+  });
+
+  for (const boxW of [420, 540, 576]) it(`reads the floor at the frame's edges under a garment ${boxW} of ${W} wide, where both samples fall off the frame`, () => {
+    const { prepared, matte } = wideGarment(boxW, 12), box = bbox(matte.alpha, W, H)!;
+    expect(prepared.background.uniform).toBe(true);
+    const kept = preservedDarkness(prepared, matte, box, "apparel_flat")!;
+    // Under the hem, off the real shadow: only floor tone, which is no shadow.
+    const left = W / 2 - boxW / 2 + 4;
+    expect(kept[(BOX.y + BOX.h + 60) * W + left]).toBe(0);
+    // The real shadow under the hem stays, read above the floor.
+    expect(kept[(BOX.y + BOX.h + 5) * W + W / 2]! / 255).toBeCloseTo(48 / WALL, 1);
+  });
+
+  it("keeps a wide garment's real shadow on a plain floor, where the frame's edges read no tone", () => {
+    const { prepared, matte } = wideGarment(540, 0), kept = preservedDarkness(prepared, matte, bbox(matte.alpha, W, H)!, "apparel_flat")!;
+    expect(kept[(BOX.y + BOX.h + 5) * W + W / 2]! / 255).toBeCloseTo(60 / WALL, 1);
   });
 
   it("still fades the floor tone past the band instead of stopping on a straight line", () => {
@@ -138,6 +186,24 @@ describe("the render leaves out a kept shadow that would leave a patch", () => {
     const { data, info } = await sharp(output.jpeg!).removeAlpha().raw().toBuffer({ resolveWithObject: true });
     const product = output.plan.productBox!, under = product.y + product.h - 30, x = product.x - 4;
     expect(data[(under * info.width + x) * 3]).toBeLessThan(225);
+  });
+
+  for (const productType of ["footwear", "bag_accessory"] as ProductType[]) it(`${productType}: a dropped shadow goes to the synthesis rule, so a boot with a soft real shadow is not left without one`, async () => {
+    const { prepared, matte } = softBoot(200);
+    const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType });
+    const measured = output.compliance.measured!;
+    expect(measured.floorPatch?.dropped).toBe(true);
+    expect(measured.shadow).toBe("synthesised");
+    expect(output.flags).toContain("shadow_synthesised");
+    expect(output.flags).not.toContain("no_shadow_source");
+  });
+
+  it("a dropped shadow on a shoe stays off when synthesis is off for this render", async () => {
+    const { prepared, matte } = softBoot(200);
+    const output = await renderSource({ prepared, matte, channel: "noon", shotNumber: 2, productType: "footwear", synthesiseShadow: false });
+    expect(output.compliance.measured!.floorPatch?.dropped).toBe(true);
+    expect(output.compliance.measured!.shadow).toBe("none");
+    expect(output.flags).toContain("no_shadow_source");
   });
 
   it("does not measure when the source shadow is already off", async () => {
