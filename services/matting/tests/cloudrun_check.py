@@ -7,6 +7,7 @@ import math
 import os
 import re
 import statistics
+import threading
 import sys
 import time
 import urllib.error
@@ -47,15 +48,24 @@ def request(url, token=None, data=None, content_type=None, timeout=TIMEOUT, limi
 # gate failed on one GET /health that Cloud Run answered 503 in 0.7 ms while it retired an idle instance; every
 # measurement had passed and /health answered 200 again 3 s later. A probe's /health read is therefore tried up to
 # TRANSIENT_ATTEMPTS times, TRANSIENT_DELAYS_S apart and within TRANSIENT_MAX_S, but only after a clearly passing
-# platform error (transient_reason): a 429, 502 or 503 whose body is not the service's own JSON answer (the matting service
-# answers every error of its own as a JSON object and has no 502, services/matting/app.py), a connection error before the
-# request was sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
-# any other status, the service's own error body, a read timeout (a slow candidate) and a malformed answer. The measured
-# /matte and /upscale calls have their own, narrower rule (PLATFORM_RETRIES below).
+# platform error (transient_reason): a 429 or 503 whose body is not the service's own JSON answer (the matting service
+# answers every error of its own as a JSON object, services/matting/app.py), a connection error before the request was
+# sent (refused, reset, connect timeout), or a connection reset before the answer. Every retry is printed. Never retried:
+# any other status, the service's own error body, a read timeout (a slow candidate) and a malformed answer. A 502 is the
+# exception to "any other status": see Unexplained502s. The measured /matte and /upscale calls have their own, narrower
+# rule (PLATFORM_RETRIES below).
 TRANSIENT_ATTEMPTS = 3
 TRANSIENT_DELAYS_S = (5, 10)
 TRANSIENT_MAX_S = 90
-TRANSIENT_STATUSES = (429, 502, 503)
+TRANSIENT_STATUSES = (429, 503)
+
+
+def own_answer(error):
+    """True when an HTTPError's body is a JSON object, the shape of the service's own errors. Reads the body once."""
+    try:
+        return isinstance(json.loads(error.read(65536) or b""), dict)
+    except Exception:  # noqa: BLE001 - an unreadable or non-JSON body is not the service's own answer
+        return False
 
 
 def transient_reason(error):
@@ -63,11 +73,7 @@ def transient_reason(error):
     if isinstance(error, urllib.error.HTTPError):
         if error.code not in TRANSIENT_STATUSES:
             return None
-        try:
-            own = isinstance(json.loads(error.read(65536) or b""), dict)
-        except Exception:  # noqa: BLE001 - an unreadable or non-JSON body is not the service's own answer
-            own = False
-        return None if own else f"HTTP {error.code} from the platform, not the service"
+        return None if own_answer(error) else f"HTTP {error.code} from the platform, not the service"
     if isinstance(error, urllib.error.URLError) and isinstance(error.reason, (ConnectionError, TimeoutError)):
         # urllib wraps only the connect and send phase in URLError; a timeout waiting for the answer is raised bare.
         return "connection failed before the request was sent"
@@ -77,15 +83,21 @@ def transient_reason(error):
     return None
 
 
-def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.monotonic):
-    """request(url, token), tried again after a passing platform error only (see TRANSIENT_ATTEMPTS). Each retry is
-    printed and appended to `log`; the last error is raised as it came."""
+def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.monotonic, unexplained=None):
+    """request(url, token), tried again after a passing platform error only (see TRANSIENT_ATTEMPTS), or after a non-JSON
+    502 that `unexplained` still allows. Each retry is printed and appended to `log`; the last error is raised as it came."""
     began = clock()
     for attempt in range(1, TRANSIENT_ATTEMPTS + 1):
+        tried = clock()
         try:
             return request(url, token)
         except Exception as error:  # noqa: BLE001 - re-raised unless it is a passing platform error
-            reason = transient_reason(error)
+            if isinstance(error, urllib.error.HTTPError) and error.code == 502:
+                reason = platform_rejection(error, clock() - tried)
+                if reason and (unexplained is None or not unexplained.allows(label, reason)):
+                    reason = None
+            else:
+                reason = transient_reason(error)
             delay = TRANSIENT_DELAYS_S[min(attempt, len(TRANSIENT_DELAYS_S)) - 1]
             if reason is None:
                 raise
@@ -108,50 +120,89 @@ def read_with_retry(label, url, token, sleep=time.sleep, log=None, clock=time.mo
 # /matte or /upscale call is tried again, up to PLATFORM_RETRIES times, PLATFORM_RETRY_DELAYS_S apart, only after a
 # platform rejection: an HTTP 429 or 503 whose body is not the service's own JSON answer (transient_reason) that came back
 # within PLATFORM_REJECTION_MAX_S (a call turned away at the front door; an instance that crashes during inference fails
-# the call after its run time, and that stays a failure), or such a 502 at any time (below). Each retry is printed and
-# recorded; only the attempt a container answered is timed. Never retried: the service's own error (a JSON body), any other status, a transport failure or
+# the call after its run time, and that stays a failure). Each retry is printed and recorded; only the attempt a container
+# answered is timed. Never retried: the service's own error (a JSON body), any other status, a transport failure or
 # timeout, a wrong answer. A round (one burst of calls at once) fails when Cloud Run turned away more than
 # PLATFORM_REJECTIONS_PER_ROUND of its attempts, so a real capacity problem still fails the gate; the gate runs have seen
 # at most 1 (7g6tv) and before that 0 in 8 GPU gate runs.
-#
-# A 502 (2026-11-06, catalog-check-upscale-pbm8w, 12 x4 determinism calls on the CPU service): one call got a 502 after
-# 250 s. Its request was on instance 53428619, which finished 14 s later and logged a 200, 130.84 s of inference, so the
-# client's 502 came from between the probe and a healthy container. The time limit cannot tell this one apart: it is
-# what a long call looks like, however it ends. So a 502 is a platform rejection at any elapsed time, on the body alone
-# (not the service's own JSON answer). That is safe where a late 503 is not: the service has no 502 of its own, and
-# Cloud Run documents an instance killed for memory or a lost connection to it as a 500 or 503
-# (run/docs/troubleshooting), both still failures when late.
-# A late one names its time in the printed retry, and the per-call and per-round limits above apply to it too.
 PLATFORM_RETRIES = 2
 PLATFORM_RETRY_DELAYS_S = (5, 10)
 PLATFORM_REJECTION_MAX_S = 2.0
 PLATFORM_REJECTIONS_PER_ROUND = 2
-PLATFORM_ANY_TIME_STATUSES = (502,)
+
+# Unexplained 502s (2026-11-06, catalog-check-upscale-pbm8w, 12 x4 determinism calls on the CPU service): one call got a
+# 502 after 250 s and stopped a deploy.
+# Known: the request log has that call as a 200, and its instance finished the work about 14 s after the client's 502. Other
+# calls of that round answered 200 after 355 s and 377 s, so 250 s is no fixed limit. It is the only such 502 seen.
+# Not known: the cause, the 502's body (the probe keeps none), and what a client receives when a container dies during a
+# call. No crash has been observed here, and Cloud Run's troubleshooting page does not mention 502. So a non-JSON 502 cannot
+# be told apart from a lost call, and timing does not help: it is not taken to be harmless.
+# A blip costs one rerun of a gate and a shipped crash costs far more, so the allowance is small: UNEXPLAINED_502_ALLOWANCE
+# for a whole probe run, on every path (/matte, /upscale and /health, any elapsed time, any round size). Within it the
+# call is tried again; the next one is not retried and fails the gate. An intermittent crash that happens to give at most
+# one such 502 in a run still passes: the allowance narrows that gap and does not close it. The line this prints reaches
+# the deploy report (gate_probe_lines in infra/lib/gate.sh). The attempt a 502 ended stays in the row's timing, and its size
+# gives up the outlier trim of the cap timeout check (timing_p95), so a retry never improves either number.
+UNEXPLAINED_502_ALLOWANCE = 1
+
+
+class Unexplained502s:
+    """The non-JSON 502s of one probe run, across every thread, path and model."""
+
+    def __init__(self, allowance=UNEXPLAINED_502_ALLOWANCE):
+        self.allowance, self.seen, self.lock = allowance, [], threading.Lock()
+
+    def allows(self, where, reason):
+        """Records one; True while the run is within the allowance, when the caller may try once more."""
+        with self.lock:
+            self.seen.append(f"{where}: {reason}")
+            return len(self.seen) <= self.allowance
+
+    def failures(self):
+        if len(self.seen) <= self.allowance:
+            return []
+        return [f"{len(self.seen)} unexplained 502s in one gate run (at most {self.allowance}): " + "; ".join(self.seen)]
+
+    def line(self):
+        """The gate output's one line; infra/lib/gate.sh matches its start, so keep "unexplained 502s: <count>"."""
+        seen = f": {'; '.join(self.seen)}" if self.seen else ""
+        return f"unexplained 502s: {len(self.seen)} (at most {self.allowance} in one gate run){seen}"
+
+    def report(self):
+        return {"allowance": self.allowance, "seen": list(self.seen)}
 
 
 def platform_rejection(error, elapsed):
-    """Why a measured call's `error` came from the platform and not from a container's answer, or None."""
+    """Why a measured call's `error` counts as a platform rejection, or None: Cloud Run turning the call away (fast and
+    not JSON), or a non-JSON 502 at any time, which only Unexplained502s may let through."""
     if not isinstance(error, urllib.error.HTTPError):
         return None
-    late = elapsed > PLATFORM_REJECTION_MAX_S
-    if late and error.code not in PLATFORM_ANY_TIME_STATUSES:
+    if error.code == 502:
+        return None if own_answer(error) else f"non-JSON HTTP 502 after {elapsed:.1f} s, cause unknown"
+    if elapsed > PLATFORM_REJECTION_MAX_S:
         return None
-    reason = transient_reason(error)
-    return f"{reason} after {elapsed:.1f} s" if reason and late else reason
+    return transient_reason(error)
 
 
-def served_call(call, label, sleep=time.sleep, log=None, busy_retries=0, busy_sleep_s=0):
+def served_call(call, label, sleep=time.sleep, log=None, busy_retries=0, busy_sleep_s=0, unexplained=None):
     """call() (one attempt, an answer with .status and .rejection) until a container answered: a 429 is tried again up to
     `busy_retries` times, `busy_sleep_s` apart (the determinism round's queue wait), and a platform rejection up to
-    PLATFORM_RETRIES times. Returns the last attempt, with .rejections set to the platform rejections it took (the last
-    attempt included when it was one too)."""
+    PLATFORM_RETRIES times. A non-JSON 502 is tried again only while `unexplained` allows it. Returns the last attempt,
+    with .rejections set to the platform rejections it took (the last attempt included when it was one too) and .lost_502
+    to the attempts a 502 ended, which the timing keeps (see Unexplained502s)."""
     rejections = busy = 0
+    lost = []
     while True:
         answer = call()
         if answer.status == 429 and busy < busy_retries:
             busy += 1
             sleep(busy_sleep_s)
             continue
+        if answer.status == 502 and answer.rejection:
+            if unexplained is not None and unexplained.allows(label, answer.rejection):
+                lost.append(answer)
+            else:
+                answer.rejection = None
         if answer.rejection:
             rejections += 1
             last = rejections > PLATFORM_RETRIES
@@ -164,7 +215,7 @@ def served_call(call, label, sleep=time.sleep, log=None, busy_retries=0, busy_sl
             if not last:
                 sleep(delay)
                 continue
-        answer.rejections = rejections
+        answer.rejections, answer.lost_502 = rejections, lost
         return answer
 
 
@@ -294,10 +345,10 @@ def probe_image():
 
 class MatteAnswer:
     """One /matte attempt: status (0 for a transport failure or timeout), client ms, and the platform rejection reason
-    (platform_rejection) when Cloud Run turned it away. rejections: set by served_call."""
+    (platform_rejection) when it counts as one. rejections, lost_502: set by served_call."""
 
     def __init__(self, status, ms, rejection=None):
-        self.status, self.ms, self.rejection, self.rejections = status, ms, rejection, 0
+        self.status, self.ms, self.rejection, self.rejections, self.lost_502 = status, ms, rejection, 0, []
 
 
 def timed_matte(url, token, model, data):
@@ -323,13 +374,14 @@ def percentile(values, share):
 
 
 class Probe:
-    def __init__(self, url, token, models, sleep=time.sleep):
+    def __init__(self, url, token, models, sleep=time.sleep, unexplained=None):
         self.url, self.token, self.data, self.sleep = url, token, probe_image(), sleep
         self.models = {model: {"ms": [], "answers": [], "platformRetries": 0, "peakMiB": None} for model in models}
         self.instances = {}
         self.steps = []
         self.problems = []
         self.retries = []
+        self.unexplained = unexplained or Unexplained502s()
 
     def health(self, step, model=None):
         """Reads /health (fresh VRAM) after a step and keeps each instance's newest load counters. The first read of an
@@ -337,7 +389,7 @@ class Probe:
         is tried again (read_with_retry)."""
         try:
             _, body = read_with_retry(f"/health after {step}{' ' + model if model else ''}", self.url + "/health?fresh=1", self.token,
-                                      self.sleep, self.retries)
+                                      self.sleep, self.retries, unexplained=self.unexplained)
             health = json.loads(body)
         except Exception:  # noqa: BLE001 - recorded as a probe failure; no detail is printed
             self.steps.append({"step": step, "model": model, "health": None})
@@ -360,15 +412,17 @@ class Probe:
         self.steps.append({"step": step, "model": model, "instance": instance, "usedMiB": used, "residentModels": health.get("residentModels")})
 
     def calls(self, model, count, measured):
-        """`count` calls at once; a platform rejection is tried again (served_call) and only the answered attempt is timed."""
+        """`count` calls at once; a platform rejection is tried again (served_call) and only the answered attempt is timed,
+        plus any attempt a 502 ended."""
         with ThreadPoolExecutor(max_workers=count) as pool:
             results = list(pool.map(lambda _: served_call(lambda: timed_matte(self.url, self.token, model, self.data), f"{model} /matte",
-                                                          self.sleep, self.retries), range(count)))
+                                                          self.sleep, self.retries, unexplained=self.unexplained), range(count)))
         entry = self.models[model]
         entry["answers"].extend(results)
         entry["platformRetries"] += round_rejections(model, results, self.problems)
         if measured:
             entry["ms"].extend(a.ms for a in results if a.status == 200)
+            entry["ms"].extend(lost.ms for a in results for lost in a.lost_502)
 
     def run(self, concurrency, rounds):
         self.health("baseline")
@@ -400,11 +454,12 @@ class Probe:
                 for model, entry in self.models.items()]
 
     def failures(self, rows):
-        """Any non-200 (with its reason), any unreadable health, a round with too many platform rejections, and a reload
-        when the shape keeps every probed model resident. With fewer resident sessions than models the switching order
-        must reload, so loads are reported, not failed."""
+        """Any non-200 (with its reason), any unreadable health, a round with too many platform rejections, more non-JSON
+        502s than the run allows, and a reload when the shape keeps every probed model resident. With fewer resident
+        sessions than models the switching order must reload, so loads are reported, not failed."""
         reloads = [f"{r['model']}: {r['loads']} loads on one instance" for r in rows if r["loads"] > 1] if self.holds_all() else []
-        return [f"{r['model']}: {r['non200Text']}" for r in rows if r["non200"]] + reloads + list(dict.fromkeys(self.problems))
+        return ([f"{r['model']}: {r['non200Text']}" for r in rows if r["non200"]] + reloads + list(dict.fromkeys(self.problems))
+                + self.unexplained.failures())
 
 
 def print_platform_retries(rows):
@@ -470,9 +525,11 @@ def probe_main(argv, token_for=None, report_writer=None, now=None, sleep=time.sl
     failures = probe.failures(rows)
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "imagePx": PROBE_SIZE, "models": args.models,
               "concurrency": args.concurrency, "rounds": args.rounds, "rows": rows, "reloadsChecked": probe.holds_all(),
-              "instances": probe.instances, "steps": probe.steps, "retries": probe.retries, "passed": not failures, "failures": failures}
+              "instances": probe.instances, "steps": probe.steps, "retries": probe.retries, "unexplained502s": probe.unexplained.report(),
+              "passed": not failures, "failures": failures}
     print(markdown(rows), flush=True)
     print_platform_retries(rows)
+    print(probe.unexplained.line(), flush=True)
     location = (report_writer or write_report)(run, report)
     print(json.dumps({"probe": run, "passed": not failures, "failures": failures, "report": location}), flush=True)
     return 1 if failures else 0
@@ -579,8 +636,9 @@ class UpscaleAnswer:
 
     def __init__(self, status, seconds, digest=None, instance=None, body=None, server_seconds=None, rejection=None):
         self.status, self.seconds, self.digest, self.instance, self.body = status, seconds, digest, instance, body
-        # rejection: why Cloud Run turned this attempt away (platform_rejection), else None; rejections: set by served_call.
-        self.server_seconds, self.rejection, self.rejections = server_seconds, rejection, 0
+        # rejection: why this attempt counts as a platform rejection (platform_rejection), else None; rejections, lost_502:
+        # set by served_call.
+        self.server_seconds, self.rejection, self.rejections, self.lost_502 = server_seconds, rejection, 0, []
 
     def __iter__(self):
         # (status, seconds, digest), as callers before the instance id unpacked it.
@@ -619,11 +677,11 @@ def timed_upscale(url, token, model, data, size, timeout, scale=2):
     return UpscaleAnswer(status, time.perf_counter() - started, digest, instance, kept, served, rejection)
 
 
-def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep, log=None, busy_retries=BUSY_RETRIES):
+def upscale_until_served(url, token, model, data, size, timeout, scale, sleep=time.sleep, log=None, busy_retries=BUSY_RETRIES, unexplained=None):
     """timed_upscale until a container answered (served_call): a 429 (every instance busy) is tried again `busy_retries`
     times, BUSY_RETRY_S apart (the determinism round), and a platform rejection PLATFORM_RETRIES times."""
     return served_call(lambda: timed_upscale(url, token, model, data, size, timeout, scale), f"{model} {size[0]}x{size[1]} /upscale",
-                       sleep, log, busy_retries, BUSY_RETRY_S)
+                       sleep, log, busy_retries, BUSY_RETRY_S, unexplained)
 
 
 # pixel_difference compares bands of about this many pixels at a time, so its temporary arrays stay about 3 MB each at
@@ -747,7 +805,7 @@ def current_token(source):
 
 
 class UpscaleProbe:
-    def __init__(self, url, token, model, sizes, timeout, sleep=time.sleep):
+    def __init__(self, url, token, model, sizes, timeout, sleep=time.sleep, unexplained=None):
         # `token`: None (a local URL), a token, or a callable that returns the current one (RefreshingToken).
         self.url, self.token_source, self.model, self.timeout, self.sleep = url, token, model, timeout, sleep
         self.retries = []
@@ -761,6 +819,9 @@ class UpscaleProbe:
         self.determinism = None
         # Per size: the work_seconds of every measured 200 (the rounds and the determinism round, not the warm call).
         self.work = {}
+        # The sizes where a 502 ended a measured attempt: timing_p95 keeps their slowest call.
+        self.lost_sizes = set()
+        self.unexplained = unexplained or Unexplained502s()
 
     @property
     def token(self):
@@ -769,7 +830,8 @@ class UpscaleProbe:
     def health(self, step):
         # A passing platform error is tried again (read_with_retry); the 2026-11-05 gate failure was one such 503 here.
         try:
-            _, body = read_with_retry(f"{self.model} /health after {step}", self.url + "/health", self.token, self.sleep, self.retries)
+            _, body = read_with_retry(f"{self.model} /health after {step}", self.url + "/health", self.token, self.sleep, self.retries,
+                                      unexplained=self.unexplained)
             health = json.loads(body)
         except Exception:  # noqa: BLE001 - recorded as a probe failure; no detail is printed
             self.problems.append(f"health unreadable after {step}")
@@ -790,12 +852,18 @@ class UpscaleProbe:
         token = self.token
         with ThreadPoolExecutor(max_workers=count) as pool:
             results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, entry["data"], size, self.timeout, self.scale, self.sleep,
-                                                                   self.retries, busy_retries=0), range(count)))
+                                                                   self.retries, busy_retries=0, unexplained=self.unexplained), range(count)))
         entry["answers"].extend(keep_bodies(results, entry["bodies"]))
         entry["platformRetries"] += round_rejections(f"{size[0]}x{size[1]} round", results, self.problems)
         if measured:
             entry["s"].extend(a.seconds for a in results if a.status == 200)
+            entry["s"].extend(lost.seconds for a in results for lost in a.lost_502)
             self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
+            self.note_lost(size, results)
+
+    def note_lost(self, size, results):
+        if any(a.lost_502 for a in results):
+            self.lost_sizes.add(size)
 
     def run(self, concurrency, rounds):
         self.health("baseline")
@@ -828,10 +896,11 @@ class UpscaleProbe:
             token = self.token
             with ThreadPoolExecutor(max_workers=count) as pool:
                 results = list(pool.map(lambda _: upscale_until_served(self.url, token, self.model, data, size, self.timeout, self.scale, sleep,
-                                                                       self.retries), range(count)))
+                                                                       self.retries, unexplained=self.unexplained), range(count)))
             round_rejections(f"{label} round {attempt}", results, capacity)
             answers += keep_bodies(results, bodies)
             self.work.setdefault(size, []).extend(a.work_seconds for a in results if a.status == 200)
+            self.note_lost(size, results)
             calls += [{"attempt": attempt, "status": a.status, "s": seconds(a.seconds), "serverS": seconds(a.server_seconds), "instance": a.instance,
                        "sha256": a.digest, "platformRetries": a.rejections} for a in results]
             if len({a.instance for a in answers if a.status == 200 and a.instance}) >= 2:
@@ -909,18 +978,21 @@ def measure_cold_start(url, token_source, model, size, timeout, limit_s, hold_s=
     return entry, failures
 
 
-def timing_p95(values):
+def timing_p95(values, trim=True):
     """The p95 the x4 timeout check judges: nearest-rank, after setting aside the single slowest call when a size has at
     least TIMING_TRIM_MIN_CALLS calls. With the gate's 13 x4 calls at 800x1200 (1 round + 12 determinism calls) it is
     the second slowest: one outlier passes, two slow calls (15%, a real tail) or a slow model fail. Fewer calls are
-    judged whole (a single call is its own p95). None for no values."""
+    judged whole (a single call is its own p95). None for no values.
+    trim=False (a 502 ended one of this size's attempts): nothing is set aside. The lost attempt has no inference time
+    to judge and it may have been a slow one, so it uses up the one outlier the size is allowed: with at most one lost
+    attempt the answer is never below what the size would have got had that attempt been answered."""
     ordered = sorted(values)
-    if len(ordered) >= TIMING_TRIM_MIN_CALLS:
+    if trim and len(ordered) >= TIMING_TRIM_MIN_CALLS:
         ordered = ordered[:-1]
     return percentile(ordered, 0.95)
 
 
-def cap_timeout_check(timings, caps, timeout, margin=CAP_TIMEOUT_MARGIN):
+def cap_timeout_check(timings, caps, timeout, margin=CAP_TIMEOUT_MARGIN, lost=()):
     """The property each pixel cap needs (spec 18 3.6.6, infra/lib/shape.sh upscale_check): the largest image the
     service takes for a model of scale s, `caps[s]` (UPSCALE_MAX_PIXELS for x2, UPSCALE_MAX_PIXELS_X4 for x4), finishes
     within the service timeout `timeout` with `margin` to spare. Its time is estimated as shape.sh does: the slowest
@@ -931,7 +1003,8 @@ def cap_timeout_check(timings, caps, timeout, margin=CAP_TIMEOUT_MARGIN):
     static sizing instead of the property, and whose two single calls could land on different hosts: a fast x2 call
     alone failed a healthy revision at 1.51 (2026-10-30). The x4/x2 median ratio is reported, never judged.
     `timings`: {model: {(width, height): [seconds, ...]}}; `caps`: {scale: pixels}, 0 or absent checks nothing for that
-    scale. Returns (report entry or None when no cap is checked, failures)."""
+    scale; `lost`: the (model, size) pairs where a 502 ended a measured attempt, judged untrimmed. Returns (report entry
+    or None when no cap is checked, failures)."""
     caps = {scale: pixels for scale, pixels in caps.items() if pixels}
     if not caps:
         return None, []
@@ -949,7 +1022,7 @@ def cap_timeout_check(timings, caps, timeout, margin=CAP_TIMEOUT_MARGIN):
                 if not values:
                     continue
                 megapixels = width * height / 1_000_000
-                p95 = timing_p95(values)
+                p95 = timing_p95(values, trim=(model, (width, height)) not in lost)
                 median = statistics.median(values)
                 size = {"size": f"{width}x{height}", "calls": len(values), "p50S": seconds(median), "p95S": seconds(p95),
                         "maxS": seconds(max(values)), "sPerMp": round(p95 / megapixels, 2)}
@@ -1038,13 +1111,14 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
     started = now or datetime.datetime.now(datetime.timezone.utc)
     run = args.run or os.environ.get("CLOUD_RUN_EXECUTION") or started.strftime("%Y%m%dT%H%M%SZ")
     rows, failures, steps, service, determinism, cold_start, timings, retries = [], [], [], {}, [], None, {}, []
+    unexplained, lost = Unexplained502s(), set()
     # First, before any call warms the candidate (spec 18 gate, plan 7.2).
     if args.cold_start_max:
         cold_start, cold_failures = measure_cold_start(args.url, token, args.models[0], DETERMINISM_SIZE, args.timeout, args.cold_start_max, sleep=sleep)
         failures += cold_failures
     # One model after the other (the service runs one tile at a time; a concurrency 1 shape must never see two models).
     for model in args.models:
-        probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout, sleep)
+        probe = UpscaleProbe(args.url, token, model, args.sizes, args.timeout, sleep, unexplained)
         probe.run(args.concurrency, args.rounds)
         if args.determinism_calls:
             determinism.append(probe.determinism_round(args.determinism_calls, sleep=sleep, seconds_budget=args.determinism_seconds))
@@ -1054,16 +1128,18 @@ def probe_upscale_main(argv, token_for=None, report_writer=None, now=None, sleep
         steps += [{"model": model, **step} for step in probe.steps]
         service.update(probe.service)
         timings[model] = probe.work
+        lost |= {(model, size) for size in probe.lost_sizes}
         retries += probe.retries
-    cap_timeout, cap_failures = cap_timeout_check(timings, {2: args.x2_max_pixels, 4: args.x4_max_pixels}, args.timeout)
-    failures += cap_failures
+    cap_timeout, cap_failures = cap_timeout_check(timings, {2: args.x2_max_pixels, 4: args.x4_max_pixels}, args.timeout, lost=lost)
+    failures += cap_failures + unexplained.failures()
     report = {"run": run, "url": args.url, "startedAt": started.isoformat(), "models": args.models,
               "sizes": [f"{w}x{h}" for w, h in args.sizes], "concurrency": args.concurrency, "rounds": args.rounds,
               "timeoutS": args.timeout, "service": service, "rows": rows, "steps": steps, "determinism": determinism,
-              "coldStart": cold_start, "capTimeout": cap_timeout, "retries": retries, "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
+              "coldStart": cold_start, "capTimeout": cap_timeout, "retries": retries, "unexplained502s": unexplained.report(), "visualLimit": {"maxAbs": VISUAL_MAX_ABS, "minPsnrDb": VISUAL_MIN_PSNR_DB},
               "passed": not failures, "failures": failures}
     print(upscale_markdown(rows), flush=True)
     print_platform_retries(rows)
+    print(unexplained.line(), flush=True)
     for entry in determinism:
         print(determinism_line(entry), flush=True)
     for entry in (cap_timeout or {}).get("models", []):
