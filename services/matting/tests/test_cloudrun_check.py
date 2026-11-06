@@ -72,11 +72,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # What Cloud Run's front end answers when the instance is gone (2026-11-05: an instance shutting down), unlike the
 # service's own JSON errors.
 PLATFORM_503 = b"<html><head><title>503 Service Unavailable</title></head><body>Service Unavailable</body></html>"
+# The probe never kept the body of the 2026-11-06 502: this is a guess, standing for any non-JSON body.
+PLATFORM_502 = b"<html><head><title>502 Server Error</title></head><body>Error: Server Error</body></html>"
+OWN_502 = b'{"error": "upstream failed"}'
 
 
 def platform_answer(handler, fake):
-    """Answers the next GET from `fake.health_answers` when one is left: "503" or "429" as the platform (HTML), "503-own"
-    as the service's own JSON error, "500" as a service error, "reset" closes the connection without an answer."""
+    """Answers the next GET from `fake.health_answers` when one is left: "503", "502" or "429" as the platform (HTML),
+    "503-own" and "502-own" as the service's own JSON error, "500" as a service error, "reset" closes the connection
+    without an answer."""
     with fake.lock:
         kind = fake.health_answers.pop(0) if fake.health_answers else None
     if kind is None:
@@ -85,7 +89,8 @@ def platform_answer(handler, fake):
         handler.close_connection = True
         handler.connection.shutdown(socket.SHUT_RDWR)
         return True
-    status, body, content = {"503": (503, PLATFORM_503, "text/html"), "429": (429, b"Rate exceeded.", "text/plain"),
+    status, body, content = {"503": (503, PLATFORM_503, "text/html"), "502": (502, PLATFORM_502, "text/html"),
+                             "502-own": (502, OWN_502, "application/json"), "429": (429, b"Rate exceeded.", "text/plain"),
                              "503-own": (503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json"),
                              "500": (500, b'{"error": "health failed"}', "application/json")}[kind]
     handler.send_response(status)
@@ -102,10 +107,13 @@ PEAKS = {"birefnet-general": 5000, "birefnet-general-lite": 3000, "birefnet-hrso
 class FakeMatting:
     """One instance with `resident` cut-out slots (least recently used out), per-model VRAM and optional failures."""
 
-    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=(), platform_calls=()):
+    def __init__(self, resident=1, fail_model=None, advertised=None, health_extra=None, target="gpu", health_answers=(), platform_calls=(),
+                 platform_502_calls=(), own_502_calls=()):
         self.resident, self.fail_model, self.advertised, self.target = resident, fail_model, advertised or resident, target
         # POST numbers (from 1) that Cloud Run's front end turns away (PLATFORM_503) before the service sees them.
         self.platform_calls, self.posts = set(platform_calls), 0
+        # POST numbers answered 502 by the front end (HTML) or by the service itself (JSON).
+        self.platform_502_calls, self.own_502_calls = set(platform_502_calls), set(own_502_calls)
         self.health_extra = health_extra or {}
         self.health_answers = list(health_answers)
         self.sessions, self.loads, self.calls, self.health_queries = ["birefnet-general"], {"birefnet-general": 1}, [], []
@@ -140,9 +148,13 @@ class FakeMatting:
                 model = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["model"][0]
                 with fake.lock:
                     fake.posts += 1
-                    rejected = fake.posts in fake.platform_calls
+                    rejected, posts = fake.posts in fake.platform_calls, fake.posts
                 if rejected:
                     return self.reply(503, PLATFORM_503, "text/html")
+                if posts in fake.platform_502_calls:
+                    return self.reply(502, PLATFORM_502, "text/html")
+                if posts in fake.own_502_calls:
+                    return self.reply(502, OWN_502, "application/json")
                 with fake.lock:
                     fake.calls.append(model)
                     if model in fake.sessions:
@@ -200,7 +212,7 @@ def test_probe_measures_every_model_and_passes_when_all_stay_resident(fake_matti
     assert len(fake.health_queries) == 1 + 4 * (1 + 3) + 5 and all(q == "/health?fresh=1" for q in fake.health_queries)
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "| model | peak VRAM used (MiB) | p50 ms | p95 ms | non-200 | loads |"
-    assert len(out) == 2 + 4 + 1
+    assert len(out) == 2 + 4 + 1 + 1
     assert json.loads(out[-1]) == {"probe": "test-run", "passed": True, "failures": [], "report": "gs://bucket/test-run"}
     assert report["instances"]["fake01"]["candidate"] == "catalog-matting-gpu-00042-abc"
 
@@ -291,10 +303,12 @@ class FakeUpscale:
     count)`, when given, is the X-Upscale-Ms header of each answer (the service's inference time; None leaves it out)."""
 
     def __init__(self, mode="ok", instances=("up01",), busy_calls=(), uptime=1000.0, health_delay=0.0, work_ms=None, health_answers=(),
-                 platform_calls=(), own_503_calls=()):
+                 platform_calls=(), own_503_calls=(), platform_502_calls=(), own_502_calls=()):
         self.mode, self.calls, self.loaded, self.work_ms = mode, [], False, work_ms
         # Call numbers (from 1) answered 503 by Cloud Run's front end (HTML, no instance) or by the service itself (JSON).
         self.platform_calls, self.own_503_calls = set(platform_calls), set(own_503_calls)
+        # The same for a 502.
+        self.platform_502_calls, self.own_502_calls = set(platform_502_calls), set(own_502_calls)
         self.health_answers = list(health_answers)
         self.instances, self.busy_calls, self.uptime, self.health_delay = list(instances), set(busy_calls), uptime, health_delay
         self.health_calls = 0
@@ -341,10 +355,16 @@ class FakeUpscale:
                     return self.reply(503, PLATFORM_503, "text/html")
                 if count in fake.own_503_calls:
                     return self.reply(503, b'{"error": "upscale failed"}', "application/json")
+                if count in fake.platform_502_calls:
+                    return self.reply(502, PLATFORM_502, "text/html")
+                if count in fake.own_502_calls:
+                    return self.reply(502, OWN_502, "application/json")
                 if fake.mode == "busy":
                     return self.reply(503, b'{"error": "upscale model swinir-x2 unavailable"}', "application/json")
                 if fake.mode == "platform-503":
                     return self.reply(503, PLATFORM_503, "text/html")
+                if fake.mode == "platform-502":
+                    return self.reply(502, PLATFORM_502, "text/html")
                 with Image.open(io.BytesIO(data)) as source:
                     factor = 1 if fake.mode == "wrong-size" else int(self.path.rsplit("scale=", 1)[1])
                     out = source.convert("RGB").resize((source.width * factor, source.height * factor), Image.Resampling.NEAREST)
@@ -1153,14 +1173,240 @@ def test_measured_round_retries_one_platform_503_and_times_only_the_answered_att
     assert "platform retries swinir-x2 64x96: 1 in 3 calls (not timed; at most 2 per round)" in capsys.readouterr().out
 
 
-def test_platform_rejection_is_a_fast_non_json_429_or_503_only():
+def test_platform_rejection_is_a_fast_non_json_429_or_503_or_a_non_json_502():
     assert probe.platform_rejection(http_error(503, PLATFORM_503), 0.1) == "HTTP 503 from the platform, not the service"
     assert probe.platform_rejection(http_error(429, b"Rate exceeded."), 0.1) == "HTTP 429 from the platform, not the service"
     # Slower than PLATFORM_REJECTION_MAX_S: possibly an instance that crashed during the call; never retried.
     assert probe.platform_rejection(http_error(503, PLATFORM_503), probe.PLATFORM_REJECTION_MAX_S + 0.1) is None
     assert probe.platform_rejection(http_error(503, b'{"error": "upscale failed"}'), 0.1) is None
     assert probe.platform_rejection(http_error(500, PLATFORM_503), 0.1) is None
+    assert probe.platform_rejection(http_error(504, PLATFORM_502), 0.1) is None
     assert probe.platform_rejection(urllib.error.URLError(ConnectionRefusedError()), 0.1) is None
+    # A non-JSON 502 counts at any time, and its reason says the cause is unknown. Unexplained502s decides whether it is retried.
+    assert probe.platform_rejection(http_error(502, PLATFORM_502), 0.1) == "non-JSON HTTP 502 after 0.1 s, cause unknown"
+    assert probe.platform_rejection(http_error(502, PLATFORM_502), 250.0) == "non-JSON HTTP 502 after 250.0 s, cause unknown"
+    # The service's own 502 is a real answer, fast or late.
+    assert probe.platform_rejection(http_error(502, OWN_502), 0.1) is None
+    assert probe.platform_rejection(http_error(502, OWN_502), 250.0) is None
+
+
+# 2026-11-06 (catalog-check-upscale-pbm8w): one determinism call got a 502 after 250 s. The cause is unknown, so a whole
+# probe run gets one retry for such a 502, on every path. These run with every attempt past PLATFORM_REJECTION_MAX_S, as
+# that one was.
+@pytest.fixture
+def every_attempt_is_late(monkeypatch):
+    monkeypatch.setattr(probe, "PLATFORM_REJECTION_MAX_S", -1.0)
+
+
+OVER_ALLOWANCE = "unexplained 502s in one gate run (at most 1)"
+# The review's case: an intermittent crash that costs 2 of every 3 attempts, on a run of mostly 1-call rounds.
+TWO_IN_THREE = {n for n in range(1, 200) if n % 3}
+
+
+def test_the_pbm8w_shape_passes_retries_on_another_instance_and_says_so(fake_upscale, capsys, every_attempt_is_late):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_502_calls={8})
+    [entry] = report["determinism"]
+    assert code == 0 and report["passed"] is True, report["failures"]
+    assert len(entry["calls"]) == 12 and all(c["status"] == 200 for c in entry["calls"]) and len(fake.calls) == 2 + 13
+    assert entry["platformRetries"] == 1 and entry["instances"] == 2 and slept == [probe.PLATFORM_RETRY_DELAYS_S[0]]
+    [retry] = report["retries"]
+    assert retry["status"] == 502 and retry["nextInS"] == 5 and retry["reason"].startswith("non-JSON HTTP 502 after ")
+    assert report["unexplained502s"]["allowance"] == 1 and len(report["unexplained502s"]["seen"]) == 1
+    assert "unexplained 502s: 1 (at most 1 in one gate run): swinir-x4 800x1200 /upscale: non-JSON HTTP 502 after " in out
+
+
+def test_a_502_on_a_cold_start_hold_and_another_later_fails_the_gate(fake_upscale, every_attempt_is_late):
+    # The re-review's repro: the hold (call 1) and the measured round (warm call 2, round call 3) each got a 502, and this
+    # exited 0 with one counted.
+    fake = fake_upscale(uptime=0.0, platform_502_calls={1, 3})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["coldStart"]["holds"][0]["status"] == 502 and len(report["unexplained502s"]["seen"]) == 2
+    assert any(OVER_ALLOWANCE in failure for failure in report["failures"]), report["failures"]
+
+
+def test_one_502_on_a_cold_start_hold_uses_the_allowance_and_says_so(fake_upscale, capsys, every_attempt_is_late):
+    fake = fake_upscale(uptime=0.0, platform_502_calls={1})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    assert code == 0 and reports[0][1]["unexplained502s"]["seen"][0].startswith("swinir-x2 cold start hold: non-JSON HTTP 502 after ")
+    assert "unexplained 502s: 1 (at most 1 in one gate run): swinir-x2 cold start hold: " in capsys.readouterr().out
+
+
+def test_a_502_on_the_cold_start_health_read_counts_too(fake_upscale, every_attempt_is_late):
+    # The 502 ends the first try, so a second hold (calls 1 and 2) comes before the warm call 3 and the round call 4.
+    fake = fake_upscale(uptime=0.0, health_answers=["502"], platform_502_calls={4})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["unexplained502s"]["seen"][0].startswith("swinir-x2 cold start /health: ")
+    assert any(OVER_ALLOWANCE in failure for failure in report["failures"]), report["failures"]
+
+
+def test_the_services_own_502_on_a_hold_does_not_use_the_allowance(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(uptime=0.0, own_502_calls={1})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", "--cold-start-max=120", *BUCKET)
+    assert reports[0][1]["unexplained502s"]["seen"] == []
+
+
+def test_a_clean_run_prints_none_used(fake_upscale, capsys):
+    code, report, *_, out = run_7g6tv_shape(fake_upscale, capsys)
+    assert code == 0 and report["unexplained502s"] == {"allowance": 1, "seen": []}
+    assert "unexplained 502s: 0 (at most 1 in one gate run)\n" in out
+
+
+def test_an_intermittent_crash_stops_the_upscale_gate(fake_upscale, every_attempt_is_late):
+    # Before the allowance this passed: 8 of 12 attempts lost, exit 0.
+    fake = fake_upscale(platform_502_calls=TWO_IN_THREE)
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96,96x64", "--rounds", "1", *BUCKET)
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in reports[0][1]["failures"]), reports[0][1]["failures"]
+
+
+def test_an_intermittent_crash_stops_the_matting_gate(fake_matting, every_attempt_is_late):
+    # Before the allowance this passed: 26 of 39 POSTs lost, exit 0.
+    fake = fake_matting(resident=4, platform_502_calls=TWO_IN_THREE)
+    code, report = run_probe(fake.url, "--rounds", "1")
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in report["failures"]), report["failures"]
+
+
+def test_the_retry_of_the_one_allowed_502_gets_no_second_chance(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(platform_502_calls={2, 3})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and len(fake.calls) == 3 and report["rows"][0]["non200Text"] == "1 non-200: HTTP 502"
+    assert any(OVER_ALLOWANCE in failure for failure in report["failures"])
+
+
+def test_two_502s_on_separate_one_call_rounds_fail(fake_upscale, every_attempt_is_late):
+    # Warm call 1 is rejected and retried as 2; call 3 is the 1-call round.
+    fake = fake_upscale(platform_502_calls={1, 3})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in reports[0][1]["failures"])
+
+
+def test_one_502_on_a_one_call_round_passes(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(platform_502_calls={2})
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "2", *BUCKET)
+    row = reports[0][1]["rows"][0]
+    assert code == 0 and row["non200"] == 0 and row["platformRetries"] == 1 and len(fake.calls) == 4
+
+
+def test_the_allowance_spans_models(fake_upscale, every_attempt_is_late):
+    # swinir-x2: warm 1, round 2 (rejected), retry 3. swinir-x4: warm 4, round 5 (rejected). One each is still two in the run.
+    fake = fake_upscale(platform_502_calls={2, 5})
+    code, reports = run_upscale_probe(fake.url, "--model=swinir-x2,swinir-x4", "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in reports[0][1]["failures"])
+
+
+def test_the_allowance_spans_a_12_call_round(fake_upscale, capsys, every_attempt_is_late):
+    code, report, *_ = run_7g6tv_shape(fake_upscale, capsys, platform_502_calls={4, 5})
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in report["failures"])
+
+
+def test_a_service_that_only_answers_502s_stops_the_probe(fake_upscale, every_attempt_is_late):
+    fake = fake_upscale(mode="platform-502")
+    code, reports = run_upscale_probe(fake.url, "--sizes", "64x96", "--rounds", "1", *BUCKET)
+    report = reports[0][1]
+    assert code == 1 and report["passed"] is False and any(OVER_ALLOWANCE in failure for failure in report["failures"])
+
+
+def test_determinism_round_still_fails_the_services_own_502(fake_upscale, capsys, every_attempt_is_late):
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, own_502_calls={8})
+    [entry] = report["determinism"]
+    assert code == 1 and report["failures"] == ["swinir-x4 800x1200 determinism: 1 non-200: HTTP 502"]
+    assert report["retries"] == [] and len(fake.calls) == 2 + 12 and entry["platformRetries"] == 0 and slept == []
+    assert report["unexplained502s"]["seen"] == [] and "FAILED (1 non-200: HTTP 502)" in out
+
+
+def test_a_fast_own_502_is_not_retried_either(fake_upscale, capsys):
+    code, report, fake, *_ = run_7g6tv_shape(fake_upscale, capsys, own_502_calls={8})
+    assert code == 1 and report["retries"] == [] and len(fake.calls) == 2 + 12
+
+
+def test_determinism_round_still_fails_a_late_platform_503(fake_upscale, capsys, every_attempt_is_late):
+    # The fast 429 and 503 rule is unchanged: past the time limit it is a failure, and it does not touch the allowance.
+    code, report, fake, slept, out = run_7g6tv_shape(fake_upscale, capsys, platform_calls={8})
+    assert code == 1 and report["failures"] == ["swinir-x4 800x1200 determinism: 1 non-200: HTTP 503"] and report["retries"] == []
+    assert report["unexplained502s"]["seen"] == []
+
+
+def test_a_fast_503_does_not_use_the_allowance(fake_upscale, capsys):
+    code, report, *_ = run_7g6tv_shape(fake_upscale, capsys, platform_calls={4}, platform_502_calls={6})
+    assert code == 0, report["failures"]
+    assert len(report["unexplained502s"]["seen"]) == 1
+
+
+def test_matting_probe_retries_one_late_502_and_still_fails_its_own(fake_matting, every_attempt_is_late):
+    fake = fake_matting(resident=4, platform_502_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 0, report["failures"]
+    assert report["rows"][0]["platformRetries"] == 1 and report["rows"][0]["non200"] == 0
+    assert [(r["call"], r["status"]) for r in report["retries"]] == [("bria-rmbg /matte", 502)]
+    assert len(report["unexplained502s"]["seen"]) == 1
+    fake = fake_matting(resident=4, own_502_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and report["failures"] == ["bria-rmbg: 1 non-200: HTTP 502"] and report["retries"] == []
+
+
+def health_probe(fake, slept, reports):
+    args = ["--probe-upscale", fake.url, "--sizes", "64x96", "--rounds", "1", "--run", "up-run", *BUCKET]
+    return probe.probe_upscale_main(args, report_writer=lambda run, report, file: (reports.append(report), "gs://x")[1], sleep=slept.append)
+
+
+def test_health_read_uses_the_same_allowance(fake_upscale):
+    slept, reports = [], []
+    assert health_probe(fake_upscale(health_answers=["502"]), slept, reports) == 0
+    assert slept == [probe.TRANSIENT_DELAYS_S[0]] and reports[0]["retries"][0]["reason"].startswith("non-JSON HTTP 502 after ")
+    assert len(reports[0]["unexplained502s"]["seen"]) == 1
+    # Two on /health in a run, one on /health and one on a call, and the service's own 502 all fail.
+    assert health_probe(fake_upscale(health_answers=["502", "502"]), [], []) == 1
+    assert health_probe(fake_upscale(health_answers=["502"], platform_502_calls={2}), [], []) == 1
+    assert health_probe(fake_upscale(health_answers=["502-own"]), [], []) == 1
+
+
+def test_matting_health_read_uses_the_same_allowance(fake_matting):
+    fake = fake_matting(resident=4, health_answers=["502"], platform_502_calls={2})
+    code, report = run_probe(fake.url, "--models", "bria-rmbg", "--rounds", "1")
+    assert code == 1 and any(OVER_ALLOWANCE in failure for failure in report["failures"])
+
+
+# A retried call must not improve the numbers. 12 determinism calls at 100 s, one of them 400 s: one outlier is trimmed and
+# passes. A 502 on another call in the same round spends that trim, so the 400 s is judged and the cap fails.
+def cap_run(fake_upscale, **fake):
+    fake = fake_upscale(instances=("up01", "up02"), work_ms=lambda path, count: 400_000 if count == 9 else (100_000 if count > 2 else 100), **fake)
+    return run_upscale_probe(fake.url, "--model=swinir-x4", "--sizes", "64x96", "--rounds", "1", "--determinism-calls=12", "--timeout", "1740",
+                             "--x4-max-pixels", "4400000", *BUCKET)
+
+
+def test_a_lost_attempt_spends_the_outlier_trim_of_the_cap_timeout_check(fake_upscale, every_attempt_is_late):
+    code, reports = cap_run(fake_upscale)
+    assert code == 0 and reports[0][1]["capTimeout"]["passed"] is True, reports[0][1]["failures"]
+    code, reports = cap_run(fake_upscale, platform_502_calls={8})
+    report = reports[0][1]
+    assert code == 1 and report["capTimeout"]["passed"] is False and report["determinism"][0]["platformRetries"] == 1, report["failures"]
+
+
+def test_timing_p95_without_the_trim_is_never_better_than_the_answered_case():
+    answered = [100.0] * 11 + [400.0, 400.0]
+    assert probe.timing_p95(answered) == 400.0
+    # One 400 s call lost and its retry answered in 100 s: the review's example, which read 100 s with the trim.
+    assert probe.timing_p95([100.0] * 12 + [400.0], trim=False) == 400.0
+    assert probe.timing_p95([100.0] * 12 + [400.0]) == 100.0
+
+
+def test_the_lost_attempt_stays_in_the_matting_row_timing(monkeypatch):
+    attempts = iter([probe.MatteAnswer(502, 250_000, rejection="non-JSON HTTP 502 after 250.0 s, cause unknown"), probe.MatteAnswer(200, 100)])
+    monkeypatch.setattr(probe, "timed_matte", lambda *args: next(attempts))
+    matting = probe.Probe("http://x", None, ["bria-rmbg"], lambda seconds: None)
+    matting.calls("bria-rmbg", 1, measured=True)
+    assert sorted(matting.models["bria-rmbg"]["ms"]) == [100, 250_000]
+
+
+def test_the_lost_attempt_stays_in_the_upscale_row_timing(monkeypatch):
+    attempts = iter([probe.UpscaleAnswer(502, 250.0, rejection="non-JSON HTTP 502 after 250.0 s, cause unknown"),
+                     probe.UpscaleAnswer(200, 100.0, digest="a", server_seconds=99.0)])
+    monkeypatch.setattr(probe, "timed_upscale", lambda *args: next(attempts))
+    upscale = probe.UpscaleProbe("http://x", None, "swinir-x4", [(64, 96)], 900, lambda seconds: None)
+    upscale.calls((64, 96), 1, measured=True)
+    assert sorted(upscale.sizes[(64, 96)]["s"]) == [100.0, 250.0] and upscale.work[(64, 96)] == [99.0] and upscale.lost_sizes == {(64, 96)}
 
 
 def test_matting_probe_retries_a_platform_503_on_a_matte_call_and_still_fails_its_own_error(fake_matting, capsys):

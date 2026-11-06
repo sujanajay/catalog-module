@@ -404,6 +404,20 @@ test('a gcloud warning on stderr never reaches the parsed description', () => {
   assert.ok(r.out.includes(`SKIP (live revision ${OLD}`), r.out + r.err);
 });
 
+test('a probe that used its allowance of unexplained 502s is kept for the deploy report; a clean one is not', () => {
+  const notes = path.join(dir, 'deploy-notes-502');
+  fs.writeFileSync(notes, '');
+  const used = 'unexplained 502s: 1 (at most 1 in one gate run): x /upscale: non-JSON HTTP 502 after 250.0 s, cause unknown';
+  let r = run('note-502', 'deploy_service test-svc', {DEPLOY_NOTES_FILE: notes, PROBE: `echo "${used}"`});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes(`    probe | ${used}`), 'the line is printed as probe output');
+  assert.equal(fs.readFileSync(notes, 'utf8'), `test-svc: ${used}\n`);
+  fs.writeFileSync(notes, '');
+  r = run('note-none', 'deploy_service test-svc', {DEPLOY_NOTES_FILE: notes, PROBE: 'echo "unexplained 502s: 0 (at most 1 in one gate run)"'});
+  assert.equal(r.status, 0, r.err);
+  assert.equal(fs.readFileSync(notes, 'utf8'), '');
+});
+
 test('a failing probe returns non-zero, leaves traffic alone and prints the rollback line', () => {
   const r = run('fail', 'deploy_service test-svc', {PROBE: 'echo "probe saw 3 HTTP 500"; exit 3'});
   assert.equal(r.status, 1);
