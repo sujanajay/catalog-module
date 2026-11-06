@@ -104,7 +104,7 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const next: Record<string, string> = {
     processing: "You can close this page and come back; nothing stops.",
     collecting: collectingText(source),
-    attention: batch.counts.attentionProducts ? `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.` : `Open "Needs attention" for the ${batch.counts.needsAttention} ${plural(batch.counts.needsAttention, "photo", "photos")} waiting for you.`,
+    attention: batch.counts.attentionProducts ? `Open "Needs attention" for the ${batch.counts.attentionProducts} ${plural(batch.counts.attentionProducts, "product", "products")} with a problem.` : `Follow "See the products that need you" for the ${batch.counts.needsAttention} ${plural(batch.counts.needsAttention, "photo", "photos")} waiting for you.`,
     ready: "Download the sheet and paste the links into the marketplace templates.",
     failed: NOTHING_PROCESSED,
     cancelled: NOTHING_PROCESSED,

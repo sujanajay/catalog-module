@@ -78,7 +78,7 @@ const FIX_HELD = "Decide on the Needs you tab.";
 /** M1 D40: one photo waiting for a person; the product's other photos are delivered. */
 const PHOTO_HELD_GROUP = "one photo has no link until you decide";
 export const AMAZON_NO_WHITE_FIRST = "Amazon needs a white first image and this listing has none until you decide.";
-const FIX_PHOTO_HELD = "Open Needs attention on this batch: replace the photo, use it as it is, or remove it.";
+const FIX_PHOTO_HELD = "Open this batch and follow the link to the products that need you. Replace the photo, use it as it is, or remove it.";
 const NOT_ADDED_TAKEN_GROUP = "another batch's photo already has this place";
 const NOT_ADDED_LIMIT = "the channel takes no more images of this product";
 const FIX_TAKEN = "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.";
