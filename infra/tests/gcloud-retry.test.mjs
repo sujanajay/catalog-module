@@ -249,7 +249,7 @@ test('the gate: an unknown probe result (network gone) keeps the old traffic; a 
   let r = gate('gate-unknown', {POLL_SEQ: 'running,dns'});
   assert.equal(r.status, 1, r.out);
   assert.ok(!r.calls.includes(shift), 'traffic never moved on an unknown result');
-  assert.match(r.err, /gcloud run services update-traffic test-svc --to-revisions test-svc-00001-old=100/);
+  assert.match(r.err, /bash infra\/deploy\.sh --rollback test-svc test-svc-00001-old/);
   r = gate('gate-failed', {POLL_SEQ: 'failed'});
   assert.equal(r.status, 1);
   assert.ok(!r.calls.includes(shift));

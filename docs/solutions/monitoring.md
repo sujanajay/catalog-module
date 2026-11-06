@@ -147,6 +147,5 @@ is for seeing, not for alerting: the breakdown is on the Ops page and the batch 
 cost line. The existing daily cap (`DAILY_SPEND_CAP_USD`) and per-batch cap stay as they are.
 
 ## Rollback
-`gcloud run services update-traffic catalog-worker --to-revisions=<previous>=100
---region=asia-south1`, and the same for `catalog-web`. The ledger table can stay. Steps in the
+`bash infra/deploy.sh --rollback catalog-worker <previous>`, and the same for `catalog-web`. The ledger table can stay. Steps in the
 runbook entry.

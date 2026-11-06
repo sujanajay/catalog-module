@@ -27,7 +27,8 @@ async function main() {
     if (!Number.isInteger(days) || days < 1 || days > MAX_RECONCILE_DAYS) throw new Error(`COST_RECONCILE_DAYS must be a whole number from 1 to ${MAX_RECONCILE_DAYS}.`);
     const auth = new GoogleAuth({ scopes: "https://www.googleapis.com/auth/cloud-platform" });
     const get = async (url: string) => (await auth.fetch(url, { signal: AbortSignal.timeout(60_000) })).data;
-    const result = await runCostReconcile(db, googleCostReaders(get, project), { days });
+    const post = async (url: string, body: unknown) => (await auth.fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) })).data;
+    const result = await runCostReconcile(db, googleCostReaders(get, project, post), { days });
     logRun(result);
     log("INFO", "cost reconcile finished", { days: result.days.map((d) => d.day), alerts: result.alerts.length, newAlerts: result.newAlerts.length, ms: Date.now() - startedAt });
   } catch (error) {

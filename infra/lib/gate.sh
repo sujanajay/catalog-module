@@ -8,7 +8,8 @@
 #   3. The service's probe against that URL under a hard timeout. Non-zero exit or timeout = failure.
 #   4. Pass (unless the registry says SVC_SHIFT=0): tag the outgoing revision "previous" (what --rollback returns
 #      to), move all traffic to exactly the probed revision (--to-revisions, never --to-latest, so a revision created
-#      meanwhile can never take traffic unprobed), drop a stale candidate tag, print "==> <name>: live (<revision>)".
+#      meanwhile can never take traffic unprobed), record the shift (gate_record_shift), drop a stale candidate tag,
+#      print "==> <name>: live (<revision>)".
 #   5. Fail: traffic stays where it was; print the probe output, the rollback line, return non-zero.
 # SKIP when the live revision already runs the same image digest with the same env, unless GATE_FORCE=1 (an operator
 # override; deploy.sh re-runs the worker's smoke after a matting change through the worker's env). The env carries DEPLOY_ARGS_SHA,
@@ -68,6 +69,96 @@ gate_measure_tagged() {
   [ "$(gate_json '(j?.status?.traffic ?? []).some((t) => t.revisionName === a[0] && String(t.tag ?? "").startsWith("measure-")) ? 1 : 0' "$1")" = 1 ]
 }
 
+# gate_record_shift <service> <revision>: traffic moved, so write that down (catalog_traffic_shifts, read
+# by deploy_overlap and the daily cost check). This laptop cannot reach the private database, so it starts one execution
+# of the job catalog-traffic-shift (infra/deploy.sh keeps it on this commit's image) and does not wait. The time is taken
+# here, so a repeated start or a late write is the same row, and a network error is retried. Traffic has moved already,
+# so a failure never fails a deploy: it warns now and gate_shift_report says it again at the end, with the repair. The
+# preview stack is not the live one and records nothing.
+GATE_SHIFT_JOB=catalog-traffic-shift
+GATE_SHIFT_REGION=asia-south1
+# How long gate_shift_report waits for the executions to end, in all.
+GATE_SHIFT_WAIT_S=${GATE_SHIFT_WAIT_S:-240}
+GATE_SHIFT_STARTED=()
+GATE_SHIFT_LOST=()
+gate_shift_lost() { # <service> <revision> <env values> <reason>
+  GATE_SHIFT_LOST+=("$1 $2: $4"$'\n'"    by hand: gcloud run jobs execute $GATE_SHIFT_JOB --region=$GATE_SHIFT_REGION --async --update-env-vars=$3")
+  echo "WARN: $1: traffic shift to $2 not recorded: $4" >&2
+}
+gate_record_shift() {
+  [ "${CATALOG_PREVIEW:-0}" != 1 ] || return 0
+  local service=$1 revision=$2 at args err execution status=0
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  args="SHIFT_SERVICE=$service,SHIFT_REVISION=$revision,SHIFT_AT=$at"
+  err=$(mktemp) || err=""
+  execution=$(gcloud_retry gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region="$GATE_SHIFT_REGION" --async --update-env-vars="$args" --format='value(metadata.name)' --quiet 2>"${err:-/dev/null}") || status=$?
+  execution=${execution//$'\r'/}; execution=${execution//$'\n'/}
+  if [ "$status" != 0 ] || [ -z "$execution" ]; then
+    gate_shift_lost "$service" "$revision" "$args" "could not start the record job (exit $status): $( [ -z "$err" ] || tail -n 1 "$err" | tr -d '\r' | cut -c1-200)"
+  else
+    GATE_SHIFT_STARTED+=("$execution|$service|$revision|$args")
+  fi
+  [ -z "$err" ] || rm -f "$err"
+  return 0
+}
+
+# gate_shift_report: waits for the record executions to end, starts one sync from Cloud Audit Logs, which fills any record
+# still missing with its real time on any commit (SHIFT_SYNC, packages/core/src/catalog/traffic-sync.ts), then says loudly
+# which shifts have no record. The audit log can lag the very last shift by a moment; the daily cost check syncs again.
+# An async execution's own failure shows up only here. Never fails the deploy. Called before the deploy report and on any
+# exit, and empties its lists, so nothing is said twice.
+gate_shift_wait() { # <execution>: sets GATE_SHIFT_STATE, until the deadline in GATE_SHIFT_DEADLINE
+  local json
+  while :; do
+    GATE_SHIFT_STATE=unreadable
+    if json=$(gcloud_retry gate_gcloud run jobs executions describe "$1" --region="$GATE_SHIFT_REGION" --format=json 2>/dev/null); then
+      GATE_SHIFT_STATE=$(printf '%s' "$json" | gcloud_job_state) || GATE_SHIFT_STATE=unreadable
+    fi
+    [ "$GATE_SHIFT_STATE" = running ] || return 0
+    if [ "$SECONDS" -ge "$GATE_SHIFT_DEADLINE" ]; then GATE_SHIFT_STATE="still running after $GATE_SHIFT_WAIT_S s (it may yet succeed)"; return 0; fi
+    sleep "$GCLOUD_POLL_S"
+  done
+}
+gate_shift_sync() {
+  [ "${CATALOG_PREVIEW:-0}" != 1 ] && [ "${GATE_SHIFT_SYNCED:-0}" != 1 ] || return 0
+  GATE_SHIFT_SYNCED=1
+  local execution
+  if ! execution=$(gcloud_retry gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region="$GATE_SHIFT_REGION" --async --update-env-vars=SHIFT_SYNC=1 --format='value(metadata.name)' --quiet 2>/dev/null); then
+    echo "WARN: could not start the traffic shift sync from the audit log; the daily cost check tries again" >&2
+    return 0
+  fi
+  execution=${execution//$'\r'/}; execution=${execution//$'\n'/}
+  GATE_SHIFT_DEADLINE=$((SECONDS + GATE_SHIFT_WAIT_S))
+  gate_shift_wait "$execution"
+  if [ "$GATE_SHIFT_STATE" = succeeded ]; then echo "==> traffic shift sync from the audit log: done"
+  else echo "WARN: the traffic shift sync from the audit log did not finish ($execution: $GATE_SHIFT_STATE); the daily cost check tries again" >&2; fi
+}
+gate_shift_report() {
+  local entry execution service revision args ok=0
+  GATE_SHIFT_DEADLINE=$((SECONDS + GATE_SHIFT_WAIT_S))
+  for entry in "${GATE_SHIFT_STARTED[@]}"; do
+    IFS='|' read -r execution service revision args <<<"$entry"
+    gate_shift_wait "$execution"
+    if [ "$GATE_SHIFT_STATE" = succeeded ]; then ok=$((ok + 1)); else gate_shift_lost "$service" "$revision" "$args" "execution $execution: $GATE_SHIFT_STATE"; fi
+  done
+  GATE_SHIFT_STARTED=()
+  if [ "$ok" -gt 0 ]; then echo "==> traffic shift records: $ok written"; fi
+  gate_shift_sync
+  if [ ${#GATE_SHIFT_LOST[@]} -gt 0 ]; then
+    {
+      echo "################################################################################"
+      echo "WARNING: ${#GATE_SHIFT_LOST[@]} TRAFFIC SHIFT RECORD(S) NOT WRITTEN. The deploy itself is not affected."
+      for entry in "${GATE_SHIFT_LOST[@]}"; do echo "  $entry"; done
+      echo "Until repaired, batches around these shifts can read deploy_overlap=false."
+      echo "To repair now: run the line above, it has the exact time. Otherwise the next deploy and the daily cost"
+      echo "check fill it from Cloud Audit Logs with the real time, and raise an alert if they cannot."
+      echo "################################################################################"
+    } >&2
+  fi
+  GATE_SHIFT_LOST=()
+  return 0
+}
+
 # The exact rollback line the spec names, plus where to run it.
 gate_rollback_line() {
   local name=$1 previous=$2 region=$3
@@ -75,8 +166,8 @@ gate_rollback_line() {
     echo "$name had no revision serving traffic before this deploy; nothing to roll back to." >&2
     return
   fi
-  echo "gcloud run services update-traffic $name --to-revisions $previous=100" >&2
-  echo "(region $region: add --region=$region if gcloud asks for one)" >&2
+  # Through deploy.sh, never a bare update-traffic: that would move traffic without a record (M6 decision C6).
+  echo "bash infra/deploy.sh --rollback $name $previous" >&2
 }
 
 # Inside deploy_service: the error for this service plus its rollback line. The caller still returns 1 itself.
@@ -315,9 +406,10 @@ gate_promote() {
     }
   fi
   gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --to-revisions="$GATE_REVISION=100" --quiet >/dev/null || {
-    gate_fail "the traffic shift to $GATE_REVISION failed"
+    gate_fail "the traffic shift to $GATE_REVISION failed (if it did land, the audit log sync records it)"
     return 1
   }
+  if [ "$GATE_PREVIOUS" != "$GATE_REVISION" ]; then gate_record_shift "$SVC_NAME" "$GATE_REVISION"; fi
   echo "==> $SVC_NAME: live ($GATE_REVISION)"
   # The deploy moved the candidate tag to the new revision; one left on any other revision is stale. Traffic has
   # moved already, so a failure here only warns.
@@ -443,5 +535,6 @@ rollback_service() {
   echo "==> $name: rollback $live -> $target"
   echo "gcloud run services update-traffic $name --to-revisions $target=100"
   gate_gcloud run services update-traffic "$name" --region="$region" --to-revisions="$target=100" --quiet >/dev/null
+  gate_record_shift "$name" "$target"
   echo "==> $name: live ($target)"
 }

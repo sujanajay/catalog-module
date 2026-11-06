@@ -1017,8 +1017,8 @@ export const catalogBatchTouches = pgTable(
 );
 
 /**
- * M6-F3-R1 `deploy_overlap`: every deployed revision of a service registers itself once, when its first instance
- * starts (a deploy's probe starts it). A revision first seen inside a batch's run means a deploy overlapped the batch.
+ * Every deployed worker or web revision registers itself once, when its first instance starts (a deploy's probe starts
+ * it). A record of revisions only: `deploy_overlap` reads catalog_traffic_shifts since R1 exit finding 3.
  */
 export const catalogRevisions = pgTable(
   "catalog_revisions",
@@ -1028,6 +1028,27 @@ export const catalogRevisions = pgTable(
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("catalog_revisions_first_seen_at_idx").on(t.firstSeenAt)],
+);
+
+/**
+ * M6-F3-R1 `deploy_overlap` and M6 decision C6: one row each time traffic moved to a revision of a catalog service, from
+ * infra/lib/gate.sh (every deploy, forced ones and rollbacks) through the catalog-traffic-shift job. `shifted_at` is
+ * the deploy's own clock when the shift returned, so a late or retried write of the same shift is the same row.
+ */
+export const catalogTrafficShifts = pgTable(
+  "catalog_traffic_shifts",
+  {
+    service: text("service").notNull(),
+    revision: text("revision").notNull(),
+    shiftedAt: timestamp("shifted_at", { withTimezone: true }).notNull(),
+    /** Set when the time is unknown (M6 decision C6): traffic moved somewhere from shifted_at to this. */
+    shiftedUntil: timestamp("shifted_until", { withTimezone: true }),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.revision, t.shiftedAt], name: "catalog_traffic_shifts_revision_shifted_at_pk" }),
+    index("catalog_traffic_shifts_shifted_at_idx").on(t.shiftedAt),
+  ],
 );
 
 // ---------------------------------------------------------------------------

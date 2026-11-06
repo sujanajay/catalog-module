@@ -5,7 +5,8 @@
 #
 # What it makes (all in project image-links-agent, region asia-south1):
 #   grants    catalog-worker@: roles/monitoring.viewer (reads run.googleapis.com/container/billable_instance_time) and
-#             roles/run.viewer (reads the shape and labels of every Cloud Run service and job) on the project, plus
+#             roles/run.viewer (reads the shape and labels of every Cloud Run service and job) and
+#             roles/logging.viewer (reads when traffic moved, from Cloud Audit Logs) on the project, plus
 #             roles/run.invoker (the scheduler starts the job as catalog-worker@). Read-only roles: the job writes only
 #             to the catalog database.
 #   job       Cloud Run job catalog-cost-reconcile: the live catalog-worker's image, service account, VPC and database
@@ -166,6 +167,7 @@ setup() {
   log "cost reconciliation: job $JOB, schedule $SCHEDULE $SCHEDULE_TZ"
   ensure_project_role roles/monitoring.viewer "serviceAccount:$WORKER"
   ensure_project_role roles/run.viewer "serviceAccount:$WORKER"
+  ensure_project_role roles/logging.viewer "serviceAccount:$WORKER"
   ensure_project_role roles/run.invoker "serviceAccount:$WORKER"
   ensure_job
   ensure_schedule

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
 import { createTestDb } from "../db/testing";
 import type { InvariantResult } from "./invariants/run";
-import { recordBatchOutcome, recordTouch, refreshOutcomes, registerRevision, reliabilitySummary, successRate, syncIncidents } from "./reliability";
+import { parseTrafficShift, recordBatchOutcome, recordTouch, recordTrafficShift, refreshOutcomes, registerRevision, reliabilitySummary, successRate, syncIncidents, TRAFFIC_SHIFT_SERVICES } from "./reliability";
 
 type Row = Record<string, unknown>;
 let db: Db;
@@ -159,13 +159,59 @@ describe("incidents", () => {
   });
 });
 
-describe("outcomes", () => {
-  it("marks a batch a deploy overlapped, keeps the first links-ready time, and skips a draft that expired", async () => {
-    await registerRevision(db, "catalog-worker", "catalog-worker-00001-old", at(-60));
+describe("deploy_overlap reads traffic shifts (R1 exit finding 3)", () => {
+  it.each(TRAFFIC_SHIFT_SERVICES)("a shift of %s during the batch counts", async (service) => {
+    const b = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
+    await recordTrafficShift(db, { service, revision: `${service}-00002-new`, at: at(10) });
+    expect(await recordBatchOutcome(db, b, at(31))).toMatchObject({ deployOverlap: true });
+  });
+
+  it("a candidate first seen before the batch whose traffic moves during it counts; a candidate alone does not", async () => {
+    // Finding 3: the revision started (registered at its probe) before the batch, then took traffic during it.
+    await registerRevision(db, "catalog-worker", "catalog-worker-00002-new", at(-5));
     const b = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
     expect(await recordBatchOutcome(db, b, at(31))).toMatchObject({ deployOverlap: false });
-    await registerRevision(db, "catalog-worker", "catalog-worker-00002-new", at(10));
-    await registerRevision(db, "catalog-worker", "catalog-worker-00002-new", at(12));
+    await registerRevision(db, "catalog-worker", "catalog-worker-00003-can", at(5));
+    expect(await recordBatchOutcome(db, b, at(32))).toMatchObject({ deployOverlap: false });
+    await recordTrafficShift(db, { service: "catalog-worker", revision: "catalog-worker-00002-new", at: at(12) });
+    expect(await recordBatchOutcome(db, b, at(33))).toMatchObject({ deployOverlap: true });
+  });
+
+  it("a shift just outside the batch does not count", async () => {
+    const b = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
+    await recordTrafficShift(db, { service: "catalog-web", revision: "catalog-web-00002-new", at: at(-1) });
+    await recordTrafficShift(db, { service: "catalog-web", revision: "catalog-web-00003-new", at: at(31) });
+    expect(await recordBatchOutcome(db, b, at(32))).toMatchObject({ deployOverlap: false });
+  });
+
+  it("a shift recorded after the outcome row marks it, and the same shift twice is one row", async () => {
+    const b = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
+    const other = await batch({ status: "done", startedAt: at(100), finishedAt: at(130) });
+    await recordBatchOutcome(db, b, at(31));
+    await recordBatchOutcome(db, other, at(131));
+    const shift = { service: "catalog-matting-gpu", revision: "catalog-matting-gpu-00002-new", at: at(29) };
+    expect(await recordTrafficShift(db, shift)).toBe(1);
+    expect(await recordTrafficShift(db, shift)).toBe(0);
+    expect(await rows(sql`SELECT revision FROM catalog_traffic_shifts WHERE revision = ${shift.revision}`)).toHaveLength(1);
+    expect(await rows(sql`SELECT batch_id FROM catalog_batch_outcomes WHERE deploy_overlap`)).toEqual([{ batch_id: b }]);
+  });
+
+  it("the job refuses anything but a revision of one of the six services", () => {
+    const env = { SHIFT_SERVICE: "catalog-worker", SHIFT_REVISION: "catalog-worker-00083-xof", SHIFT_AT: "2026-11-06T05:47:55Z" };
+    expect(parseTrafficShift(env)).toEqual({ service: "catalog-worker", revision: "catalog-worker-00083-xof", at: new Date("2026-11-06T05:47:55Z") });
+    expect(() => parseTrafficShift({ ...env, SHIFT_SERVICE: "catalog-worker-preview" })).toThrow(/SHIFT_SERVICE/);
+    expect(() => parseTrafficShift({ ...env, SHIFT_REVISION: "catalog-web-00073-fih" })).toThrow(/SHIFT_REVISION/);
+    expect(() => parseTrafficShift({ ...env, SHIFT_AT: "soon" })).toThrow(/SHIFT_AT/);
+    expect(TRAFFIC_SHIFT_SERVICES).toHaveLength(6);
+  });
+});
+
+describe("outcomes", () => {
+  it("marks a batch a deploy overlapped, keeps the first links-ready time, and skips a draft that expired", async () => {
+    await recordTrafficShift(db, { service: "catalog-worker", revision: "catalog-worker-00001-old", at: at(-60) });
+    const b = await batch({ status: "done", startedAt: T0, finishedAt: at(30) });
+    expect(await recordBatchOutcome(db, b, at(31))).toMatchObject({ deployOverlap: false });
+    await db.execute(sql`INSERT INTO catalog_traffic_shifts (service, revision, shifted_at) VALUES ('catalog-worker', 'catalog-worker-00002-new', ${at(10).toISOString()}::timestamptz)`);
     expect(await recordBatchOutcome(db, b, at(32))).toMatchObject({ deployOverlap: true });
     // Re-opened and finalized again later: links were ready at the first finish.
     await db.execute(sql`UPDATE catalog_batches SET finished_at = ${at(90).toISOString()}::timestamptz WHERE id = ${b}`);

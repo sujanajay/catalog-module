@@ -8,7 +8,8 @@
 #   WARN_ON_STDERR=1 describe also prints a warning on stderr (which must never reach the parsed JSON);
 #   MEASURE_LIVE=1 $OLD also carries the tag measure-4c-4t-1r (a spec 18 ladder rung).
 #   SERVICE_MAX=<n> the service-level max instances (run.googleapis.com/maxScale; default unset);
-#   MAX_ERROR=1 run services update --max fails.
+#   MAX_ERROR=1 run services update --max fails; RECORD_ERROR=1 run jobs execute (the shift record) fails;
+#   RECORD_NETWORK_ERRORS=1 its first try hits a network error; RECORD_FAILS=1 or RECORD_RUNNING=1 the execution's end state.
 # After "run deploy" ($STATE/deployed) the description lists the candidate tag ($CAND_TAG) on the new revision.
 gate_gcloud() {
   printf '%s\n' "$*" >> "$LOG"
@@ -39,6 +40,14 @@ gate_gcloud() {
       if [ "${MAX_ERROR:-0}" = 1 ]; then echo "ERROR: update mocked" >&2; return 1; fi ;;
     "run services update-traffic")
       if [ "${SHIFT_ERROR:-0}" = 1 ] && [[ "$*" == *--to-revisions* ]]; then echo "ERROR: shift mocked" >&2; return 1; fi ;;
+    "run jobs execute")
+      if [ "${RECORD_ERROR:-0}" = 1 ]; then echo "ERROR: execute mocked" >&2; return 1; fi
+      if [ -n "${RECORD_NETWORK_ERRORS:-}" ] && [ ! -f "$STATE/record-retried" ]; then touch "$STATE/record-retried"; echo "ERROR: gcloud crashed (ConnectionError): mocked" >&2; return 1; fi
+      printf '%s\r\n' catalog-traffic-shift-abc12 ;;
+    "run jobs executions")
+      if [ "${RECORD_FAILS:-0}" = 1 ]; then printf '%s\r\n' '{"status":{"failedCount":1,"conditions":[{"type":"Completed","status":"False","message":"database refused"}]}}'
+      elif [ "${RECORD_RUNNING:-0}" = 1 ]; then printf '%s\r\n' '{"status":{"conditions":[]}}'
+      else printf '%s\r\n' '{"status":{"conditions":[{"type":"Completed","status":"True"}]}}'; fi ;;
     "run deploy test-svc"|"run deploy catalog-matting"|"run deploy catalog-matting-gpu"|"run deploy catalog-upscale")
       if [ -n "${DEPLOY_ERROR:-}" ]; then echo "$DEPLOY_ERROR" >&2; return 1; fi
       touch "$STATE/deployed" ;;

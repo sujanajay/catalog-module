@@ -120,7 +120,7 @@ describe("pricing (pure)", () => {
     expect(m.searchParams.get("filter")).toBe('metric.type="run.googleapis.com/container/billable_instance_time"');
     // Per minute (M6 decision C1): idle is placed on the minute it was billed in.
     expect(m.searchParams.get("aggregation.alignmentPeriod")).toBe("60s");
-    expect(m.searchParams.getAll("aggregation.groupByFields")).toEqual(["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]);
+    expect(m.searchParams.getAll("aggregation.groupByFields")).toEqual(["resource.type", "resource.label.service_name", "resource.label.revision_name", "resource.label.job_name", "resource.label.location"]);
   });
 });
 

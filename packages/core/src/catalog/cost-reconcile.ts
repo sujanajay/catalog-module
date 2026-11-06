@@ -15,10 +15,11 @@
 // Allocations (R5): each component's idle, minute by minute, to the batches whose work ran from 15 minutes before to 5
 // minutes after that minute (allocateIdle, M6 decision C1; by busy seconds over the day when a sample has no minutes),
 // the shared lines by their attributed cost; idle no batch explains is "idle, no batch". The batch outcome's
-// true_cost_usd is the sum.
+// true_cost_usd is the sum. Instance time of a revision waiting for its traffic shift (a deploy's no-traffic candidate
+// and its probes, trafficHistory) stays on the day's bill but goes to no batch (M6 decision C6).
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
-import { catalogBatchOutcomes, catalogCostAllocations, catalogCostDays, type CostEnv, type CostLineKind } from "../db/schema";
+import { catalogBatchOutcomes, catalogCostAllocations, catalogCostDays, catalogTrafficShifts, type CostEnv, type CostLineKind } from "../db/schema";
 import { OPENROUTER_COMPONENT } from "../cost-events";
 import { log } from "../log";
 import { COST_DATABASE_SHARE_KEY, COST_DATABASE_USD_PER_DAY_KEY } from "../settings/registry";
@@ -26,6 +27,7 @@ import { currentValue } from "../settings/store";
 import { OVERFLOW_ADAPTERS } from "../vendor/routes";
 import { openIncident, SUCCESS_TARGET, successRate } from "./reliability";
 import { pushAll } from "../arrays";
+import { googleTrafficAudit, syncTrafficShifts, type GooglePost, type TrafficAudit } from "./traffic-sync";
 
 const DAY_MS = 86_400_000;
 const GIB = 1024 ** 3;
@@ -77,6 +79,8 @@ export interface RunResource {
   gpu: { type: string; count: number; zonalRedundancy: boolean } | null;
   /** Request-based billing (CPU only while a request runs): a service with cpuIdle. Jobs and GPU services never are. */
   requestBased: boolean;
+  /** The revisions serving traffic now (services; absent when the list names none). */
+  liveRevisions?: string[];
 }
 
 export interface Price { usdPerSecond: number; rates: Record<string, number | string> }
@@ -115,17 +119,24 @@ export function memoryGiB(value: unknown): number {
 interface V2Container { resources?: { limits?: Record<string, string>; cpuIdle?: boolean } }
 interface V2Template { containers?: V2Container[]; nodeSelector?: { accelerator?: string }; gpuZonalRedundancyDisabled?: boolean }
 /** One item of `services` or `jobs` from run.googleapis.com/v2/projects/<p>/locations/<region>/<kind>. */
-export interface V2Item { name: string; labels?: Record<string, string>; template?: V2Template & { template?: V2Template } }
+export interface V2Item {
+  name: string; labels?: Record<string, string>; template?: V2Template & { template?: V2Template };
+  trafficStatuses?: { revision?: string; percent?: number }[]; latestReadyRevision?: string;
+}
 
 export function runResourceFrom(kind: "service" | "job", region: string, item: V2Item): RunResource {
   const template = (kind === "job" ? item.template?.template : item.template) ?? {};
   const limits = template.containers?.[0]?.resources?.limits ?? {};
   const gpuCount = Number(limits["nvidia.com/gpu"] ?? 0);
   const gpu = gpuCount > 0 ? { type: template.nodeSelector?.accelerator ?? "unknown", count: gpuCount, zonalRedundancy: template.gpuZonalRedundancyDisabled !== true } : null;
+  // A share sent to the latest revision names no revision: that is the latest ready one.
+  const liveRevisions = (item.trafficStatuses ?? []).filter((t) => (t.percent ?? 0) > 0)
+    .flatMap((t) => { const revision = t.revision || item.latestReadyRevision?.split("/").pop(); return revision ? [revision] : []; });
   return {
     name: item.name.split("/").pop() ?? item.name, kind, region, labels: item.labels ?? {},
     cpu: cpuQuantity(limits.cpu), memoryGiB: memoryGiB(limits.memory), gpu,
     requestBased: kind === "service" && !gpu && template.containers?.[0]?.resources?.cpuIdle === true,
+    ...(liveRevisions.length ? { liveRevisions } : {}),
   };
 }
 
@@ -136,21 +147,25 @@ export function runResourceFrom(kind: "service" | "job", region: string, item: V
 /** One minute of billable instance time: the minute ending at `endMs`. */
 export interface BillablePoint { endMs: number; seconds: number }
 /**
- * Billable instance seconds of one service or job over a day, and (from Cloud Monitoring) the same time per minute, so
- * idle time can be given to the batches that ran around it (allocateIdle, M6 decision C1).
+ * Billable instance seconds of one service revision or job over a day, and (from Cloud Monitoring) the same time per
+ * minute, so idle time can be given to the batches that ran around it (allocateIdle, M6 decision C1). A sample without
+ * `revision` holds a whole service and always counts as serving.
  */
-export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number; points?: readonly BillablePoint[] }
+export interface BillableSample { name: string; kind: "service" | "job"; region: string; seconds: number; points?: readonly BillablePoint[]; revision?: string }
 
 export interface CostReaders {
   resources(): Promise<RunResource[]>;
   billableSeconds(from: Date, to: Date): Promise<BillableSample[]>;
+  /** Fills missing traffic shift records before the days are read (M6 decision C7). */
+  trafficAudit?: TrafficAudit;
 }
 
 /** A GET of a Google API URL that returns its JSON body (google-auth-library's client.request in the job). */
 export type GoogleGet = (url: string) => Promise<unknown>;
 
-export function googleCostReaders(get: GoogleGet, project: string): CostReaders {
+export function googleCostReaders(get: GoogleGet, project: string, post?: GooglePost): CostReaders {
   return {
+    ...(post ? { trafficAudit: googleTrafficAudit(post, project) } : {}),
     async resources() {
       const out: RunResource[] = [];
       for (const region of COST_REGIONS) {
@@ -177,7 +192,7 @@ export function googleCostReaders(get: GoogleGet, project: string): CostReaders 
           "aggregation.alignmentPeriod": `${IDLE_BUCKET_MS / 1000}s`,
           "aggregation.perSeriesAligner": "ALIGN_SUM", "aggregation.crossSeriesReducer": "REDUCE_SUM",
         });
-        for (const g of ["resource.type", "resource.label.service_name", "resource.label.job_name", "resource.label.location"]) q.append("aggregation.groupByFields", g);
+        for (const g of ["resource.type", "resource.label.service_name", "resource.label.revision_name", "resource.label.job_name", "resource.label.location"]) q.append("aggregation.groupByFields", g);
         if (pageToken) q.set("pageToken", pageToken);
         const body = (await get(`https://monitoring.googleapis.com/v3/projects/${project}/timeSeries?${q}`)) as { timeSeries?: MonitoringSeries[]; nextPageToken?: string };
         pushAll(out, samplesFrom(body.timeSeries ?? []));
@@ -193,7 +208,7 @@ export interface MonitoringSeries {
   points?: { interval?: { endTime?: string }; value: { doubleValue?: number; int64Value?: string } }[];
 }
 
-/** One sample per Cloud Run revision group or job: the points of the window summed, and kept per minute. */
+/** One sample per Cloud Run revision or job: the points of the window summed, and kept per minute. */
 export function samplesFrom(series: readonly MonitoringSeries[]): BillableSample[] {
   const out: BillableSample[] = [];
   for (const s of series) {
@@ -203,16 +218,107 @@ export function samplesFrom(series: readonly MonitoringSeries[]): BillableSample
     const value = (p: NonNullable<MonitoringSeries["points"]>[number]) => Number(p.value.doubleValue ?? p.value.int64Value ?? 0);
     const seconds = (s.points ?? []).reduce((sum, p) => sum + value(p), 0);
     const points = (s.points ?? []).flatMap((p) => (p.interval?.endTime && value(p) > 0 ? [{ endMs: Date.parse(p.interval.endTime), seconds: value(p) }] : []));
-    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds, ...(points.length ? { points } : {}) });
+    const revision = kind === "service" ? s.resource.labels.revision_name : undefined;
+    out.push({ name, kind, region: s.resource.labels.location ?? "", seconds, ...(points.length ? { points } : {}), ...(revision ? { revision } : {}) });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Which revision time is a deploy's, not a batch's (M6 decision C6)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * What infra/deploy.sh recorded in catalog_traffic_shifts, read for the reconciliation. A deploy brings a revision up
+ * with no traffic and probes it (for minutes, on GPUs); that instance time is the deploy's, however close a batch runs.
+ */
+export interface TrafficHistory {
+  /** Per service, its first recorded shift: before it, nothing is known about that service's revisions. */
+  serviceFromMs: Map<string, number>;
+  /** Per revision, the first time it took traffic. */
+  revisionFromMs: Map<string, number>;
+  /** Serving now by the Cloud Run list. A shift whose record was lost still leaves this revision counted as serving. */
+  live: Set<string>;
+  /** Revisions with no record that did a batch's work that day (findLostRecords): they count as serving. */
+  lost: Set<string>;
+}
+
+export function trafficHistory(shifts: readonly { service: string; revision: string; atMs: number }[], resources: readonly Pick<RunResource, "liveRevisions">[]): TrafficHistory {
+  const history: TrafficHistory = { serviceFromMs: new Map(), revisionFromMs: new Map(), live: new Set(resources.flatMap((r) => r.liveRevisions ?? [])), lost: new Set() };
+  const earliest = (map: Map<string, number>, key: string, ms: number) => map.set(key, Math.min(map.get(key) ?? ms, ms));
+  for (const s of shifts) { earliest(history.serviceFromMs, s.service, s.atMs); earliest(history.revisionFromMs, s.revision, s.atMs); }
+  return history;
+}
+
+/**
+ * True when the minute ending at `endMs` of this revision was spent waiting for traffic: it took its first traffic
+ * later, or never. A revision that has served keeps counting after traffic moves on (its idle tail follows its last
+ * batch). Without a recorded shift of the service by then, the history is unknown and the time counts as serving.
+ */
+export function waitingForTraffic(history: TrafficHistory | undefined, service: string, revision: string | undefined, endMs: number): boolean {
+  if (!history || !revision) return false;
+  const known = history.serviceFromMs.get(service);
+  if (known === undefined || endMs <= known) return false;
+  const first = history.revisionFromMs.get(revision);
+  return first !== undefined ? endMs <= first : !history.live.has(revision) && !history.lost.has(revision);
+}
+
+/**
+ * The fail-safe of M6 decision C7: revisions with no shift record that must have served. A minute with ledger work on a
+ * service while no revision known to serve was billed (that minute or the next to it, as the two clocks differ) means the
+ * work ran on an unrecorded revision billed then, so its record was lost (or traffic was moved by hand). A true candidate
+ * runs beside the serving revision and never matches. Without this, a lost record would move that revision's real
+ * batch idle to "idle, no batch" as soon as another revision goes live. At worst it counts a candidate's probes as serving.
+ */
+export function findLostRecords(history: TrafficHistory, samples: readonly BillableSample[], work: ReadonlyMap<string, MinuteLedger>, fromMs: number, toMs: number): Set<string> {
+  const lost = new Set<string>();
+  const n = Math.ceil((toMs - fromMs) / IDLE_BUCKET_MS);
+  const minuteOf = (endMs: number) => Math.floor((endMs - 1 - fromMs) / IDLE_BUCKET_MS);
+  const serving = new Map<string, Uint8Array>();
+  for (const s of samples) {
+    if (s.kind !== "service") continue;
+    const row = serving.get(s.name) ?? serving.set(s.name, new Uint8Array(n)).get(s.name)!;
+    for (const p of s.points ?? []) {
+      const i = minuteOf(p.endMs);
+      if (i >= 0 && i < n && p.seconds > 0 && !waitingForTraffic(history, s.name, s.revision, p.endMs)) row[i] = 1;
+    }
+  }
+  for (const s of samples) {
+    if (s.kind !== "service" || !s.revision || history.revisionFromMs.has(s.revision)) continue;
+    const workUsd = work.get(s.name)?.workUsd, row = serving.get(s.name)!;
+    if (!workUsd) continue;
+    for (const p of s.points ?? []) {
+      const i = minuteOf(p.endMs);
+      if (i < 0 || i >= n || !waitingForTraffic(history, s.name, s.revision, p.endMs)) continue;
+      if (workUsd[i]! > 0 && !row[i] && !row[i - 1] && !row[i + 1]) { lost.add(s.revision); break; }
+    }
+  }
+  return lost;
+}
+
+/** The alerts for shift records that are missing: what findLostRecords found, and a serving revision with no record. */
+function missingRecordAlerts(day: string, history: TrafficHistory, samples: readonly BillableSample[]): CostAlert[] {
+  const byService = new Map<string, Set<string>>();
+  for (const s of samples) {
+    if (!s.revision || history.revisionFromMs.has(s.revision) || !history.serviceFromMs.has(s.name)) continue;
+    if (history.lost.has(s.revision) || history.live.has(s.revision)) (byService.get(s.name) ?? byService.set(s.name, new Set()).get(s.name)!).add(s.revision);
+  }
+  return [...byService].map(([service, revisions]) => ({
+    code: "traffic_shift_missing" as const, day, component: service, detail: { revisions: [...revisions] },
+    text: `${[...revisions].join(", ")} served traffic but has no traffic shift record, so its time is counted as serving and a batch around the shift can read deploy_overlap false. The audit log has no usable entry for it yet; the next deploy and the next daily check try again.`,
+  }));
+}
+
+async function readTrafficHistory(db: Db, resources: readonly RunResource[]): Promise<TrafficHistory> {
+  const rows = await db.select({ service: catalogTrafficShifts.service, revision: catalogTrafficShifts.revision, at: catalogTrafficShifts.shiftedAt }).from(catalogTrafficShifts);
+  return trafficHistory(rows.map((r) => ({ service: r.service, revision: r.revision, atMs: +r.at })), resources);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The day's lines
 // ---------------------------------------------------------------------------------------------------------------------
 
-export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "success_under_target" | "run_failed";
+export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "traffic_shift_missing" | "success_under_target" | "run_failed";
 export interface CostAlert { code: CostAlertCode; day: string; component: string | null; text: string; detail?: Record<string, unknown> }
 
 export interface CostLine {
@@ -229,31 +335,47 @@ const labelled = (r: RunResource) => r.labels.app === "catalog" && !!r.labels.co
  * The billed lines of a day from Cloud Monitoring samples and the current Cloud Run shapes: one line per catalog service
  * or job (by its `component` label, else its name), other apps in the project left out. An unlabelled catalog
  * resource is reported as env `unlabelled`; a sample whose shape has no price (or whose resource is gone) is billed 0.
+ * Samples come per revision and add up per service. `minutes` holds the time batches can be charged for; a revision's
+ * minutes waiting for traffic (`history`, M6 decision C6) stay on the line and go to `noTrafficUsd` instead.
  */
-export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[]): { lines: CostLine[]; alerts: CostAlert[]; minutes: Map<string, BillablePoint[]> } {
+export function billedLines(day: string, samples: readonly BillableSample[], resources: readonly RunResource[], history?: TrafficHistory): { lines: CostLine[]; alerts: CostAlert[]; minutes: Map<string, BillablePoint[]>; noTrafficUsd: Map<string, number> } {
   const byKey = new Map(resources.map((r) => [`${r.kind}|${r.region}|${r.name}`, r]));
   const lines = new Map<string, CostLine>();
   /** Per component, billed USD per minute (each point's `seconds` holds USD here). */
   const minutes = new Map<string, BillablePoint[]>();
+  const noTrafficUsd = new Map<string, number>();
   const alerts: CostAlert[] = [];
+  const sampleKey = (s: BillableSample) => `${s.kind}|${s.region}|${s.name}`;
+  const totals = new Map<string, number>();
+  for (const s of samples) totals.set(sampleKey(s), (totals.get(sampleKey(s)) ?? 0) + s.seconds);
+  const seen = new Set<string>();
   for (const s of samples) {
-    const r = byKey.get(`${s.kind}|${s.region}|${s.name}`);
+    const r = byKey.get(sampleKey(s));
     if (!(r ? isCatalog(r) : s.name.startsWith("catalog-"))) continue;
     const ok = r ? labelled(r) : false;
     const component = ok ? r!.labels.component! : s.name;
     const env: CostEnv = ok ? (r!.labels.env as CostEnv) : "unlabelled";
     const price = r ? instancePrice(r) : null;
-    if (r && !ok) alerts.push({ code: "unlabelled", day, component, text: `The Cloud Run ${s.kind} ${s.name} has no app, component and env labels, so its cost is shown as unlabelled.` });
-    if (!price) alerts.push({ code: "unpriced", day, component, text: r ? `No list price for the shape of ${s.name} (${s.region}); its ${Math.round(s.seconds)} s are billed 0 until the bill is read.` : `${s.name} (${s.region}) ran ${Math.round(s.seconds)} s but no longer exists, so its shape and price are unknown.`, detail: { seconds: s.seconds } });
+    // One alert per service or job, whatever number of revisions ran that day.
+    const total = totals.get(sampleKey(s)) ?? s.seconds;
+    if (!seen.has(sampleKey(s))) {
+      seen.add(sampleKey(s));
+      if (r && !ok) alerts.push({ code: "unlabelled", day, component, text: `The Cloud Run ${s.kind} ${s.name} has no app, component and env labels, so its cost is shown as unlabelled.` });
+      if (!price) alerts.push({ code: "unpriced", day, component, text: r ? `No list price for the shape of ${s.name} (${s.region}); its ${Math.round(total)} s are billed 0 until the bill is read.` : `${s.name} (${s.region}) ran ${Math.round(total)} s but no longer exists, so its shape and price are unknown.`, detail: { seconds: total } });
+    }
     const key = component;
     const line = lines.get(key) ?? { component, kind: s.kind, region: s.region, env, billableSeconds: 0, billedUsd: 0, attributedUsd: 0, idleUsd: 0, sharedUsd: 0, estimated: true, detail: {} };
     line.billableSeconds = (line.billableSeconds ?? 0) + s.seconds;
     line.billedUsd += price ? s.seconds * price.usdPerSecond : 0;
-    line.detail = { ...line.detail, [s.name]: { seconds: s.seconds, ...(price ? { usdPerSecond: price.usdPerSecond, ...price.rates } : { unpriced: true }) } };
+    const waiting = (s.points ?? []).filter((p) => waitingForTraffic(history, s.name, s.revision, p.endMs));
+    const waitingSeconds = waiting.reduce((sum, p) => sum + p.seconds, 0);
+    const before = (line.detail[s.name] as { noTrafficSeconds?: number } | undefined)?.noTrafficSeconds ?? 0;
+    line.detail = { ...line.detail, [s.name]: { seconds: total, ...(price ? { usdPerSecond: price.usdPerSecond, ...price.rates } : { unpriced: true }), ...(before + waitingSeconds > 0 ? { noTrafficSeconds: before + waitingSeconds } : {}) } };
     lines.set(key, line);
-    if (price && s.points) pushAll(minutes.get(key) ?? minutes.set(key, []).get(key)!, s.points.map((p) => ({ endMs: p.endMs, seconds: p.seconds * price.usdPerSecond })));
+    if (price && waitingSeconds > 0) noTrafficUsd.set(key, (noTrafficUsd.get(key) ?? 0) + waitingSeconds * price.usdPerSecond);
+    if (price && s.points) pushAll(minutes.get(key) ?? minutes.set(key, []).get(key)!, s.points.filter((p) => !waiting.includes(p)).map((p) => ({ endMs: p.endMs, seconds: p.seconds * price.usdPerSecond })));
   }
-  return { lines: [...lines.values()], alerts, minutes };
+  return { lines: [...lines.values()], alerts, minutes, noTrafficUsd };
 }
 
 /** Vendor components off the GCP bill (M6-F1-R7): OpenRouter and the overflow adapters. */
@@ -464,8 +586,11 @@ interface DayPlan { result: DayResult; provisional: boolean; allocations: Alloca
 /** Computes one UTC day (`YYYY-MM-DD`) without writing it. */
 async function planDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean }): Promise<DayPlan> {
   const from = new Date(`${day}T00:00:00Z`), to = new Date(+from + DAY_MS);
-  const { lines: billed, alerts, minutes } = billedLines(day, input.samples, input.resources);
   const { rows: ledger, minutes: work } = ledgerDay(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
+  const history = await readTrafficHistory(db, input.resources);
+  history.lost = findLostRecords(history, input.samples, work, +from, +to);
+  const { lines: billed, alerts, minutes, noTrafficUsd } = billedLines(day, input.samples, input.resources, history);
+  pushAll(alerts, missingRecordAlerts(day, history, input.samples));
   const lines = new Map(billed.map((l) => [l.component, l]));
   // Attributed per component (summed over its env lines: a component name is one env in practice).
   const attributed = new Map<string, { usd: number; estimated: boolean }>();
@@ -499,8 +624,10 @@ async function planDay(db: Db, day: string, input: { samples: readonly BillableS
   const batchRows = ledger.filter((r) => r.batchId !== null);
   for (const r of batchRows) perBatch.set(`${r.batchId}|${r.component}`, { component: r.component, batchId: r.batchId!, busyMs: r.busyMs, attributedUsd: r.usd, idleUsd: 0, sharedUsd: 0 });
   for (const line of lines.values()) {
-    if (line.idleUsd <= 0) continue;
-    const byMinute = allocateIdle(line.idleUsd, minutes.get(line.component) ?? [], work.get(line.component), +from, +to);
+    // A deploy's candidate time stays in the line's idle (the day still closes, R10) and shows as "idle, no batch".
+    const idleUsd = Math.max(0, line.idleUsd - (noTrafficUsd.get(line.component) ?? 0));
+    if (idleUsd <= 0) continue;
+    const byMinute = allocateIdle(idleUsd, minutes.get(line.component) ?? [], work.get(line.component), +from, +to);
     if (byMinute) {
       for (const [batchId, usd] of byMinute) {
         // A batch whose work ended just before midnight (or starts just after) gets this day's idle tail too.
@@ -513,7 +640,7 @@ async function planDay(db: Db, day: string, input: { samples: readonly BillableS
     const rows = [...perBatch.values()].filter((a) => a.component === line.component);
     if (!rows.length) continue; // idle, no batch
     const busy = rows.map((a) => a.busyMs);
-    spread(line.idleUsd, busy.some((b) => b > 0) ? busy : rows.map((a) => a.attributedUsd)).forEach((usd, i) => { rows[i]!.idleUsd = usd; });
+    spread(idleUsd, busy.some((b) => b > 0) ? busy : rows.map((a) => a.attributedUsd)).forEach((usd, i) => { rows[i]!.idleUsd = usd; });
   }
   // The shared line goes to the batches that worked this day; a batch with only an idle tail here (its work ended
   // before midnight) shares the database on its working day.
@@ -595,11 +722,33 @@ async function writeAlert(db: Db, a: CostAlert, now: Date): Promise<boolean> {
  * fails part-way writes no rows, records a `run_failed` alert (once per UTC day; emailed through daily_check_alert)
  * when the database still answers, and throws.
  */
+/**
+ * Runs before the days are read, so a lost record is back with its real time and no batch loses its cost. A failure costs
+ * no day: the day uses the records it has and findLostRecords, and the alert says the records may be short.
+ */
+async function syncShiftsForCost(db: Db, audit: TrafficAudit, resources: readonly RunResource[], now: Date): Promise<CostAlert[]> {
+  const day = utcDay(now, 0);
+  try {
+    const { recorded, unknownTime } = await syncTrafficShifts(db, audit, resources, now);
+    if (recorded.length) log("INFO", "traffic shifts filled from the audit log", { revisions: recorded });
+    return unknownTime.length ? [{
+      code: "traffic_shift_missing", day, component: null, detail: { revisions: unknownTime },
+      text: `${unknownTime.join(", ")} is serving, but neither a record nor the audit log says when it took traffic. Batches since the service's last record read deploy_overlap true, as they may have overlapped.`,
+    }] : [];
+  } catch (error) {
+    return [{
+      code: "traffic_shift_missing", day, component: null,
+      text: `The audit log could not be read to check traffic shift records, so deploy_overlap can read false for a move with no record, and a batch's idle can be short. It is tried again on the next deploy and the next daily check: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500),
+    }];
+  }
+}
+
 export async function runCostReconcile(db: Db, readers: CostReaders, options: { now?: Date; days?: number } = {}): Promise<RunResult> {
   const now = options.now ?? new Date();
   const count = Math.min(MAX_RECONCILE_DAYS, Math.max(1, Math.floor(options.days ?? RECONCILE_DAYS)));
   try {
     const resources = await readers.resources();
+    const syncAlerts = readers.trafficAudit ? await syncShiftsForCost(db, readers.trafficAudit, resources, now) : [];
     const plans: DayPlan[] = [];
     for (let n = 1; n <= count; n++) {
       const day = utcDay(now, n);
@@ -608,7 +757,7 @@ export async function runCostReconcile(db: Db, readers: CostReaders, options: { 
       plans.push(await planDay(db, day, { samples, resources, provisional: n <= 2 }));
     }
     const days = plans.map((p) => p.result);
-    const alerts = days.flatMap((d) => d.alerts);
+    const alerts = [...syncAlerts, ...days.flatMap((d) => d.alerts)];
     const rate = await successRate(db, new Date(+now - 7 * DAY_MS), now);
     if (rate.rate !== null && rate.rate < SUCCESS_TARGET) {
       alerts.push({ code: "success_under_target", day: utcDay(now, 0), component: null, text: `${rate.successes} of ${rate.counted} batches in the last 7 days finished with links and no person stepping in, under the ${Math.round(SUCCESS_TARGET * 100)}% target.`, detail: rate });

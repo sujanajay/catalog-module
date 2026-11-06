@@ -74,7 +74,7 @@ const routes: ServerDeps["routes"] = {
 const server = createServer({ auth, version: process.env.K_REVISION || "dev", routes, draining: isDraining });
 server.listen(port, () => {
   console.log(`catalog-worker listening on :${port}`);
-  // M6-F3-R1 deploy_overlap: this revision registers itself when its first instance starts (a deploy's probe).
+  // This revision registers itself when its first instance starts (a deploy's probe).
   void registerOwnRevision(getDb, process.env, (error) => log("WARNING", "revision not registered", { revision: process.env.K_REVISION, error: error instanceof Error ? error.message : String(error) }));
 });
 
