@@ -277,10 +277,13 @@ function derive(input: BatchStateInput): BatchState {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
     const leftOut = leftOutText(c), leftOutNote = leftOut ? ` ${leftOut}` : "";
     if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${leftOutNote}${capped}` };
-    const planned = c.outputs - c.skipped;
+    // M1 D40: a photo held for a person has no link yet, so it is neither a link to re-check nor a failed one. It is said plainly instead.
+    const held = c.needsAttention ?? 0, heldWords = `${held} ${plural(held, "photo waits", "photos wait")} for you to decide.`;
+    const planned = c.outputs - c.skipped - held;
+    if (held > 0 && c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "attention", pill: `${held} ${plural(held, "photo needs", "photos need")} you`, listPill: `Needs you (${held} ${plural(held, "photo", "photos")})`, text: `Everything else is live and in the sheet. ${heldWords} Decide now or download the sheet as it is; each decision updates the sheet.${leftOutNote}${capped}` };
     if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: leftOut ? "Ready, some left out" : "Ready", listPill: leftOut ? "Ready, some left out" : "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${leftOut ? `${leftOut}${(input.styliSkipped ?? 0) > 0 ? ` ${styliSkipText(input.styliSkipped!)}` : ""}` : (input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
     const bad = Math.max(planned - c.verified, (c.recheckTotal ?? planned) - (c.recheckOk ?? 0));
-    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.${leftOutNote}` };
+    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.${held > 0 ? ` ${heldWords}` : ""}${leftOutNote}` };
   }
   return result;
 }

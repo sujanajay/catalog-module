@@ -9,6 +9,28 @@ const out = (n: number, flags: OutputFlag[] = [], extra: Partial<TriageOutput> =
   ({id:`o${++next}`,n,channel:"noon",status:flags.some(f=>!INFORMATION_FLAGS.has(f)) ? "needs_attention" : "staged",flags,decision:null,stagingUri:"gs://assets/staged.jpg",...extra});
 const action = (outputs: TriageOutput[], target: TriageOutput, kept: {channel: ChannelId; n: number}[] = []) => triageProduct(outputs, kept).get(target.id);
 
+describe("QA triage: an agreed cut-out and the pass-through (M1 D40)", () => {
+ const agreed = {compliance:{auto_actions:[{step:"matte_agreement",trigger:["product_removed"],result:"passed",channels:[],rejudged:false}]}};
+ it("never delivers an agreed cut-out the judge did not see: left out when the channel can do without it, else held", () => {
+  for (const flag of ["qa_cap", "qa_unavailable"] as const) {
+   const unseen = out(3, [flag], agreed);
+   expect(action([out(1), out(2), unseen], unseen)).toMatchObject({action:"drop"});
+   expect(action([out(1), unseen], unseen)).toMatchObject({action:"hold",cause:"unusable"});
+   const first = out(1, [flag], agreed);
+   expect(action([first, out(2), out(3)], first)).toMatchObject({action:"hold",cause:"unusable"});
+   // Any other unseen image still follows the `unchecked` rule.
+   const other = out(3, [flag]);
+   expect(action([out(1), out(2), other], other)).toMatchObject({action:"hold",cause:"unchecked"});
+  }
+ });
+ it("notes a pass-through on a photo that does not fill the frame, and not a close-up", () => {
+  const step = {step:"matte_passthrough",trigger:["product_removed"],result:"passed",channels:[],rejudged:false};
+  const plain = out(2, ["matte_passthrough"], {compliance:{auto_actions:[{...step,notCloseUp:true}]}}), closeUp = out(3, ["matte_passthrough"], {compliance:{auto_actions:[step]}});
+  expect(action([out(1), plain], plain)).toMatchObject({action:"note"});
+  expect(action([out(1), closeUp], closeUp)).toMatchObject({action:"none"});
+ });
+});
+
 describe("QA triage: hard holds only", () => {
  it("holds a confirmed different item, a collage and a corrupt file whatever the other photos", () => {
   for (const [flags, cause] of [[["different_product"], "wrong_item"], [["collage"], "collage"]] as const) {
@@ -16,7 +38,7 @@ describe("QA triage: hard holds only", () => {
    expect(action([out(1), out(2), bad, out(4)], bad)).toMatchObject({action:"hold",cause});
   }
   // A photo whose background could not be removed (a busy scene, matte-guard.ts) is never noted: the code-detected
-  // `leftover_background`, marked by the matte stage's failed pass-through step. M1 D39: the channel keeps two good photos, so it is left out; else it is held.
+  // `leftover_background`, marked by the matte stage's failed pass-through step. M1 D40: the channel keeps two good photos, so it is left out; else it is held.
   const held: AutoAction = {step:"matte_passthrough",trigger:["product_removed","leftover_background"],result:"failed",channels:[],rejudged:false};
   const busy = out(3, ["leftover_background", "cut_in_source", "qa_sampled_out"], {compliance:{auto_actions:[held]}});
   expect(holdsAtRender(busy.flags)).toBe(true);
@@ -53,7 +75,7 @@ describe("QA triage: hard holds only", () => {
  it("publishes with a note when only one other good photo remains, unless the image cannot be published or shows our own defect", () => {
   const bad = out(2, ["orientation"]);
   expect(action([out(1), bad], bad)).toMatchObject({action:"note"});
-  // M1 D39, D40: a mark still on the delivered image is a defect a shopper sees, not a note.
+  // M1 D40, D41: a mark still on the delivered image is a defect a shopper sees, not a note.
   const marked = out(2, ["text_or_watermark"]);
   expect(action([out(1), marked], marked)).toMatchObject({action:"hold",cause:"visible_defect"});
   // Our own defects left after the re-render loop are never published with a note.

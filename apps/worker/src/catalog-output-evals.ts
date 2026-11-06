@@ -55,8 +55,8 @@ import { recordJobRun } from "@catalog/core/job-cost";
 import { matteProofCommand, recutCommand } from "./catalog-matte-proof";
 
 const USAGE = `Usage: catalog:output-evals <command>
-  proof [--limit <n>]      (M1 D39: the matte agreement on the 19 real photos and 8 controls, live judge; only with LIVE_SMOKE=1)
-  recut --batch <id> --photos <identifier_n,...>      (M1 D41: cuts delivered photos out again, through the worker)
+  proof [--limit <n>]      (M1 D40: the matte agreement on the 19 real photos and 8 controls, live judge; only with LIVE_SMOKE=1)
+  recut --batch <id> --photos <identifier_n,...>      (M1 D42: cuts delivered photos out again, through the worker)
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
   upload [--manifest <golden-manifest.json>] [--root name=path ...]      (copies the pinned photos under catalog-test/evals/golden/)
   run [--resume <run>] [--sets <brand.category,...>] [--limit <products>] [--brand <slug>] [--bakeoff-sample <n>] [--skip-bakeoff] [--skip-overwrite] [--write-policy]

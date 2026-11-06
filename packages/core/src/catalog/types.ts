@@ -32,7 +32,7 @@ export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","uncheck
  * M1-F3-R1: what an auto-decide rule does with an output the triage would hold. `deliver`: the staged image is
  * published now, flagged `provisional` (only when it exists and passes the channel's hard rules; otherwise the slot is
  * dropped). `drop`: the photo gets no link on that channel and the rest of the set is delivered. `hold` (owner, 2026-11-06,
- * M1 D39): the rare last resort. The photo gets no link and waits for a person, while the rest of the set is delivered and
+ * M1 D40): the rare last resort. The photo gets no link and waits for a person, while the rest of the set is delivered and
  * the batch finishes; nothing else waits for it.
  */
 export const AUTO_DECIDE_ACTIONS = ["deliver","drop","hold"] as const;

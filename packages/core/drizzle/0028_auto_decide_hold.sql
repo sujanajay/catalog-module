@@ -1,7 +1,7 @@
--- M1 D39 (owner decision of 2026-11-06, recorded by the manager): an auto-decide rule may keep a photo back for a person
+-- M1 D40 (owner decision of 2026-11-06, recorded by the manager): an auto-decide rule may keep a photo back for a person
 -- (`hold`) as the rare last resort. New cause `visible_defect`: a defect a shopper would see, still there after the repair
 -- loop. A photo that could not be cut out (`unusable`) and a visible defect are no longer delivered with a warning. Rows an
--- admin changed keep their value. A re-cut logs its own event kind (D41). Widening a CHECK: dropped, added NOT VALID, validated. Every statement can run again
+-- admin changed keep their value. A re-cut logs its own event kind (D42). Widening a CHECK: dropped, added NOT VALID, validated. Every statement can run again
 -- harmlessly; the short lock timeout keeps the migrate job re-runnable.
 SET LOCAL lock_timeout = '10s';--> statement-breakpoint
 ALTER TABLE "catalog_auto_decide_rules" DROP CONSTRAINT IF EXISTS "catalog_auto_decide_rules_cause_check";--> statement-breakpoint

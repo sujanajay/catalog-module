@@ -3,6 +3,19 @@ import { EMPTY_BATCH_COUNTS } from "../../db/schema";
 import type { BatchCounts, ChannelId, RateSample } from "../types";
 import { CLOSE_PAGE_TEXT, COLLECT_STALLED_TEXT, NOT_COLLECTED_TEXT, STARTING_SERVICES_TEXT, ageText, deriveBatchState, failedBeforeStart, intakeTimeText, measuredRate, processingStalledText, waitRangeMinutes, waitText, wizardStepFor, type WizardStep } from "./status";
 it.each(["matting","rendering","qa","publishing"] as const)("shows %s as processing",status=>expect(deriveBatchState({status,counts:EMPTY_BATCH_COUNTS}).state).toBe("processing"));
+it("M1 D40: a photo held for a person is said plainly, never as a failed re-check",()=>{
+  const counts={...EMPTY_BATCH_COUNTS,outputs:12,verified:10,needsAttention:2,recheckOk:10,recheckTotal:10};
+  const state=deriveBatchState({status:"done",counts});
+  expect(state).toMatchObject({state:"attention",pill:"2 photos need you",listPill:"Needs you (2 photos)"});
+  expect(state.text).toContain("2 photos wait for you to decide.");
+  expect(state.text).not.toContain("re-check");
+  expect(deriveBatchState({status:"done",counts:{...counts,outputs:11,verified:10,needsAttention:1}}).pill).toBe("1 photo needs you");
+  // A link that really failed still says so, and the held photos are not counted in it.
+  const failed=deriveBatchState({status:"done",counts:{...counts,recheckOk:9}});
+  expect(failed).toMatchObject({state:"recheck_failed",pill:"1 link did not pass the independent re-check"});
+  expect(failed.text).toContain("2 photos wait for you to decide.");
+  expect(deriveBatchState({status:"done",counts:{...counts,verified:12,needsAttention:0,recheckOk:12,recheckTotal:12}}).state).toBe("ready");
+});
 it("requires independent counts before Ready",()=>{const counts={...EMPTY_BATCH_COUNTS,outputs:4,verified:4};expect(deriveBatchState({status:"done",counts}).state).toBe("recheck_failed");expect(deriveBatchState({status:"done",counts:{...counts,recheckOk:4,recheckTotal:4}}).state).toBe("ready");expect(deriveBatchState({status:"done",counts:{...counts,attentionProducts:1}}).state).toBe("attention");});
 it("derives ETA from the last five minutes",()=>{const now=new Date("2026-01-01T00:05:00Z");const state=deriveBatchState({status:"publishing",counts:{...EMPTY_BATCH_COUNTS,outputs:40,verified:20},now,samples:[{at:new Date(+now-60_000),made:10},{at:now,made:20}]});expect(state.eta).toBe(120);});
 it.each(["draft","ingesting","failed"] as const)("derives %s",status=>expect(deriveBatchState({status,counts:EMPTY_BATCH_COUNTS}).state).toBe(status==="ingesting" ? "collecting":status));

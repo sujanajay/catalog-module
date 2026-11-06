@@ -318,7 +318,7 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
 }
 
 /**
- * M1-F3-R1, M1 D39: image 1 is held on every channel and another photo of the product passed. The two photos change places:
+ * M1-F3-R1, M1 D40: image 1 is held on every channel and another photo of the product passed. The two photos change places:
  * the best other photo showing the whole product (pickPromotion) becomes image 1 and the held photo takes its number, so a
  * listing never leads with a gap. Both are rendered again at their new numbers (image 1 has its own canvas colour on some
  * channels), and nothing changes unless every render passes. Staged in a folder of their own (a public copy needs the staged file to carry the public name), so a stop part way leaves the
@@ -329,7 +329,7 @@ export async function promoteOverHeldPhoto(deps: CatalogDeps, input: { batch: Ba
   if (batch.options.append === true) return false;
   const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batch.id), eq(catalogOutputs.productId, product.id)));
   const sources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, batch.id), eq(catalogSourceImages.productId, product.id)));
-  const live = await deps.db.select({ channel: catalogOutputs.channel, n: catalogOutputs.n }).from(catalogOutputs).where(and(eq(catalogOutputs.productId, product.id), eq(catalogOutputs.isLive, true)));
+  const live = await deps.db.select({ channel: catalogOutputs.channel, n: catalogOutputs.n, sha256: catalogSourceImages.sha256 }).from(catalogOutputs).leftJoin(catalogSourceImages, eq(catalogSourceImages.id, catalogOutputs.sourceImageId)).where(and(eq(catalogOutputs.productId, product.id), eq(catalogOutputs.isLive, true)));
   const pick = pickPromotion({ channels: batch.channels, sources, outputs, live, held: heldForPerson });
   if (!pick) return false;
   const { from, to } = pick, route = await routeContext(deps, batch), rules = await deps.channelRules(batch.rulesetVersion), prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);

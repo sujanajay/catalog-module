@@ -1,4 +1,4 @@
-// M1 D39. The main risk of matte_agreement is two models agreeing on the same wrong cut, so these run the real rule on real
+// M1 D40. The main risk of matte_agreement is two models agreeing on the same wrong cut, so these run the real rule on real
 // golden photos and the real cut-outs the deployed models made for them (fixtures, no model is called). "Same wrong cut" hands one
 // real wrong cut-out in as two models of different families, which is the worst case: real models disagree far more.
 import { readFile } from "node:fs/promises";
@@ -37,17 +37,30 @@ describe("matte agreement on real photos", () => {
     expect(r.asked).toContain("third");
   }, 60_000);
 
+  // S1 of the diagnosis: on this photo the old pass-through left a white box in the frame, and the judge scored it 95. The two families agree, so no pass-through runs.
+  it("Vero Moda 5715909336543 shot 1: the cut-out is used, so the pass-through's white box cannot come back", async () => {
+    const r = await resolved("5715909336543_1");
+    expect(r.steps).toContain("matte_agreement:passed");
+    expect(r).toMatchObject({ passthrough: false, busyBackground: false });
+    expect(r.steps.some(step => step.startsWith("matte_passthrough"))).toBe(false);
+    // Full size on purpose: a copy at 800 px passes the guard on its first matte, so it would prove nothing here.
+  }, 300_000);
+
   it("takes the batch's weakest outline support, inside the bars", async () => {
     const { p, matte, region } = await photo("Z83A7DA7F6815765CDF92Z_4");
     expect(matteAgreement(p, [await matte(BRIA), await matte(GENERAL)], region).matte?.model).toBe(BRIA);
   }, 60_000);
 
-  // Deliberate change. This was a hold: a busy background. Both families cut the two models with their rackets cleanly
-  // off the court (0% of the outline on no edge, looked at), which is what a person would have asked for.
-  it("cuts the tennis-court photo out instead of holding it", async () => {
+  // The families do agree here (every outline on a real edge), and both keep orange court and a piece of the net post inside
+  // the rackets, seen at full size: the same class spec 05 rejects. So agreement is vetoed for a photo shot in a scene.
+  it("the tennis-court photo: the families agree on a cut with court inside the rackets, and the scene vetoes it", async () => {
+    const { p, matte, region } = await photo("ZEE79259BBFD83FFA1DB0Z_5");
+    expect(matteAgreement(p, [await matte(BRIA), await matte(GENERAL)], region).matte).not.toBeNull();
     const r = await resolved("ZEE79259BBFD83FFA1DB0Z_5");
-    expect(r.steps).toContain("matte_agreement:passed");
-    expect(r.busyBackground).toBe(false);
+    expect(r.steps).toContain("matte_agreement:failed");
+    expect(r.actions.find(a => a.step === "matte_agreement")!.detail).toMatch(/busy scene/);
+    expect(r.asked).not.toContain("third");
+    expect(r.busyBackground).toBe(true);
   }, 60_000);
 
   it("ghost, Penti ZBE55F7B86F158FEA0EB9Z shot 5: a frame-filling photo never reaches agreement and spends no third call", async () => {

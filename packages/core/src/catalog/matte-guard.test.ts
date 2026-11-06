@@ -116,7 +116,7 @@ describe("resolution ladder", () => {
   });
 });
 
-describe("pass-through second line (5715909336543 shot 1, M1 D39)", () => {
+describe("pass-through second line (5715909336543 shot 1, M1 D40)", () => {
   // Backdrop the product encloses (a gap between arm and body): the pass-through fills holes, so it stays as a white box.
   const product = (x: number, y: number) => inRect(x, y, 120, 160, 160, 280) && !inRect(x, y, 170, 250, 60, 60);
   const boxed = image((x, y) => product(x, y) ? [clamp(90 + grain(x, y)), 50, 40] : [255, 255, 255]);
@@ -163,7 +163,7 @@ describe("close-up of a trim over skin (Penti Z91D419FC9238E844BF77Z_4)", () => 
     expect(resolved.passthrough).toBe(true);
     for (const [x, y] of [[40, 100], [40, 400], [300, 100], [180, 300]] as const) expect(resolved.matte.alpha[y * W + x]).toBe(255);
     expect(resolved.matte.alpha[5 * W + 200]).toBe(0);
-    // M1 D39, the same wrong cut from every model: they agree, but the cut runs through one surface with no edge under it.
+    // M1 D40, the same wrong cut from every model: they agree, but the cut runs through one surface with no edge under it.
     const agreement = resolved.actions.find(a => a.step === "matte_agreement")!;
     expect(agreement.result).toBe("failed");
     expect(agreement.detail).toMatch(/on no edge/);
@@ -193,7 +193,7 @@ describe("close-up of a trim between skin and a plain garment panel (Penti Z91D4
     expect(checkMatteIntegrity(panel, matteOf((_x, y) => inside(y)), { handRule: false }).ok).toBe(true);
   });
 
-  it("does not take two models cutting the fabric panel through at the same place for agreement (M1 D39)", () => {
+  it("does not take two models cutting the fabric panel through at the same place for agreement (M1 D40)", () => {
     const ragged = (model: string) => matteOf((x, y) => inside(y) && x < 280, model);
     const agreement = matteAgreement(panel, [ragged("bria-rmbg"), ragged("birefnet-general")], backgroundRegion(panel));
     expect(agreement.matte).toBeNull();
@@ -435,15 +435,18 @@ describe("busy background (French Connection ZEE79259BBFD83FFA1DB0Z shot 5, eval
   /** Models that do not share a cut: the first keeps both people, the second loses the upper body of the one on the left, and no third is served. */
   const oneOfThem = async (variant: string) => variant === "third" ? null : matteOf((x, y) => models(x, y) && !(x < 160 && y < 300), variant);
 
-  // M1 D39, deliberate change. Every model keeps the two people and the guard still rejects them for the scenery, and on the
+  // M1 D40, deliberate change. Every model keeps the two people and the guard still rejects them for the scenery, and on the
   // real photo that agreed cut is right: both families cut the two models off the court with 0% of the outline on no edge.
-  it("uses the cut-out when the models agree on it, although the guard reads the scenery as product", async () => {
+  it("does not take an agreed cut-out from a scene: no third call, and the photo is held whole", async () => {
     expect(backgroundRegion(court).frameFilling).toBe(false);
     expect(checkMatteIntegrity(court, kept(), { handRule: false }).ok).toBe(false);
-    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => kept(v) });
-    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
-    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_agreement:passed"]);
-    expect(resolved.matte.alpha.equals(kept().alpha)).toBe(true);
+    const asked: string[] = [];
+    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => { asked.push(v); return kept(v); } });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true });
+    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_agreement:failed", "matte_passthrough:failed"]);
+    expect(resolved.actions.find(a => a.step === "matte_agreement")!.detail).toMatch(/busy scene/);
+    expect(asked).not.toContain("third");
+    expect(resolved.matte.alpha.every(v => v === 255)).toBe(true);
   });
 
   it("rejects every matte (the scenery is product by the source alone), and holds the photo whole when the models do not agree", async () => {
@@ -779,7 +782,7 @@ describe("white garment on a near-white wall (Vero Moda Z40E29CD878FAA726501DZ s
     expect(passthroughProductLoss(p, [withChunk(), withChunk("second")])).toBeGreaterThan(PASSTHROUGH_PRODUCT_LOSS_MAX);
     const resolved = await resolveMatte({ prepared: p, first: withChunk(), handRule: false, attempt: async v => withChunk(v) });
     expect(resolved).toMatchObject({ passthrough: false, busyBackground: true, soleStripRecovered: 0 });
-    // M1 D39: every model shares this wedge of wall, and the outline around it has nothing in the photo under it.
+    // M1 D40: every model shares this wedge of wall, and the outline around it has nothing in the photo under it.
     expect(resolved.actions.find(a => a.step === "matte_agreement")).toMatchObject({ result: "failed", detail: expect.stringMatching(/on no edge/) });
     const last = resolved.actions.at(-1)!;
     expect(last).toMatchObject({ step: "matte_passthrough", result: "failed", trigger: ["product_removed", "leftover_background"] });

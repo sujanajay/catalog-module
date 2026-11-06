@@ -95,6 +95,7 @@ async function main() {
   const storage = await import("@catalog/core/storage");
   storage.setStorageClient(fake as never);
   const { drizzle } = await import("drizzle-orm/node-postgres");
+  const { eq } = await import("drizzle-orm");
   const schema = await import("@catalog/core/db/schema");
   const workerDb = drizzle(new HarnessPool() as never, { schema }) as never;
   const { runIngest } = await import("@catalog/core/catalog/ingest/index");
@@ -192,6 +193,35 @@ async function main() {
         for (const timer of autoStartTimers) clearTimeout(timer);
         autoStartTimers.clear();
         return send(res, 200, { released: released.length, finished: finished.length, cancelledAutoStarts: cancelled });
+      }
+      // M1 D40: a finished auto-decide batch with one delivered photo and one held for a person, as the worker leaves it, with
+      // the real digest. The harness never finishes a batch, so the rows are written here; the page and the decision route are real.
+      if (url.pathname === "/harness/held-photo" && req.method === "POST") {
+        const { catalogBatches, catalogBatchProducts, catalogProducts, catalogOutputs, catalogSourceImages } = schema;
+        const { buildDigest } = await import("@catalog/core/catalog/digest");
+        const { autoDecideSnapshot } = await import("@catalog/core/catalog/auto-decide");
+        const { EMPTY_BATCH_COUNTS } = schema;
+        const db = workerDb as unknown as import("@catalog/core/db/client").Db;
+        const key = `HELD-${Date.now()}`, channels = ["noon"] as ("noon")[];
+        const [batch] = await db.insert(catalogBatches).values({ brandSlug: "test_brand", brandName: "Test Brand", name: `Held ${key}`, isTest: true, createdBy: OPERATOR, status: "done", channels, startedAt: new Date(), finishedAt: new Date(),
+          options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null, autoDecide: await autoDecideSnapshot(db) },
+          counts: { ...EMPTY_BATCH_COUNTS, products: 1, sources: 2, outputs: 2, verified: 1, needsAttention: 1, recheckOk: 1, recheckTotal: 1 } }).returning();
+        const [product] = await db.insert(catalogProducts).values({ brandSlug: "test_brand", isTest: true, productKey: key, pathKey: key, identifier: key }).returning();
+        await db.insert(catalogBatchProducts).values({ batchId: batch!.id, productId: product!.id, change: "new" });
+        const jpeg = await (await import("sharp")).default({ create: { width: 40, height: 40, channels: 3, background: "#808080" } }).jpeg().toBuffer();
+        for (const n of [1, 2]) {
+          const rawUri = `gs://harness-private/catalog-test/test_brand/${batch!.id}/raw/${key}_${n}.jpg`, stagingUri = `gs://harness-private/catalog-test/test_brand/${batch!.id}/staged/${key}_${n}.jpg`;
+          objects.set(rawUri, { buf: jpeg, mime: "image/jpeg" });
+          objects.set(stagingUri, { buf: jpeg, mime: "image/jpeg" });
+          const [source] = await db.insert(catalogSourceImages).values({ batchId: batch!.id, productId: product!.id, n, sha256: `${key}-${n}`, rawUri, originalName: `${key}_${n}.jpg`, mime: "image/jpeg", width: 40, height: 40 }).returning();
+          const objectPath = `catalog-test/test_brand/${key}/noon/${key}_${n}.jpg`;
+          await db.insert(catalogOutputs).values({ batchId: batch!.id, productId: product!.id, sourceImageId: source!.id, n, channel: "noon", canvasW: 1080, canvasH: 1480, scale: 1, placedX: 0, placedY: 0, renderKey: `${key}-${n}`, objectPath, publicUrl: `${ORIGIN}/harness/obj/harness-public/${objectPath}`, stagingUri, bytes: jpeg.length, crc32c: "x", quality: 90,
+            ...(n === 1 ? { status: "verified" as const, isLive: true, generation: 1, publishedAt: new Date() }
+              : { status: "needs_attention" as const, flags: ["text_or_watermark" as const], reason: "The image still shows text, a watermark or a logo overlay. Marketplaces reject these.", compliance: { ok: true, failures: [], auto_decide: { rule: "visible_defect:*", cause: "visible_defect", action: "hold" } } as never }) });
+        }
+        const { digest } = await buildDigest(db, { batch: { id: batch!.id, channels, status: "done", startedAt: batch!.startedAt, updatedAt: batch!.updatedAt }, sheet: { channels, rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null } });
+        await db.update(catalogBatches).set({ digest }).where(eq(catalogBatches.id, batch!.id));
+        return send(res, 200, { id: batch!.id });
       }
       if (url.pathname.startsWith("/harness/worker/") && req.method === "POST") {
         const body = JSON.parse((await bodyOf(req)).toString() || "{}") as Record<string, unknown>;

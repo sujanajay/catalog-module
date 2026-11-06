@@ -1,6 +1,6 @@
 import { costLine } from "../cost";
 import { QA_DIMENSIONS } from "../qa/judge";
-import { autoActionsOf } from "../auto-resolve";
+import { agreedMatte, autoActionsOf } from "../auto-resolve";
 import { QA_CAP_BANNER } from "./status";
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import ExcelJS from "exceljs";
@@ -216,8 +216,11 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:(selectedOf.get(product.id) ?? []).filter(output=>output.decision!=="replaced")}))});
   const cost={...batch.cost,identifiers:line.identifiers,usdPerIdentifier:line.usdPerIdentifier,inrPerIdentifier:line.inrPerIdentifier};
   const judged = selected.filter(o=>o.qaScores), autoActions = Object.fromEntries(["none","note","drop","hold"].map(a=>[a,judged.filter(o=>(autoActionOf(o) ?? "none")===a).length]));
-  const qa = {judgedOutputs:judged.length,autoActions,productsHeld:counts.attentionProducts,products:pairs.length,attentionRate:attentionRate(counts.attentionProducts,pairs.length)};
-  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts,productsLeftOut:counts.productsLeftOut ?? 0,filesLeftOut,uploadsNotRead},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
+  // M1 D40: agreed cut-outs are counted, so how often the rule is used can be watched.
+  const qa = {judgedOutputs:judged.length,agreedCutOuts:selected.filter(o=>agreedMatte(o.compliance)).length,autoActions,productsHeld:counts.attentionProducts,products:pairs.length,attentionRate:attentionRate(counts.attentionProducts,pairs.length)};
+  // M1 D40: a photo held on its own (no held product behind it) has no link, as a held product's siblings have none.
+  const photosHeld=counts.attentionProducts ? 0:counts.needsAttention;
+  const report = {batchId,brand:batch.brandName,channels:batch.channels,summary:{linksPlanned:counts.outputs-counts.skipped-delivery.held-photosHeld,linksVerified:counts.verified,linksSkipped:counts.skipped,linksHeld:delivery.held+photosHeld,photosHeld,linksCarriedOver:delivery.carried.length,productsHeld:counts.attentionProducts,productsLeftOut:counts.productsLeftOut ?? 0,filesLeftOut,uploadsNotRead},counts,cost,qa,...(qaCap ? {banner:QA_CAP_BANNER}:{}),
     products:pairs.map(({product,pair})=>({identifier:product.identifier,pathKey:product.pathKey,linkStatus:batchSheetStatus(pair),change:pair.change,changedAt:rowByIdentifier.get(product.identifier)?.changedAt,optionIdStyleColor:product.optionIdStyleColor,opptraSkuIds:product.opptraSkuIds,sources:(sourcesOf.get(product.id) ?? []).map(s=>({n:s.n,originalName:s.originalName,...(extra.ingest?.sourceOrigins?.[s.rawUri] ?? {origin:(s.uploadId ? uploadById.get(s.uploadId)?.kind:undefined) ?? "image",relativePath:s.originalName}),mime:s.mime,width:s.width,height:s.height,sha256:s.sha256,rawUri:s.rawUri,status:s.status,flags:s.flags})),outputs:(outputsOf.get(product.id) ?? []).filter(o=>o.batchId===batchId || o.isLive).map(o=>({channel:o.channel,n:o.n,status:o.status,url:o.isLive ? o.publicUrl:null,generation:o.generation,flags:o.flags,reason:o.reason,qa:qaReportEntry(o),autoActions:autoActionsOf(o.compliance)}))})),
     overwrites:events.filter(e=>["overwritten","shots_removed","reordered","channel_added"].includes(e.kind)).flatMap((e):Record<string,unknown>[]=> {
       const identifier=identifierOf.get(e.productId);

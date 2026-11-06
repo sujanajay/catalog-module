@@ -14,6 +14,7 @@ import { verifyPublic } from "./verify";
 import { CHANNEL_IMAGE_LIMITS } from "../ingest/append";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
+import { laterPublisher } from "../decisions";
 import { autoDecideNote, autoDecideOf, heldForPerson } from "../auto-decide";
 import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
@@ -112,8 +113,10 @@ export function planPublish(input: { brandSlug: string; pathKey: string; isTest:
     if (input.append && target) assertOwnedByBatch(target, input.batchId, output.n);
     return { output, objectPath, ifGenerationMatch: target?.generation ?? 0 };
   });
-  // M1 D39: a live row a re-cut left held for a person or left out (only recutPhoto resets a live row without keeping it): the bad image it replaces comes down.
-  const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && (x.decision === "remove" || (x.id === o.id && (heldForPerson(x) || x.flags.includes("auto_dropped")))));
+  // M1 D40: a live row a re-cut left held for a person or left out (only recutPhotos resets a live row without keeping it): the bad image it replaces comes down.
+  // Image 1 held stays until the person decides: a listing with no first image is worse than the image it had.
+  const first = input.sources.length ? Math.min(...input.sources.map(s => s.n)) : null;
+  const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && (x.decision === "remove" || (x.id === o.id && ((heldForPerson(x) && x.n !== first) || x.flags.includes("auto_dropped")))));
   const deletes = selected.filter(o => input.append ? o.batchId === input.batchId && removes(o) : !input.sources.some(s => s.n === o.n) || removes(o)).map(output => {
     assertWithinProduct(output.objectPath, scope);
     if (input.append) assertOwnedByBatch(output, input.batchId, output.n);
@@ -187,7 +190,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const keys = key ? [...renderKeys({...key,rulesVersion:rules.keyVersion(channel)}),...renderKeys(key)] : null;
       return !keys || !live.some(output=>output.channel===channel && output.n===source.n && keys.includes(output.renderKey));
     }));
-    if (product.lastBatchId === batchId && outputs.every(o=>o.status === "verified" || o.status === "skipped")) {
+    // A live row a decision just removed (a re-cut's image 1, M1 D42) still has its delete to do.
+    if (product.lastBatchId === batchId && outputs.every(o=>(o.status === "verified" || o.status === "skipped") && !(o.status === "skipped" && o.isLive))) {
       let alreadyPublished = true;
       for (const output of outputs.filter(o=>o.status === "verified")) {
         const head = await deps.storage.headObject(storage.toGsUri(deps.storage.getPublicBucketName(),output.objectPath));
@@ -215,7 +219,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
         return { outcome:"failed", batch:found };
       }
       const now = deps.now();
-      // M1 D39: a photo a rule held for a person stays held, with no link; the product goes on without it.
+      // M1 D40: a photo a rule held for a person stays held, with no link; the product goes on without it.
       for (const o of outputs.filter(o => o.status !== "failed" && !heldForPerson(o) && (undecided(o) || unjudged(o)))) {
         const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason), updatedAt:now };
         await tx.update(catalogOutputs).set(dropped).where(eq(catalogOutputs.id,o.id));
@@ -226,8 +230,11 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held", batch:found };
     }
-    const append = batch.options.append === true;
-    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel)), live, append, batchId, limits: deps.imageLimits ?? CHANNEL_IMAGE_LIMITS });
+    // M1 D42: a re-cut of a photo in a batch a later batch has published after. It replaces the photo's own links and nothing
+    // else: a later batch's images and which photos are current stay as they are, and this batch's other rows are not copied back.
+    const recutOfEarlier = (await laterPublisher(tx, product, batchId, null)) !== null;
+    const append = batch.options.append === true || recutOfEarlier;
+    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel) && !(recutOfEarlier && o.status === "verified")), live, append, batchId, limits: deps.imageLimits ?? CHANNEL_IMAGE_LIMITS });
     const now = deps.now(), actor = batch.createdBy;
     // M1 D30: a follow-up photo that would replace another batch's live photo or go over its channel's limit is not
     // added: it is flagged `not_added` on the output and the product (a flagged item with its note), never dropped silently.
@@ -307,7 +314,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const [existing] = await tx.select({id:catalogProductEvents.id}).from(catalogProductEvents).where(and(eq(catalogProductEvents.productId,productId),eq(catalogProductEvents.batchId,batchId),eq(catalogProductEvents.kind,kind)));
       if (!existing) await tx.insert(catalogProductEvents).values({productId,batchId,kind,actor,details:{channels:batch.channels,shots:kind==="shots_removed" ? removed.map(o=>o.n):changes.map(o=>o.n),changes,removedLinks:removed.map(o=>({channel:o.channel,n:o.n,url:o.publicUrl}))}});
     }
-    if (!failure) {
+    if (!failure && !recutOfEarlier) {
       for (const source of sources) {
         const old = previousSources.find(s=>s.n===source.n);
         if (old?.sha256 === source.sha256) continue;

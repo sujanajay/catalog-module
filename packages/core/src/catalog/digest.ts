@@ -75,9 +75,10 @@ const FIX_FILE = "Send the file again in a new batch, as a photo or a working li
 const NOT_MADE = "the image could not be made";
 const HELD_REASON = "Held for you to decide before the photos are sent.";
 const FIX_HELD = "Decide on the Needs you tab.";
-/** M1 D39: one photo waiting for a person; the product's other photos are delivered. */
+/** M1 D40: one photo waiting for a person; the product's other photos are delivered. */
 const PHOTO_HELD_GROUP = "one photo has no link until you decide";
-const FIX_PHOTO_HELD = "Open the product: replace the photo, use it as it is, or remove it.";
+export const AMAZON_NO_WHITE_FIRST = "Amazon needs a white first image and this listing has none until you decide.";
+const FIX_PHOTO_HELD = "Open Needs attention on this batch: replace the photo, use it as it is, or remove it.";
 const NOT_ADDED_TAKEN_GROUP = "another batch's photo already has this place";
 const NOT_ADDED_LIMIT = "the channel takes no more images of this product";
 const FIX_TAKEN = "Nothing to do. The earlier photo keeps its place, and the technical team looks at it.";
@@ -169,7 +170,8 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     }
     if (pair.change === "unchanged") unchanged++;
     let productExceptions = 0, productNotes = 0;
-    if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged")) {
+    // M1 D40: a product whose every photo is held has no link and still waits for a person: it counts under "Needs you" below.
+    if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged" && !mine.some(heldForPerson))) {
       const reason = pair.notes?.split("; ")[0] || NO_DELIVERABLE_PHOTO;
       exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason, fix: FIX_PRODUCT, group: `No image on any channel: ${shortReason(reason)}` });
       for (const o of mine) if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: leftOutReason(o) });
@@ -192,10 +194,12 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
         continue;
       }
       if (o.status !== "skipped" && o.status !== "failed" && o.status !== "needs_attention") continue;
-      // M1 D39: the rare photo held for a person. The product counts once under "Needs you", each slot is an Exceptions row.
+      // M1 D40: the rare photo held for a person. The product counts once under "Needs you", each slot is an Exceptions row.
       if (heldForPerson(o)) {
         if (!productHeld) { productHeld = true; needsYou++; }
-        exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? PHOTO_HELD_GROUP, fix: FIX_PHOTO_HELD, group: `Waiting for you: ${PHOTO_HELD_GROUP}` });
+        // M1 D40: no photo could take image 1's place, so on Amazon the listing starts with a grey image and no white first image.
+        const noWhiteFirst = o.channel === "amazon" && !o.isLive && o.n === Math.min(...mine.filter(m => m.channel === "amazon").map(m => m.n));
+        exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: `${o.reason ?? PHOTO_HELD_GROUP}${noWhiteFirst ? ` ${AMAZON_NO_WHITE_FIRST}` : ""}`, fix: FIX_PHOTO_HELD, group: `Waiting for you: ${PHOTO_HELD_GROUP}` });
         productExceptions++;
         continue;
       }

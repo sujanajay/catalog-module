@@ -12,7 +12,6 @@ import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { handleChunkTask } from "./catalog/chunk";
 import { handleEnlargeTask } from "./catalog/enlarge";
 import { handleFinalizeTask } from "./catalog/finalize";
-import { handleRecutTask } from "./catalog/recut";
 import { handleImproveTask } from "./catalog/improve";
 import { handleIngestMoreTask, handleIngestTask } from "./catalog/ingest";
 import { handlePublishTask } from "./catalog/publish";
@@ -41,7 +40,6 @@ function handlers(): Partial<Record<TaskRoute, (body: Record<string, unknown>) =
     "/tasks/catalog/finalize": (body) => handleFinalizeTask(catalog, body),
     "/tasks/catalog/enlarge": (body) => handleEnlargeTask(catalog, body),
     "/tasks/catalog/improve": (body) => handleImproveTask(catalog, body),
-    "/tasks/catalog/recut": (body) => handleRecutTask(catalog, body),
   };
 }
 

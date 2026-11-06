@@ -1,6 +1,6 @@
 // M1-F3 auto-decide (M1-S3, docs/program/requirements/M1-intake.md): what happens to an output the QA triage would
 // hold for a person. Each hold cause maps to `deliver` (published now, flagged `provisional`), `drop` (no link for
-// that photo on that channel; the rest of the set is delivered) or, the rare last resort, `hold` (M1 D39: no link for that
+// that photo on that channel; the rest of the set is delivered) or, the rare last resort, `hold` (M1 D40: no link for that
 // photo until a person decides; the rest of the set is delivered), read from `catalog_auto_decide_rules` at Start and
 // kept on the batch (options.autoDecide). No product becomes `pending_attention` and no batch waits for a person.
 import { asc, eq } from "drizzle-orm";
@@ -12,7 +12,7 @@ export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
 export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
 
 /**
- * The M1-F3-R1 defaults (migration 0014's seed rows, changed by 0028). Hold (M1 D39, owner 2026-11-06): a photo that
+ * The M1-F3-R1 defaults (migration 0014's seed rows, changed by 0028). Hold (M1 D40, owner 2026-11-06): a photo that
  * could not be cut out, and a defect a shopper would see that the repair loop could not remove. Deliver: a non-visible
  * problem after the repair loop, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or
  * capped), an encoder fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage
@@ -75,9 +75,9 @@ export function autoDecideRecordOf(compliance: unknown): AutoDecideRecord | null
   return r && typeof r === "object" && typeof (r as AutoDecideRecord).rule === "string" ? r as AutoDecideRecord : null;
 }
 
-/** What a person can do with a held photo (M1 D39). */
+/** What a person can do with a held photo (M1 D40). */
 export const HOLD_SENTENCE = "It has no link yet and the product's other photos are delivered. Replace it, use it as it is, or remove it.";
-/** An output an auto-decide rule held for a person: no link, and the product and the batch go on without it (M1 D39). */
+/** An output an auto-decide rule held for a person: no link, and the product and the batch go on without it (M1 D40). */
 export function heldForPerson(o: { status: string; decision?: string | null; compliance: unknown }): boolean {
   return o.status === "needs_attention" && !o.decision && autoDecideRecordOf(o.compliance)?.action === "hold";
 }

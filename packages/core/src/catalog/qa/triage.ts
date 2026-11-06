@@ -1,5 +1,5 @@
 import type { ChannelId, HoldCause, OutputFlag } from "../types";
-import { busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS } from "../auto-resolve";
+import { agreedMatte, busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS, plainPassthrough } from "../auto-resolve";
 
 /**
  * Information flags (07 4.6): they never hold the publish gate and never create an attention item on
@@ -34,7 +34,7 @@ export const UNCHECKED_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa
 export const problemFlags = (flags: readonly OutputFlag[]) => flags.filter(flag => !INFORMATION_FLAGS.has(flag));
 /**
  * A defect a shopper would see on the image itself, still there after the repair loop: part of the product gone, a rough
- * edge, background left in, or a mark on the output (M1 D39). Never delivered with a warning: the photo is dropped when
+ * edge, background left in, or a mark on the output (M1 D40). Never delivered with a warning: the photo is dropped when
  * the channel has enough other good photos, otherwise it waits for a person (cause `visible_defect`).
  */
 export const VISIBLE_DEFECT_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["product_removed", "halo", "leftover_background", "text_or_watermark"]);
@@ -78,18 +78,25 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     const hold = (cause: HoldCause) => result.set(o.id, {action:"hold",cause,flags:problems});
     if (o.status === "failed") { hold("corrupt"); continue; }
     if (leftOut(o)) { result.set(o.id, {action:"drop",flags:problems}); continue; }
-    if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : "none",flags:[]}); continue; }
+    if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : plainPassthrough(o.compliance) ? "note" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
     // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
     if (problems.includes("enlargement_failed")) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
-    // M1 D39: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
+    // M1 D40: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) {
       if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
       continue;
     }
-    if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) { hold("unchecked"); continue; }
+    if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) {
+      // M1 D40: the judge is what stands behind an agreed cut-out, so one it did not see is never delivered on trust: it is
+      // left out when the channel can do without it, otherwise it waits for a person. Any other unseen image follows the `unchecked` rule.
+      if (!agreedMatte(o.compliance)) hold("unchecked");
+      else if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems});
+      else hold("unusable");
+      continue;
+    }
     // A broken encoder setting (dims, format, ...) survived its re-render: a code fault, not the photo. Held for the
     // technical team, never dropped, so it cannot hide (07 4.6a).
     if (problems.includes("failed_compliance") && encoderFault(o.compliance)) { hold("code_fault"); continue; }

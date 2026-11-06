@@ -1,4 +1,4 @@
-// M1-F3-R1, M1 D39: which photo takes image 1's place when image 1 is held for a person. Pure; the worker renders and writes
+// M1-F3-R1, M1 D40: which photo takes image 1's place when image 1 is held for a person. Pure; the worker renders and writes
 // (apps/worker/src/catalog/auto-resolve.ts promoteOverHeldPhoto).
 import type { catalogOutputs, catalogSourceImages } from "../db/schema";
 import type { AutoAction, RenderVariant } from "./auto-resolve";
@@ -16,8 +16,8 @@ export interface PromotionInput {
   channels: readonly ChannelId[];
   sources: readonly Source[];
   outputs: readonly Output[];
-  /** Live slots of the product, from any batch: a slot already published keeps its photo, so the listing's order stays. */
-  live: readonly { channel: ChannelId; n: number }[];
+  /** Live slots of the product, from any batch, with the photo at each: a slot already published keeps its photo, so the listing's order stays. */
+  live: readonly { channel: ChannelId; n: number; sha256?: string | null }[];
   held: (o: Output) => boolean;
 }
 const score = (o: Output) => Number((o.qaScores as { overall?: unknown } | null)?.overall ?? 0);
@@ -27,7 +27,9 @@ const viewOf = (o: Output) => ((o.qaScores as { judgements?: { view?: unknown }[
 /**
  * The held image 1 and the photo to promote, or null. Image 1 must be held on every channel it has, and the candidate must
  * have passed on exactly those channels, in a view fit for image 1; the best of its weakest scores wins, then the lowest
- * number. Null also when either number is live on one of those channels, because the marketplace already has that order.
+ * number. Null also when either number is live with another photo on one of those channels, because the marketplace already
+ * has that order. A slot already showing the photo that would land there is no obstacle: that is a re-send of a product promoted
+ * before (ingest numbers the file's photos again), and promoting again keeps the delivered order, so image 1 and image 2 never show one photo.
  */
 export function pickPromotion(input: PromotionInput): { from: Source; to: Source } | null {
   const replaced = new Set(input.sources.flatMap(s => s.replacesId ? [s.replacesId] : []));
@@ -45,8 +47,8 @@ export function pickPromotion(input: PromotionInput): { from: Source; to: Source
   }).sort((a, b) => b.weakest - a.weakest || a.s.n - b.s.n);
   const to = candidates[0]?.s;
   if (!to) return null;
-  const taken = (n: number) => input.live.some(l => l.n === n && held.some(o => o.channel === l.channel));
-  return taken(from.n) || taken(to.n) ? null : { from, to };
+  const taken = (n: number, photo: Source) => input.live.some(l => l.n === n && l.sha256 !== photo.sha256 && held.some(o => o.channel === l.channel));
+  return taken(from.n, to) || taken(to.n, from) ? null : { from, to };
 }
 
 /** The columns of one output after it changed its number. Its status, flags, reason and judgement stay. */

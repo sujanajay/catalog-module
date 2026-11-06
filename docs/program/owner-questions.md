@@ -52,7 +52,7 @@ So you can check them if you want; none needs a decision.
 - Daily (not weekly) gallery scrape for treated listings (M4 D, M9).
 - One image matcher threshold (6, uncertain 7 to 12) (M0 F3-R10).
 - One audit rule for images and text (M7, M8).
-- No product or batch is ever held: missing checks mean provisional and flagged (M1, M3, M7). Exception, owner 2026-11-06 (M1 D39): a photo with no usable cut-out or a visible defect that cannot be left out waits for a person, without holding the rest.
+- No product or batch is ever held: missing checks mean provisional and flagged (M1, M3, M7). Exception, owner 2026-11-06 (M1 D40): a photo with no usable cut-out or a visible defect that cannot be left out waits for a person, without holding the rest.
 - Default channels come from the brand's setting, then where the product is listed (M1, UX).
 - `org_id` on every new table now; you are the only owner until roles exist (M12).
 - UX: IBM Plex fonts, rename to "Catalog", 48 hours before a "needs you" item falls back to its safe default, email

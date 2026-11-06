@@ -381,7 +381,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
           if (!startPhoto()) return;
           try {
             const mattePath = derivedPath(derivedPrefix(source),product.pathKey,source.n,"matte"), gs = deps.storage.toGsUri(deps.storage.getBucketName(),mattePath), cached = await deps.storage.headObject(gs);
-            // M1 D41: a re-cut replaces the stored matte, so it is not reused.
+            // M1 D42: a re-cut replaces the stored matte, so it is not reused.
             if (cached.exists && !pending.some(row=>recutRequested(row.compliance))) { await underClaim(async tx=>{await tx.update(catalogSourceImages).set({matteUri:gs,status:"matted"}).where(eq(catalogSourceImages.id,source.id));await photoDone(tx);}); return; }
             const raw = await deps.storage.downloadBuffer(source.rawUri);
             let conversionFailure:unknown;
@@ -512,7 +512,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               await underClaim(async tx=>tx.update(catalogOutputs).set({contentVersionId:await recordOutputVersion(tx,{output,source,product,batch,asset}),stagingUri:uri,crc32c:head.crc32c,status:output.flags.some(f=>f==="failed_compliance") || holdsAtRender(output.flags) ? "needs_attention":"staged",updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id))); continue;
             }
             const renderStart = +deps.now();
-            // M1 D39: a cut-out the guard doubted and two models agreed on: its source shadow can be floor, so it is left out from the start.
+            // M1 D40: a cut-out the guard doubted and two models agreed on: its source shadow can be floor, so it is left out from the start.
             const agreed = agreedMatte(output.compliance);
             const rendered = (await deps.renderAllChannels(p,matte,[output.channel],{shotNumber:source.n,productType:product.productType ?? "other",synthesiseShadow:agreed ? false:shadowAllowed,...(agreed ? {keepSourceShadow:false}:{}),identifier:product.identifier,publicObjectPath:output.objectPath,canvas:productPlan(output.channel)?.canvas,channelRules:rules,...renderUpscalers,...(output.channel==="styli" ? {uniformScale}:{}),trace:{batchId:batch.id,productId}}))[output.channel];
             renderMs += +deps.now()-renderStart;

@@ -1,6 +1,6 @@
 import { ENLARGEMENT_FAILED_WHAT, ENLARGEMENT_FAILED_WHY, flagReason, UPSCALED_SENTENCE, type OutputFlag } from "../types";
 import { CHANNELS } from "../channels";
-export interface ReasonContext { /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
+export interface ReasonContext { /** The pass-through on a photo that does not fill the frame (plainPassthrough). */ plainBackdrop?: boolean; /** The code-detected `leftover_background` (a busy background held at the matte stage, busyBackgroundHold). */ busy?: boolean; n?: number; k?: number; channel?: string; w?: number; h?: number; min?: number; /** A fixed canvas's delivered size (spec 11 4.1). */ deliverW?: number; deliverH?: number; failures?: string; error?: string }
 export interface FlagDetails { why: string; whatToDo: string }
 /**
  * The channel rule a compliance code names, in operator words (07 4.6a). The raw "code: sentence" strings stay in
@@ -49,7 +49,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     different_product:["This photo does not match photo 1 of the same identifier.","If the file was named wrongly, remove it; the rest of the product is unaffected."],
     halo:["The edge of the product looks rough or shows a halo, often white on white.",'Compare the two images. The product itself is never redrawn; only the background changes. "Use as is" keeps it.'],
     product_removed:["Part of the product went missing when the background was removed.",`Compare the two images. We tried to make it again and could not keep the whole product. "Remove this photo" leaves it out; "Replace photo ${n}" swaps the photo.`],
-    matte_passthrough:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
+    matte_passthrough:ctx.plainBackdrop ? ["No cut-out of this photo could be trusted, so only the plain backdrop around the product was replaced. Look at the image before you use it.","Send a better photo in a new batch to replace it."]:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
     chart_image:["This photo is a size chart or a text-only image, so it was left out of the marketplace images.","Nothing to do."],
     leftover_background:["Some of the original background is still visible around the product.",`Compare the two images. "Use as is" keeps it; "Replace photo ${n}" swaps the photo.`],
     text_or_watermark:["The image still shows text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],

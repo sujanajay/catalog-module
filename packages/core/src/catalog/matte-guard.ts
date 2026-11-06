@@ -535,7 +535,7 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
       for (const j of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1]) if (j >= 0) seed(j);
     }
     for (let i = 0; i < solid.length; i++) if (!outside[i]) solid[i] = 1;
-    // The second line (M1 D39, 5715909336543 and 5715907782472 shot 1): filling holes restores backdrop seen through a
+    // The second line (M1 D40, 5715909336543 and 5715907782472 shot 1): filling holes restores backdrop seen through a
     // gap, and the flood stops at a thin line the backdrop crosses, so a white box stayed around the product. A pixel every
     // matte tried dropped and that has the backdrop's colour is backdrop, wherever it lies.
     if (tried.length) {
@@ -1056,7 +1056,7 @@ export interface MatteAgreement {
   detail: string;
 }
 /**
- * M1 D39. The guard judges a matte against an estimate made from the source pixels, and on pale garments, shadows and scenery that
+ * M1 D40. The guard judges a matte against an estimate made from the source pixels, and on pale garments, shadows and scenery that
  * estimate is what is wrong: all 18 ladder-exhausted photos of Vero Moda batch 84a5a30a were good cut-outs it rejected. Two models of different
  * families cutting the same outline is better evidence than that estimate, unless they share a mistake. These bars are what
  * stands in the way of one: a frame-filling photo has no outline to agree on (a salient-object model keeps the logo on a texture,
@@ -1083,6 +1083,18 @@ export function matteAgreement(p: Pick<Prepared, "width" | "height" | "rgb">, ma
   }
   return { matte: null, detail: notes.join("; ") || "one model only" };
 }
+
+/**
+ * The veto on agreement. Inside a racket, a chair or any other gap a salient-object cut-out keeps what shows through, and two
+ * families do it alike: on the tennis-court control ZEE79259BBFD83FFA1DB0Z shot 5 both kept court and net inside the rackets,
+ * with every outline on a real edge, so no bar above sees it. Measuring that residue directly does not work (kept pixels with
+ * the colour of the nearest hole: 0.36% of the court's cut, 1.58% of a real good cut, Z66750). What does separate them is the
+ * scene itself: what every cut-out dropped from the border band reads as scenery (isBusyBackground) on the court (33.6% of the
+ * band, edge density 0.51, 60 tones) and on the lifestyle candle, and on none of the 19 good cuts the guard wrongly doubted
+ * (closest Z66750: 25%, 0.12, 21 tones). A photo shot in a scene is not agreed on, so it ends in the busy-background hold.
+ * Limit: fitted on these photos, no held-out set; a wrong cut on a plain backdrop is still only for the judge to catch.
+ */
+const BUSY_SCENE_DETAIL = "busy scene: what shows through the cut-out cannot be told from the product";
 
 /** White border, as a share of the long side, around the photo for the ladder's padded matte. */
 export const GUARD_PAD_FRACTION = 0.2;
@@ -1154,16 +1166,18 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     if (result.ok) return won(matte);
   }
   if (!input.handRule) {
-    // M1 D39: before the guard's doubt ends in a pass-through or a hold, ask whether the models agree with each other. A
-    // frame-filling photo has no outline to agree on, so no third call is spent on it.
-    let agreement = matteAgreement(p, unpadded, region);
-    if (!agreement.matte && !region.frameFilling) {
+    // M1 D40: before the guard's doubt ends in a pass-through or a hold, ask whether the models agree with each other. A
+    // frame-filling photo has no outline to agree on, so no third call is spent on it. Nor is one spent on a scene
+    // (busyScene): the cut-out would keep what shows through it.
+    const busyScene = (): MatteAgreement | null => isBusyBackground(p, passthroughMatte(p, tried, region), tried, region) ? { matte: null, detail: BUSY_SCENE_DETAIL } : null;
+    let agreement = busyScene() ?? matteAgreement(p, unpadded, region);
+    if (!agreement.matte && agreement.detail !== BUSY_SCENE_DETAIL && !region.frameFilling) {
       const third = await input.attempt("third");
       if (third) {
         unpadded.push(third);
         const result = check(third);
         if (result.ok) { record("second_matte", "passed", `third opinion ${third.model}: ${result.detail}`); return won(third); }
-        agreement = matteAgreement(p, unpadded, region);
+        agreement = busyScene() ?? matteAgreement(p, unpadded, region);
       }
     }
     record("matte_agreement", agreement.matte ? "passed" : "failed", agreement.detail);
@@ -1185,5 +1199,6 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     return { matte: wholePhotoMatte(p, region), passthrough: false, busyBackground: true, actions, soleStripRecovered: 0 };
   }
   record("matte_passthrough", "passed", `no cut-out kept the product; the whole frame is used${band ? ` (${band}: one material or one plain colour, not scenery)` : ""}`);
+  if (!region.frameFilling) actions.at(-1)!.notCloseUp = true;
   return { matte: pass, passthrough: true, busyBackground: false, actions, soleStripRecovered: 0 };
 }

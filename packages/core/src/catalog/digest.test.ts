@@ -10,7 +10,7 @@ import { seedLargeBatch } from "./pipeline/large-batch-fixture";
 import { batchCostFigure } from "./cost-report";
 import { buildReport } from "./pipeline/report";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
-import { buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
+import { AMAZON_NO_WHITE_FIRST, buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
 import { digestCostLine, digestEmail, digestHeadline, digestLeftOutLine, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
@@ -104,6 +104,25 @@ describe("products grouping left out (R1 exit 2 finding 1)", () => {
     expect(digest).toMatchObject({ products: 6, productsLeftOut: 1, sameFilesMerged: 276 });
     expect(exceptions.filter(e => e.identifier === id(1))).toHaveLength(1);
     expect(digestReasonLines(digest).lines).toContain("276 files were copies of a photo already in the batch, so one of each was used.");
+  });
+});
+
+describe("a photo held for a person (M1 D40)", () => {
+  const base = { batchId: "b", productId: "p", sourceImageId: "s", channel: "amazon" as const, isLive: false, flags: ["text_or_watermark"], reason: "A mark.", decision: null, publicUrl: "u", publishedAt: null };
+  const hold = { auto_decide: { rule: "visible_defect:*", cause: "visible_defect", action: "hold" } };
+  const held = (n: number) => digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost, improvements: [], pairs: [{ productId: "p", identifier: "A", change: "updated", notes: null }],
+    outputs: [{ ...base, id: "1", n: 1, status: n === 1 ? "needs_attention" : "verified", isLive: n !== 1, flags: n === 1 ? base.flags : [], compliance: n === 1 ? hold : {} }, { ...base, id: "2", n: 2, status: n === 2 ? "needs_attention" : "verified", isLive: n !== 2, flags: n === 2 ? base.flags : [], compliance: n === 2 ? hold : {} }] as unknown as DigestOutput[] });
+  it("points to where the person can act, and says when Amazon has no white first image", () => {
+    const first = held(1), second = held(2);
+    expect(first.digest.needsYou).toBe(1);
+    expect(first.exceptions.find(e => e.image === 1)).toMatchObject({ fix: expect.stringContaining("Needs attention"), reason: expect.stringContaining(AMAZON_NO_WHITE_FIRST) });
+    expect(second.exceptions.find(e => e.image === 2)!.reason).not.toContain(AMAZON_NO_WHITE_FIRST);
+  });
+  it("a product whose only photo is held still counts under Needs you, or nobody could reach it", () => {
+    const only = digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], improvements: [], pairs: [{ productId: "p", identifier: "A", change: "new", notes: null }],
+      outputs: [{ ...base, id: "1", n: 1, status: "needs_attention", compliance: hold }] as unknown as DigestOutput[] });
+    expect(only.digest.needsYou).toBe(1);
+    expect(only.exceptions).toEqual([expect.objectContaining({ image: 1, fix: expect.stringContaining("Needs attention") })]);
   });
 });
 
@@ -302,7 +321,7 @@ describe("R1 exit item 4: the digest cost", () => {
   });
 });
 
-describe("a photo held for a person (M1 D39)", () => {
+describe("a photo held for a person (M1 D40)", () => {
   it("counts the product once under Needs you and lists each channel as an Exceptions row with the fix", async () => {
     const { batchId: held } = await seedLargeBatch(db, { products: 2, photosPerProduct: 2, channels: ["noon", "namshi"], status: "done" });
     await db.execute(sql`UPDATE catalog_outputs o SET status = 'needs_attention', is_live = false, reason = 'The image still shows text, a watermark or a logo overlay. Marketplaces reject these.', compliance = '{"auto_decide":{"rule":"visible_defect:*","cause":"visible_defect","action":"hold"}}'::jsonb FROM catalog_products p WHERE p.id = o.product_id AND o.batch_id = ${held} AND o.n = 2 AND p.identifier = (SELECT min(p2.identifier) FROM catalog_products p2 JOIN catalog_outputs o2 ON o2.product_id = p2.id WHERE o2.batch_id = ${held})`);

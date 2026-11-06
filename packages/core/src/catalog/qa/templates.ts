@@ -5,7 +5,7 @@
  * of a multipack or a size chart of the same listing is never mistaken for a different product.
  * Placement is not asked: code checks it exactly (05). The JSON keys are the ones `judge.ts` reads.
  * `product_intact` (flag `product_removed`) compares how much of the product image 2 still shows;
- * `background_clean` needs a sentence that says where the leftover is. `no_text_or_watermark` (M1 D40) is read on image 2:
+ * `background_clean` needs a sentence that says where the leftover is. `no_text_or_watermark` (M1 D41) is read on image 2:
  * a mark the cut-out removed with the background is no problem, and one that stays is a defect of the delivered image.
  */
 export const CATALOG_QA_TEMPLATE = `You check one product photo for an online catalogue.
