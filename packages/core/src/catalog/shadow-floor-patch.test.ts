@@ -64,10 +64,10 @@ describe("a toned floor is not a contact shadow", () => {
 
   it("fills a part of the band the flood could not reach, so the shadow has no clean rectangle in it", () => {
     const { prepared, matte } = studio(0), box = bbox(matte.alpha, W, H)!;
-    // Clean under the product inside the band, and a dark path that leaves the band below it and comes back up on the right.
+    // Clean under the product inside the band, and a dark path that leaves the band below it (the band ends at row 788) and comes back up on the right.
     const paint = (x: number, y: number, v: number) => { if (x < BOX.x || x >= BOX.x + BOX.w || y >= BOX.y + BOX.h) prepared.rgb.fill(v, (y * W + x) * 3, (y * W + x) * 3 + 3); };
     for (let y = 500; y < H; y++) for (let x = 0; x < W; x++) paint(x, y, WALL);
-    const dark = (x: number, y: number) => (x >= 250 && x < 270 && y >= 640 && y < H) || (y >= 787 && x >= 250 && x < 370) || (x >= 331 && x < 370 && y >= 620 && y < H);
+    const dark = (x: number, y: number) => (x >= 250 && x < 270 && y >= 640 && y < H) || (y >= 790 && x >= 250 && x < 370) || (x >= 331 && x < 370 && y >= 620 && y < H);
     for (let y = 500; y < H; y++) for (let x = 0; x < W; x++) if (dark(x, y)) paint(x, y, 190);
     for (let x = BOX.x; x < 300; x++) for (let y = 650; y < 652; y++) paint(x, y, 190);
     for (let x = 250; x < 300; x++) for (let y = 650; y < 652; y++) paint(x, y, 190);
