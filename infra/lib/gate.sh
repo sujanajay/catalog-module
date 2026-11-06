@@ -8,7 +8,8 @@
 #   3. The service's probe against that URL under a hard timeout. Non-zero exit or timeout = failure.
 #   4. Pass (unless the registry says SVC_SHIFT=0): tag the outgoing revision "previous" (what --rollback returns
 #      to), move all traffic to exactly the probed revision (--to-revisions, never --to-latest, so a revision created
-#      meanwhile can never take traffic unprobed), drop a stale candidate tag, print "==> <name>: live (<revision>)".
+#      meanwhile can never take traffic unprobed), record the shift (gate_record_shift), drop a stale candidate tag,
+#      print "==> <name>: live (<revision>)".
 #   5. Fail: traffic stays where it was; print the probe output, the rollback line, return non-zero.
 # SKIP when the live revision already runs the same image digest with the same env, unless GATE_FORCE=1 (an operator
 # override; deploy.sh re-runs the worker's smoke after a matting change through the worker's env). The env carries DEPLOY_ARGS_SHA,
@@ -66,6 +67,21 @@ gate_previous_revision() {
 gate_measure_tagged() {
   [ -n "$1" ] || return 1
   [ "$(gate_json '(j?.status?.traffic ?? []).some((t) => t.revisionName === a[0] && String(t.tag ?? "").startsWith("measure-")) ? 1 : 0' "$1")" = 1 ]
+}
+
+# gate_record_shift <service> <revision>: traffic just moved, so write that down (catalog_traffic_shifts, read by
+# deploy_overlap and the daily cost check). This laptop cannot reach the private database, so it starts one execution of
+# the job catalog-traffic-shift (infra/deploy.sh keeps it on this commit's image) and does not wait; the time is taken
+# here, so a late or retried write is the same row. Traffic has moved already, so a failure only warns, with the line to
+# run by hand. The preview stack is not the live one and records nothing.
+GATE_SHIFT_JOB=catalog-traffic-shift
+gate_record_shift() {
+  [ "${CATALOG_PREVIEW:-0}" != 1 ] || return 0
+  local args
+  args="SHIFT_SERVICE=$1,SHIFT_REVISION=$2,SHIFT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region=asia-south1 --async --update-env-vars="$args" --quiet >/dev/null 2>&1 && return 0
+  echo "WARN: $1: traffic moved but the shift was not recorded; record it by hand: gcloud run jobs execute $GATE_SHIFT_JOB --region=asia-south1 --async --update-env-vars=$args" >&2
+  return 0
 }
 
 # The exact rollback line the spec names, plus where to run it.
@@ -305,6 +321,7 @@ gate_promote() {
     gate_fail "the traffic shift to $GATE_REVISION failed"
     return 1
   }
+  if [ "$GATE_PREVIOUS" != "$GATE_REVISION" ]; then gate_record_shift "$SVC_NAME" "$GATE_REVISION"; fi
   echo "==> $SVC_NAME: live ($GATE_REVISION)"
   # The deploy moved the candidate tag to the new revision; one left on any other revision is stale. Traffic has
   # moved already, so a failure here only warns.
@@ -430,5 +447,6 @@ rollback_service() {
   echo "==> $name: rollback $live -> $target"
   echo "gcloud run services update-traffic $name --to-revisions $target=100"
   gate_gcloud run services update-traffic "$name" --region="$region" --to-revisions="$target=100" --quiet >/dev/null
+  gate_record_shift "$name" "$target"
   echo "==> $name: live ($target)"
 }

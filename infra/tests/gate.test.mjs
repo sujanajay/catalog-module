@@ -512,6 +512,73 @@ test('rollback returns to the revision tagged previous, or a named one, never a 
   assert.ok(r.calls.includes(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${OLD}=100 --quiet`), r.calls.join('\n'));
 });
 
+// R1 exit finding 3: every traffic move on a service is recorded, right after it, with its time.
+const recordCalls = (r) => r.calls.filter((c) => c.startsWith('run jobs execute catalog-traffic-shift '));
+const RECORD = (service, revision) => new RegExp(`^run jobs execute catalog-traffic-shift --region=asia-south1 --async --update-env-vars=SHIFT_SERVICE=${service},SHIFT_REVISION=${revision},SHIFT_AT=\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\dZ --quiet$`);
+
+test('a traffic shift is recorded right after it moves; a forced deploy too', () => {
+  for (const [label, env] of [['record-plain', {}], ['record-forced', {GATE_FORCE: '1', LIVE_MATCH: '1'}]]) {
+    const r = run(label, 'deploy_service test-svc', env);
+    assert.equal(r.status, 0, r.err);
+    assert.equal(recordCalls(r).length, 1, r.calls.join('\n'));
+    assert.match(recordCalls(r)[0], RECORD('test-svc', NEW));
+    const shift = r.calls.indexOf(`run services update-traffic test-svc --region=asia-south1 --to-revisions=${NEW}=100 --quiet`);
+    assert.equal(r.calls.indexOf(recordCalls(r)[0]), shift + 1);
+  }
+});
+
+test('a rollback is recorded as a traffic move', () => {
+  const r = run('record-rollback', 'rollback_service test-svc', {ROLLBACK_TAGGED: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.match(recordCalls(r)[0], RECORD('test-svc', OLD));
+});
+
+test('a failed record only warns, with the line to run by hand: the deploy and the rollback go on', () => {
+  let r = run('record-fails', 'deploy_service test-svc; echo "RC=$?"', {RECORD_ERROR: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(lines(r.out).includes(`==> test-svc: live (${NEW})`), r.out);
+  assert.ok(r.out.includes('RC=0'), r.out);
+  assert.match(r.err, /WARN: test-svc: traffic moved but the shift was not recorded; record it by hand: gcloud run jobs execute catalog-traffic-shift --region=asia-south1 --async --update-env-vars=SHIFT_SERVICE=test-svc,/);
+  r = run('record-fails-rollback', 'rollback_service test-svc', {RECORD_ERROR: '1', ROLLBACK_TAGGED: '1'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(lines(r.out).includes(`==> test-svc: live (${OLD})`), r.out);
+});
+
+test('nothing is recorded when traffic did not move: SKIP, failed probe, failed shift, no-shift candidate, the preview stack', () => {
+  for (const [label, env] of [
+    ['norecord-skip', {LIVE_MATCH: '1'}], ['norecord-probe', {PROBE: 'exit 3'}], ['norecord-shift', {SHIFT_ERROR: '1'}],
+    ['norecord-noshift', {SHIFT: '0', CAND_TAG: 'c1'}], ['norecord-preview', {CATALOG_PREVIEW: '1'}],
+  ]) {
+    const r = run(label, 'deploy_service test-svc || true', env);
+    assert.deepEqual(recordCalls(r), [], `${label}: ${r.calls.join('\n')}`);
+  }
+});
+
+test('a group of services records each shift, only once every probe passed', () => {
+  const body = `service_catalog_matting() { service_test_svc; SVC_NAME=catalog-matting; }
+service_catalog_upscale() { service_test_svc; SVC_NAME=catalog-upscale; }
+gate_group catalog-matting catalog-upscale`;
+  const r = run('record-group', body);
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(recordCalls(r).map((c) => /SHIFT_SERVICE=([a-z-]+),/.exec(c)[1]), ['catalog-matting', 'catalog-upscale']);
+  const failed = run('record-group-fail', body, {PROBE: 'exit 3'});
+  assert.equal(failed.status, 1);
+  assert.deepEqual(recordCalls(failed), []);
+});
+
+test('deploy.sh: the record job follows this image before the first shift, and a failure to update it only warns; the preview and a measure run leave it alone', () => {
+  const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
+  const job = deploy.indexOf('gcloud run jobs deploy catalog-traffic-shift');
+  assert.ok(job > deploy.indexOf('echo "==> migrate"') && job < deploy.indexOf('gate_group "${GROUP[@]}"'), 'after the migration, before any gate');
+  const block = deploy.slice(deploy.lastIndexOf('\nif ', job), deploy.indexOf('\nfi\n', job));
+  assert.match(block, /MEASURE_ONLY" != 1/);
+  assert.match(block, /CATALOG_PREVIEW:-0\}" != 1/);
+  assert.match(block, /--args=dist\/catalog-traffic-shift\.js/);
+  assert.match(block, /--image="\$AR\/worker:\$TAG"/);
+  assert.match(block, /\|\| echo "WARN: could not update the job catalog-traffic-shift/);
+  assert.ok(fs.readFileSync(path.join(root, 'apps/worker/build.mjs'), 'utf8').includes('"catalog-traffic-shift": path.join(here, "src/catalog-traffic-shift.ts")'));
+});
+
 test('deploy.sh: gate loop after migrate and queues, before jobs and monitoring; no smoke before the services', () => {
   const deploy = fs.readFileSync(path.join(root, 'infra/deploy.sh'), 'utf8');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, `${s} not in deploy.sh`); return i; };

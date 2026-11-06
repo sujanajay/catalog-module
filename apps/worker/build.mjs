@@ -25,6 +25,7 @@ await build({
     "catalog-output-evals": path.join(here, "src/catalog-output-evals.ts"),
     "catalog-enhancement-gate": path.join(here, "src/catalog-enhancement-gate.ts"),
     "catalog-route-switch": path.join(here, "src/catalog-route-switch.ts"),
+    "catalog-traffic-shift": path.join(here, "src/catalog-traffic-shift.ts"),
     "fault-proxy": path.join(here, "src/fault-proxy.ts"),
   },
   outdir: dist,

@@ -8,7 +8,7 @@
 #   WARN_ON_STDERR=1 describe also prints a warning on stderr (which must never reach the parsed JSON);
 #   MEASURE_LIVE=1 $OLD also carries the tag measure-4c-4t-1r (a spec 18 ladder rung).
 #   SERVICE_MAX=<n> the service-level max instances (run.googleapis.com/maxScale; default unset);
-#   MAX_ERROR=1 run services update --max fails.
+#   MAX_ERROR=1 run services update --max fails; RECORD_ERROR=1 run jobs execute (the shift record) fails.
 # After "run deploy" ($STATE/deployed) the description lists the candidate tag ($CAND_TAG) on the new revision.
 gate_gcloud() {
   printf '%s\n' "$*" >> "$LOG"
@@ -39,6 +39,8 @@ gate_gcloud() {
       if [ "${MAX_ERROR:-0}" = 1 ]; then echo "ERROR: update mocked" >&2; return 1; fi ;;
     "run services update-traffic")
       if [ "${SHIFT_ERROR:-0}" = 1 ] && [[ "$*" == *--to-revisions* ]]; then echo "ERROR: shift mocked" >&2; return 1; fi ;;
+    "run jobs execute")
+      if [ "${RECORD_ERROR:-0}" = 1 ]; then echo "ERROR: execute mocked" >&2; return 1; fi ;;
     "run deploy test-svc"|"run deploy catalog-matting"|"run deploy catalog-matting-gpu"|"run deploy catalog-upscale")
       if [ -n "${DEPLOY_ERROR:-}" ]; then echo "$DEPLOY_ERROR" >&2; return 1; fi
       touch "$STATE/deployed" ;;

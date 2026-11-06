@@ -294,7 +294,7 @@ try {
     const scripts = ['deploy.sh', 'catalog-qa-check.sh', 'catalog-eval.sh', 'catalog-scale-jobs.sh', 'catalog-output-evals.sh'];
     // M6-F1 (M6-S1): component is the service or job name and env says live, preview or test (infra/lib/labels.sh);
     // the job scripts take theirs from a variable catalog_labels_check refused to deploy without.
-    const want = {'catalog-migrate': '"$MIGRATE_LABELS"', '"$JOB"': '"$JOB_LABELS"', '"$job"': '"$labels"'};
+    const want = {'catalog-migrate': '"$MIGRATE_LABELS"', 'catalog-traffic-shift': '"$SHIFT_JOB_LABELS"', '"$JOB"': '"$JOB_LABELS"', '"$job"': '"$labels"'};
     let seen = 0;
     for (const s of scripts) {
       const lines = fs.readFileSync(path.join(infra, s), 'utf8').split(/\r?\n/);
@@ -309,7 +309,7 @@ try {
         seen++;
       });
     }
-    assert.equal(seen, 5, 'job deploy commands found');
+    assert.equal(seen, 6, 'job deploy commands found');
     // Spec 17: the services deploy through the gate, with their flags in the registry (infra/lib/services.sh).
     const registry = fs.readFileSync(path.join(infra, 'lib/services.sh'), 'utf8');
     for (const [fn, component] of [['catalog_matting', 'catalog-matting live'], ['catalog_matting_gpu', 'catalog-matting-gpu live'], ['catalog_worker', '"$WORKER_SERVICE"'], ['catalog_web', '"$WEB_SERVICE"']]) {

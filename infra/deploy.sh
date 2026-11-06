@@ -441,6 +441,18 @@ elif [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
 else
   echo "==> migrate: SKIP (preview uses the existing schema)"
 fi
+# R1 exit finding 3 (M6-F3-R1, M6 decision C6): the job that records each traffic shift (gate_record_shift in
+# infra/lib/gate.sh), on this commit's image and after the migration, so it is ready before the first shift. A job of
+# one quick insert; up to one execution per service, so a group's shifts briefly hold one connection each, inside the
+# budget's headroom. It only records: a failure here warns and never stops a deploy.
+if [ "$MEASURE_ONLY" != 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  SHIFT_JOB_LABELS=$(catalog_labels catalog-traffic-shift live)
+  catalog_labels_check catalog-traffic-shift "$SHIFT_JOB_LABELS" || exit 1
+  gcloud_retry gcloud run jobs deploy catalog-traffic-shift --quiet --image="$AR/worker:$TAG" --command=node --args=dist/catalog-traffic-shift.js \
+    --service-account="$WORKER_SA" --max-retries=2 --task-timeout=300 "${NET[@]}" --labels="$SHIFT_JOB_LABELS" \
+    --set-secrets="$SECRETS" --set-env-vars="$ENV_VARS,DB_POOL_MAX=$JOB_DB_POOL_MAX" \
+    || echo "WARN: could not update the job catalog-traffic-shift; this deploy's traffic shifts may go unrecorded (gate_record_shift warns with the line to run)" >&2
+fi
 
 
 # --- 5. Queues the new revisions will use ----------------------------------------------
