@@ -85,6 +85,21 @@ export function proofSummary(rows: readonly Pick<ProofRow, "photo" | "result" | 
   ] };
 }
 
+/**
+ * M1 D40: how many of the proof's photos would not simply be delivered: scenery the matte stage refuses, or a defect the judge names.
+ * Each is left out when its product keeps two good photos, else held; the proof has no sibling photos, so this is the most that could
+ * hold. Real photos and controls apart, because the controls are chosen to fail. It is these photos only, not a brand's rate.
+ */
+export function proofHolds(rows: readonly Pick<ProofRow, "group" | "busy" | "images">[]): { real: { held: number; of: number }; controls: { held: number; of: number }; line: string } {
+  const tally = (groups: readonly ProofGroup[]) => {
+    const mine = rows.filter(r => groups.includes(r.group));
+    return { held: mine.filter(r => r.busy || r.images.some(i => i.flags.some(f => VISIBLE_DEFECTS.includes(f)))).length, of: mine.length };
+  };
+  const real = tally(["real", "marked"]), controls = tally(["control"]);
+  const part = (t: { held: number; of: number }) => `${t.held} of ${t.of} (${t.of ? ((100 * t.held) / t.of).toFixed(1) : "0.0"}%)`;
+  return { real, controls, line: `HOLDS at most: real photos ${part(real)}, controls ${part(controls)}. These photos only, not a brand's rate.` };
+}
+
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const RESULT_COLOUR: Record<ProofResult, string> = { pass: "#0a7d38", fail: "#b3261e", look: "#8a5a00" };
 /** One self-contained page: the images are inside it, so it opens from a downloaded file. */
@@ -164,9 +179,9 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
   } catch (error) {
     stopped = error instanceof Error ? error.message : String(error);
   }
-  const { pass, lines } = proofSummary(rows, stopped), bucket = gcs.getBucketName();
+  const summary = proofSummary(rows, stopped), { pass } = summary, holds = proofHolds(rows), lines = [summary.lines[0]!, holds.line, ...summary.lines.slice(1)], bucket = gcs.getBucketName();
   const write = async (name: string, body: string, mime: string) => { const path = `${prefix}/${name}`; assertTestPrefix(path); await gcs.uploadBuffer(path, Buffer.from(body), mime); return `gs://${bucket}/${path}`; };
-  await write("report.json", JSON.stringify({ run, pass, judgeUsd, rows: rows.map(r => ({ ...r, images: r.images.map(({ thumb: _thumb, ...image }) => image) })) }, null, 1), "application/json");
+  await write("report.json", JSON.stringify({ run, pass, judgeUsd, holds: { real: holds.real, controls: holds.controls }, rows: rows.map(r => ({ ...r, images: r.images.map(({ thumb: _thumb, ...image }) => image) })) }, null, 1), "application/json");
   await write("verdict.txt", `${lines.join("\n")}\n`, "text/plain");
   const page = await write("report.html", proofHtml(run, rows, lines), "text/html");
   for (const line of lines) console.info(line);
@@ -199,7 +214,7 @@ export async function recutCommand(db: Db, flags: Record<string, string | string
     const result = await recutProductPhotos(deps, { batchId, sourceImageIds: list.map(x => x.id) });
     for (const { label, id } of list) {
       const outcome = result.photos?.[id] ?? result.outcome;
-      console.info(`${label}: ${outcome}`);
+      console.info(`${label}: ${outcome === "superseded" ? "superseded: a later batch published this product, so nothing was changed" : outcome}`);
       if (outcome !== "recutting") process.exitCode = 1;
     }
   }

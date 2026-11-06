@@ -119,7 +119,7 @@ describe("a photo held for a person (M1 D40)", () => {
     expect(second.exceptions.find(e => e.image === 2)!.reason).not.toContain(AMAZON_NO_WHITE_FIRST);
   });
   it("a product whose only photo is held still counts under Needs you, or nobody could reach it", () => {
-    const only = digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null }, improvements: [], pairs: [{ productId: "p", identifier: "A", change: "new", notes: null }],
+    const only = digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null }, improvements: [], pairs: [{ productId: "p", identifier: "A", change: "failed", notes: null }],
       outputs: [{ ...base, id: "1", n: 1, status: "needs_attention", compliance: hold }] as unknown as DigestOutput[] });
     expect(only.digest.needsYou).toBe(1);
     expect(only.exceptions).toEqual([expect.objectContaining({ image: 1, fix: expect.stringContaining("need you") })]);

@@ -170,8 +170,8 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     }
     if (pair.change === "unchanged") unchanged++;
     let productExceptions = 0, productNotes = 0;
-    // M1 D40: a product whose every photo is held has no link and still waits for a person: it counts under "Needs you" below.
-    if (pair.change === "failed" || (!withLinks && pair.change !== "unchanged" && !mine.some(heldForPerson))) {
+    // M1 D40: a product whose every photo is held has no link (publish marks it failed) and still waits for a person: it counts under "Needs you" below.
+    if (!mine.some(heldForPerson) && (pair.change === "failed" || (!withLinks && pair.change !== "unchanged"))) {
       const reason = pair.notes?.split("; ")[0] || NO_DELIVERABLE_PHOTO;
       exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason, fix: FIX_PRODUCT, group: `No image on any channel: ${shortReason(reason)}` });
       for (const o of mine) if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: leftOutReason(o) });

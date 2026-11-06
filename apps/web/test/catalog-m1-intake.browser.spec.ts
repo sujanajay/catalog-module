@@ -240,3 +240,15 @@ test("M1 D40: a held photo on a finished batch is reached from the digest and de
   }).toPass({ timeout: 60_000 });
   await expect(page.getByText("Resolved", { exact: true })).toBeVisible({ timeout: 60_000 });
 });
+
+// M1 D40: every photo held, so the product has no link and publish leaves it `failed`, as the worker does. The card is still reachable.
+test("M1 D40: a product with every photo held is reached from the digest", async ({ page }) => {
+  const seeded = await page.request.post("/harness/held-photo?all=1");
+  expect(seeded.ok()).toBe(true);
+  const { id } = (await seeded.json()) as { id: string };
+  await page.goto(`/catalog/${id}`);
+  await expect(page.getByText("2 photos wait for you to decide.")).toBeVisible({ timeout: 60_000 });
+  await page.getByRole("link", { name: "See the products that need you" }).click();
+  await expect(page.getByRole("tab", { name: /Needs attention/ })).toHaveAttribute("aria-selected", "true", { timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Use as is" })).toHaveCount(2);
+});

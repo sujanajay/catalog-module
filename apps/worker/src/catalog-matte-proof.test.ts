@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { matteProofCommand, parsePhotoList, proofHtml, proofSummary, proofVerdict, PROOF_CONTROLS, PROOF_MARKED, PROOF_REAL, type ProofRow } from "./catalog-matte-proof";
+import { matteProofCommand, parsePhotoList, proofHolds, proofHtml, proofSummary, proofVerdict, PROOF_CONTROLS, PROOF_MARKED, PROOF_REAL, type ProofRow } from "./catalog-matte-proof";
 
 const base = { agreed: false, busy: false, passthrough: false, flags: [] as string[], judged: true };
 
@@ -68,6 +68,15 @@ test("proof refuses to run without LIVE_SMOKE=1, before touching anything", asyn
     await matteProofCommand(null as never, {});
     expect(process.exitCode).toBe(2);
   } finally { process.exitCode = code; if (before !== undefined) process.env.LIVE_SMOKE = before; }
+});
+
+test("M1 D40: the verdict counts the photos that would be held or left out, real photos and controls apart", () => {
+  const row = (group: ProofRow["group"], busy: boolean, flags: string[] = []) => ({ group, busy, images: [{ channel: "noon", path: "", thumb: "", verdict: "", flags, scores: null }] });
+  const holds = proofHolds([row("real", false), row("real", true), row("marked", false, ["text_or_watermark"]), row("real", false, ["qa_sampled_out"]), row("control", true), row("control", false), row("backstop", false, ["halo"])]);
+  expect(holds.real).toEqual({ held: 2, of: 4 });
+  expect(holds.controls).toEqual({ held: 1, of: 2 });
+  expect(holds.line).toBe("HOLDS at most: real photos 2 of 4 (50.0%), controls 1 of 2 (50.0%). These photos only, not a brand's rate.");
+  expect(proofHolds([]).line).toContain("0 of 0 (0.0%)");
 });
 
 test("parses a photo list", () => {

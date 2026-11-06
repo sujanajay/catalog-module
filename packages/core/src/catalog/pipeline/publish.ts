@@ -14,7 +14,6 @@ import { verifyPublic } from "./verify";
 import { CHANNEL_IMAGE_LIMITS } from "../ingest/append";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
-import { laterPublisher } from "../decisions";
 import { autoDecideNote, autoDecideOf, heldForPerson } from "../auto-decide";
 import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
@@ -230,11 +229,8 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       await tx.update(catalogBatchProducts).set({ change:"pending_attention", notes: [pair?.notes,missingPairs ? "Some photos could not be processed. Start this product again.":"",...outputs.filter(o => o.reason).map(outputNote)].filter(Boolean).join("; ") }).where(where);
       return { outcome:"held", batch:found };
     }
-    // M1 D42: a re-cut of a photo in a batch a later batch has published after. It replaces the photo's own links and nothing
-    // else: a later batch's images and which photos are current stay as they are, and this batch's other rows are not copied back.
-    const recutOfEarlier = (await laterPublisher(tx, product, batchId, null)) !== null;
-    const append = batch.options.append === true || recutOfEarlier;
-    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel) && !(recutOfEarlier && o.status === "verified")), live, append, batchId, limits: deps.imageLimits ?? CHANNEL_IMAGE_LIMITS });
+    const append = batch.options.append === true;
+    const plan = planPublish({ ...product, channels, sources, outputs:outputs.filter(o => !held.has(o.channel)), live, append, batchId, limits: deps.imageLimits ?? CHANNEL_IMAGE_LIMITS });
     const now = deps.now(), actor = batch.createdBy;
     // M1 D30: a follow-up photo that would replace another batch's live photo or go over its channel's limit is not
     // added: it is flagged `not_added` on the output and the product (a flagged item with its note), never dropped silently.
@@ -314,7 +310,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       const [existing] = await tx.select({id:catalogProductEvents.id}).from(catalogProductEvents).where(and(eq(catalogProductEvents.productId,productId),eq(catalogProductEvents.batchId,batchId),eq(catalogProductEvents.kind,kind)));
       if (!existing) await tx.insert(catalogProductEvents).values({productId,batchId,kind,actor,details:{channels:batch.channels,shots:kind==="shots_removed" ? removed.map(o=>o.n):changes.map(o=>o.n),changes,removedLinks:removed.map(o=>({channel:o.channel,n:o.n,url:o.publicUrl}))}});
     }
-    if (!failure && !recutOfEarlier) {
+    if (!failure) {
       for (const source of sources) {
         const old = previousSources.find(s=>s.n===source.n);
         if (old?.sha256 === source.sha256) continue;

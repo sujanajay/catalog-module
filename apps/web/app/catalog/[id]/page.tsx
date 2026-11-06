@@ -75,8 +75,8 @@ export default async function BatchPage({ params, searchParams }: { params: Prom
   const detailsLoaded = !digest || tab === "details";
   // The comparison signs a page of images, so it loads only when its tab is asked for (?tab=compare).
   const [attention, evalPage, cost, stageCost, chunks, comparePage, links] = await Promise.all([
-    // M1 D40: a photo held on its own is no held product, and still needs its card.
-    evalMode || (digest && !batch.counts.attentionProducts && !digest.needsYou) ? Promise.resolve([]) : batchAttention(id),
+    // M1 D40: a photo held on its own is no held product, and still needs its card, also when its product has no link at all.
+    evalMode || (digest && !batch.counts.attentionProducts && !batch.counts.needsAttention) ? Promise.resolve([]) : batchAttention(id),
     evalMode ? evalOutputs(id, { page: Number(query.page ?? 0) || 0, ...evalFilters }) : Promise.resolve(null),
     // The overview's cost line and split (they read every output) and the Details tab's parts: not read while the
     // digest stands in for them, so the page reads the same few rows at any batch size (M1-S5 review P2-3).

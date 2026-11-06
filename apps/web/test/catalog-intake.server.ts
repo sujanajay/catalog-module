@@ -202,12 +202,12 @@ async function main() {
         const { autoDecideSnapshot } = await import("@catalog/core/catalog/auto-decide");
         const { EMPTY_BATCH_COUNTS } = schema;
         const db = workerDb as unknown as import("@catalog/core/db/client").Db;
-        const key = `HELD-${Date.now()}`, channels = ["noon"] as ("noon")[];
+        const key = `HELD-${Date.now()}`, channels = ["noon"] as ("noon")[], allHeld = url.searchParams.get("all") === "1";
         const [batch] = await db.insert(catalogBatches).values({ brandSlug: "test_brand", brandName: "Test Brand", name: `Held ${key}`, isTest: true, createdBy: OPERATOR, status: "done", channels, startedAt: new Date(), finishedAt: new Date(),
           options: { identifierMode: "filename", precedence: "uploads_then_links", sheetColumns: null, autoDecide: await autoDecideSnapshot(db) },
-          counts: { ...EMPTY_BATCH_COUNTS, products: 1, sources: 2, outputs: 2, verified: 1, needsAttention: 1, recheckOk: 1, recheckTotal: 1 } }).returning();
+          counts: { ...EMPTY_BATCH_COUNTS, products: 1, sources: 2, outputs: 2, verified: allHeld ? 0 : 1, needsAttention: allHeld ? 2 : 1, recheckOk: allHeld ? 0 : 1, recheckTotal: allHeld ? 0 : 1 } }).returning();
         const [product] = await db.insert(catalogProducts).values({ brandSlug: "test_brand", isTest: true, productKey: key, pathKey: key, identifier: key }).returning();
-        await db.insert(catalogBatchProducts).values({ batchId: batch!.id, productId: product!.id, change: "new" });
+        await db.insert(catalogBatchProducts).values({ batchId: batch!.id, productId: product!.id, change: allHeld ? "failed" : "new" });
         const jpeg = await (await import("sharp")).default({ create: { width: 40, height: 40, channels: 3, background: "#808080" } }).jpeg().toBuffer();
         for (const n of [1, 2]) {
           const rawUri = `gs://harness-private/catalog-test/test_brand/${batch!.id}/raw/${key}_${n}.jpg`, stagingUri = `gs://harness-private/catalog-test/test_brand/${batch!.id}/staged/${key}_${n}.jpg`;
@@ -216,7 +216,7 @@ async function main() {
           const [source] = await db.insert(catalogSourceImages).values({ batchId: batch!.id, productId: product!.id, n, sha256: `${key}-${n}`, rawUri, originalName: `${key}_${n}.jpg`, mime: "image/jpeg", width: 40, height: 40 }).returning();
           const objectPath = `catalog-test/test_brand/${key}/noon/${key}_${n}.jpg`;
           await db.insert(catalogOutputs).values({ batchId: batch!.id, productId: product!.id, sourceImageId: source!.id, n, channel: "noon", canvasW: 1080, canvasH: 1480, scale: 1, placedX: 0, placedY: 0, renderKey: `${key}-${n}`, objectPath, publicUrl: `${ORIGIN}/harness/obj/harness-public/${objectPath}`, stagingUri, bytes: jpeg.length, crc32c: "x", quality: 90,
-            ...(n === 1 ? { status: "verified" as const, isLive: true, generation: 1, publishedAt: new Date() }
+            ...(n === 1 && !allHeld ? { status: "verified" as const, isLive: true, generation: 1, publishedAt: new Date() }
               : { status: "needs_attention" as const, flags: ["text_or_watermark" as const], reason: "The image still shows text, a watermark or a logo overlay. Marketplaces reject these.", compliance: { ok: true, failures: [], auto_decide: { rule: "visible_defect:*", cause: "visible_defect", action: "hold" } } as never }) });
         }
         const { digest } = await buildDigest(db, { batch: { id: batch!.id, channels, status: "done", startedAt: batch!.startedAt, updatedAt: batch!.updatedAt }, sheet: { channels, rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null } });

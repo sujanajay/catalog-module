@@ -23,8 +23,8 @@ const RECUT_DROPS_FLAGS = new Set<OutputFlag>(["provisional", "auto_dropped", "l
 /**
  * What one re-cut did. `recutting`: a chunk is queued. `busy`: another batch holds the product, a draft is about to take it,
  * or work on it is still open in this batch (a chunk, a re-cut already sent, an improvement), so nothing is touched and a
- * second send changes nothing. `superseded`: a later batch's image is live at this photo's link, so this batch no longer owns
- * it. `not_done`: the batch is still running or stopped. `nothing_to_recut`: no delivered or held slot, or a person decided it.
+ * second send changes nothing. `superseded`: a later batch published this product, so nothing is touched: a re-cut only works in
+ * the product's last publisher, and never changes what a later batch delivered. `not_done`: the batch is still running or stopped. `nothing_to_recut`: no delivered or held slot, or a person decided it.
  */
 export type RecutOutcome = "recutting" | "busy" | "superseded" | "not_done" | "nothing_to_recut";
 export interface RecutResult { outcome: RecutOutcome; chunkId?: string; outputs?: number; /** Per photo, when the product was looked at. */ photos?: Record<string, RecutOutcome> }
@@ -51,14 +51,15 @@ export async function recutPhotos(db: Db, input: { batchId: string; sourceImageI
     const [product] = await tx.select().from(catalogProducts).where(eq(catalogProducts.id, productId)).for("update");
     if (!product) return { outcome: "nothing_to_recut" as const };
     if (product.lockBatchId && product.lockBatchId !== batchId) return { outcome: "busy" as const };
+    // A later batch published this product: refused before anything is written, however often it is sent.
+    if (product.lastBatchId && product.lastBatchId !== batchId) return { outcome: "superseded" as const, photos: Object.fromEntries(sources.map(s => [s.id, "superseded" as const])) };
     const [waiting] = rowsOf(await tx.execute(sql`SELECT ${awaitingStart(sql`${product.id}::uuid`)} AS w`));
     if (waiting?.w === true) return { outcome: "busy" as const };
     const [openChunk] = await tx.select({ id: catalogChunks.id }).from(catalogChunks).where(and(eq(catalogChunks.batchId, batchId), sql`${catalogChunks.productIds} @> jsonb_build_array(${productId}::text)`, notInArray(catalogChunks.status, ["done", "failed"]))).limit(1);
     const [running] = await tx.select({ id: catalogImprovements.sourceImageId }).from(catalogImprovements).where(and(eq(catalogImprovements.batchId, batchId), eq(catalogImprovements.productId, productId), isNotNull(catalogImprovements.previous))).limit(1);
     const rows = await tx.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batchId), eq(catalogOutputs.productId, productId))).orderBy(catalogOutputs.id).for("update");
     if (openChunk || running || rows.some(o => o.status === "pending")) return { outcome: "busy" as const };
-    // Who owns a link is read from the live rows, not the product's last batch: a later batch that left this photo unchanged
-    // is the last publisher too, and the image at the link is still this batch's.
+    // Who owns a link is read from the live rows: a photo this last publisher left unchanged is still live under an earlier batch.
     const elsewhere = await tx.select({ channel: catalogOutputs.channel, n: catalogOutputs.n }).from(catalogOutputs).where(and(eq(catalogOutputs.productId, productId), eq(catalogOutputs.isLive, true), sql`${catalogOutputs.batchId} <> ${batchId}`));
     const taken = (o: Output) => elsewhere.some(l => l.channel === o.channel && l.n === o.n);
     const photos: Record<string, RecutOutcome> = {}, outputs: Output[] = [];
