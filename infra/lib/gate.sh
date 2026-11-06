@@ -335,20 +335,33 @@ gate_prepare() {
 
 # gate_probe: step 3, the probe of the candidate gate_prepare deployed (SVC_* and GATE_* as it left them). On a pass
 # sets GATE_NEEDS_SHIFT=1 when the registry moves traffic (SVC_SHIFT=1).
+# gate_probe_lines: prints the probe's output as it comes. A probe that used its allowance of unexplained 502s
+# (Unexplained502s in services/matting/tests/cloudrun_check.py) also goes on DEPLOY_NOTES_FILE for the deploy report,
+# because the deploy can pass after it and nobody reads the job log of a passing gate.
+gate_probe_lines() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '    probe | %s\n' "$line"
+    case "$line" in
+      "unexplained 502s: "[1-9]*) if [ -n "${DEPLOY_NOTES_FILE:-}" ]; then printf '%s: %s\n' "$SVC_NAME" "$line" >> "$DEPLOY_NOTES_FILE"; fi ;;
+    esac
+  done
+}
+
 gate_probe() {
   local status started
   echo "==> $SVC_NAME: probe $GATE_REVISION at $GATE_TAG_URL (at most ${SVC_PROBE_TIMEOUT} s)"
   started=$SECONDS
   status=0
   # The probe's output streams as it runs (the worker's smoke takes minutes) and stays above the verdict.
-  # pipefail (restored on return by `local -`) so the probe's exit status, not sed's, decides.
+  # pipefail (restored on return by `local -`) so the probe's exit status, not gate_probe_lines', decides.
   local -; set -o pipefail
   # GATE_SERVICE names the service to the probe (the matting probes run as their own job, catalog-check-<service>,
   # so probes that run at once never share a job). On the timeout every process of the probe gets TERM; timeout
   # returns 124 as soon as its direct child (bash services.sh) exits, while the nested check-matting.sh runs its TERM
-  # trap and cancels its job execution (gcloud_job_run) on its own, sed keeping the pipe open until it is done. KILL
+  # trap and cancels its job execution (gcloud_job_run) on its own, gate_probe_lines keeping the pipe open until it is done. KILL
   # (60 s later) reaches only a probe that is still the direct child.
-  GATE_SERVICE="$SVC_NAME" timeout --kill-after=60 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | sed 's/^/    probe | /' || status=${PIPESTATUS[0]}
+  GATE_SERVICE="$SVC_NAME" timeout --kill-after=60 "$SVC_PROBE_TIMEOUT" "${SVC_PROBE[@]}" "$GATE_TAG_URL" 2>&1 | gate_probe_lines || status=${PIPESTATUS[0]}
   if [ "$status" != 0 ]; then
     if [ "$status" = 124 ] || [ "$status" = 137 ]; then
       echo "ERROR: $SVC_NAME: probe of $GATE_REVISION timed out after ${SVC_PROBE_TIMEOUT} s; traffic was not changed" >&2
