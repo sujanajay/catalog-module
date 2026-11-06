@@ -889,7 +889,7 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:"test/judge",qaModelSecond:"test/second",threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
   const real=await sharp({create:{width:64,height:64,channels:3,background:"white"}}).jpeg().toBuffer();
   for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real});
-  const publicFetch=w.deps.fetch,models:string[]=[],readerModels:string[]=[];
+  const publicFetch=w.deps.fetch,models:string[]=[];
   const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model==="test/second" ? second():limited();});
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
   w.deps.classifyProductType=classifyProductType;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
