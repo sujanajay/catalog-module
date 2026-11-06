@@ -1022,7 +1022,7 @@ export function cutSupport(p: Pick<Prepared, "width" | "height" | "rgb">, alpha:
   return { unsupportedShare: outline ? unsupported / outline : 0, longestRun: longest / Math.max(w, h) };
 }
 
-/** Two cut-outs agree when, of the pixels either keeps (alpha over 128), this share is kept by both. Measured on the same 19 photos: 0.985 to 1.000 for a bria and a birefnet cut-out. */
+/** Two cut-outs agree when, of the pixels either keeps (alpha over 128), this share is kept by both. Measured on the same 19 photos: 0.991 to 1.000 for a bria and a birefnet cut-out. */
 export const AGREEMENT_IOU_MIN = 0.98;
 /** An agreed cut-out keeps at least this share of the frame: a logo or a clasp two models both keep is not the product. The 19 photos keep at least 19%. */
 export const AGREEMENT_KEPT_MIN_SHARE = 0.12;
