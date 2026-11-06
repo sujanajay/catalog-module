@@ -18,8 +18,8 @@ const at = (minutes: number) => new Date(+T0 + minutes * 60_000);
 async function batch(fields: { status: string; startedAt?: Date | null; finishedAt?: Date | null; updatedAt?: Date; isTest?: boolean; createdAt?: Date; counts?: Record<string, unknown>; error?: string | null }): Promise<string> {
   const id = randomUUID();
   await db.execute(sql`
-    INSERT INTO catalog_batches (id, brand_slug, brand_name, name, status, is_test, created_by, counts, error, created_at, started_at, finished_at, updated_at)
-    VALUES (${id}, 'uspa', 'USPA', ${`batch ${id.slice(0, 4)}`}, ${fields.status}, ${fields.isTest ?? false}, 'op@opptra.com',
+    INSERT INTO catalog_batches (id, brand_slug, brand_name, name, status, is_test, created_by, channels, counts, error, created_at, started_at, finished_at, updated_at)
+    VALUES (${id}, 'uspa', 'USPA', ${`batch ${id.slice(0, 4)}`}, ${fields.status}, ${fields.isTest ?? false}, 'op@opptra.com', '["noon"]'::jsonb,
       ${JSON.stringify(fields.counts ?? {})}::jsonb, ${fields.error ?? null},
       ${(fields.createdAt ?? fields.startedAt ?? T0).toISOString()}::timestamptz,
       ${fields.startedAt === undefined ? T0.toISOString() : fields.startedAt?.toISOString() ?? null}::timestamptz,
@@ -33,8 +33,8 @@ async function output(batchId: string, publishedAt: Date | null): Promise<{ prod
   await db.execute(sql`INSERT INTO catalog_products (id, brand_slug, is_test, product_key, path_key, identifier) VALUES (${productId}, 'uspa', false, ${key.toUpperCase()}, ${key}, ${key})`);
   await db.execute(sql`INSERT INTO catalog_batch_products (batch_id, product_id, change) VALUES (${batchId}, ${productId}, 'new')`);
   await db.execute(sql`INSERT INTO catalog_source_images (id, batch_id, product_id, n, sha256, original_name, raw_uri, mime) VALUES (${sourceId}, ${batchId}, ${productId}, 1, ${key}, 'x.jpg', 'gs://a/x.jpg', 'image/jpeg')`);
-  await db.execute(sql`INSERT INTO catalog_outputs (id, batch_id, product_id, source_image_id, channel, n, canvas_w, canvas_h, scale, placed_x, placed_y, render_key, object_path, public_url, status, published_at)
-    VALUES (${outputId}, ${batchId}, ${productId}, ${sourceId}, 'noon', 1, 1, 1, 1, 0, 0, 'k', 'catalog-test/x.jpg', 'https://x/catalog-test/x.jpg', 'verified', ${publishedAt?.toISOString() ?? null}::timestamptz)`);
+  await db.execute(sql`INSERT INTO catalog_outputs (id, batch_id, product_id, source_image_id, channel, n, canvas_w, canvas_h, scale, placed_x, placed_y, render_key, object_path, public_url, status, is_live, published_at)
+    VALUES (${outputId}, ${batchId}, ${productId}, ${sourceId}, 'noon', 1, 1, 1, 1, 0, 0, 'k', 'catalog-test/x.jpg', 'https://x/catalog-test/x.jpg', 'verified', ${publishedAt !== null}, ${publishedAt?.toISOString() ?? null}::timestamptz)`);
   return { productId, sourceId, outputId };
 }
 
@@ -222,5 +222,39 @@ describe("outcomes", () => {
     expect(await recordTouch(db, { action: "decision", outputId: o.outputId }, at(31))).toBe(true);
     expect(await recordTouch(db, { action: "decision", outputId: randomUUID() }, at(31))).toBe(false);
     expect(await rows(sql`SELECT batch_id, output_id, action FROM catalog_batch_touches`)).toEqual([{ batch_id: b, output_id: o.outputId, action: "decision" }]);
+  });
+});
+
+describe("an outcome is honest about what was left out (R1 exit 2 findings 1 and 5)", () => {
+
+  it("is not a success when grouping left products out, and counts them in the products total", async () => {
+    const id = await batch({ status: "done", finishedAt: at(30), counts: { productsLeftOut: 91 } });
+    await output(id, at(5));
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "products_left_out", products: 92, productsWithLinks: 1 });
+  });
+
+  it("a person stepping in stays the first cause", async () => {
+    const id = await batch({ status: "done", finishedAt: at(30), counts: { productsLeftOut: 1 } });
+    await output(id, at(5));
+    await recordTouch(db, { action: "retry_photo", batchId: id }, at(10));
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "touched" });
+  });
+
+  it("is not a success when an upload could not be read at all", async () => {
+    const id = await batch({ status: "done", finishedAt: at(30) });
+    await output(id, at(5));
+    await db.execute(sql`INSERT INTO catalog_uploads (batch_id, kind, name, status, error) VALUES (${id}, 'zip', 'a.zip', 'failed', 'The zip a.zip was not found in storage.')`);
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "products_left_out", products: 1 });
+  });
+
+  it("counts unchanged products that keep their earlier live links, as the digest does, and not a list row without photos", async () => {
+    const first = await batch({ status: "done", finishedAt: at(10) });
+    const { productId } = await output(first, at(5));
+    const next = await batch({ status: "done", finishedAt: at(30), startedAt: at(20) });
+    await db.execute(sql`INSERT INTO catalog_batch_products (batch_id, product_id, change) VALUES (${next}, ${productId}, 'unchanged')`);
+    await output(next, at(25));
+    const noPhotos = await output(first, at(6));
+    await db.execute(sql`INSERT INTO catalog_batch_products (batch_id, product_id, change, link_status) VALUES (${next}, ${noPhotos.productId}, 'unchanged', 'missing_images')`);
+    expect(await recordBatchOutcome(db, next, at(31))).toMatchObject({ success: true, products: 3, productsWithLinks: 2 });
   });
 });

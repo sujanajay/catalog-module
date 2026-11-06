@@ -156,6 +156,10 @@ const fmt = (n: number) => n.toLocaleString("en");
  * when Styli still skipped photos for their size): the banner must
  * not hide them. Its count is only those Styli skips, never removed, replaced or size-chart skips.
  */
+/** What a finished batch says about the products grouping left out (counts.productsLeftOut). */
+export function productsLeftOutText(leftOut: number): string {
+  return `${num(leftOut)} ${plural(leftOut, "product was", "products were")} left out and ${plural(leftOut, "has", "have")} no links; the digest says why.`;
+}
 export function styliSkipText(skipped: number): string {
   return `${skipped} Styli ${plural(skipped, "image was", "images were")} not made because the ${plural(skipped, "photo is", "photos are")} too small for Styli even after enlargement (see the notes column).`;
 }
@@ -253,11 +257,12 @@ function derive(input: BatchStateInput): BatchState {
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
-    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${capped}` };
+    const leftOut = c.productsLeftOut ?? 0, leftOutNote = leftOut ? ` ${productsLeftOutText(leftOut)}` : "";
+    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${leftOutNote}${capped}` };
     const planned = c.outputs - c.skipped;
-    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: "Ready", listPill: "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${(input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
+    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: leftOut ? `Ready, ${num(leftOut)} left out` : "Ready", listPill: leftOut ? `Ready, ${num(leftOut)} ${plural(leftOut, "product", "products")} left out` : "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${leftOut ? `${productsLeftOutText(leftOut)}${(input.styliSkipped ?? 0) > 0 ? ` ${styliSkipText(input.styliSkipped!)}` : ""}` : (input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
     const bad = Math.max(planned - c.verified, (c.recheckTotal ?? planned) - (c.recheckOk ?? 0));
-    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.` };
+    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.${leftOutNote}` };
   }
   return result;
 }

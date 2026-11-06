@@ -10,6 +10,8 @@ import { autoDecideRecordOf } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
 import { batchCostFigure, type BatchCostFigure } from "./cost-report";
 import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
+import type { LeftOutProduct, LeftOutWhy } from "./ingest/types";
+import { normalizeKey } from "./naming";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
@@ -90,6 +92,16 @@ export function groupReasons(texts: readonly string[]): DigestReason[] {
   return [...counts].map(([text, count]) => ({ text, count })).sort((a, b) => b.count - a.count || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 }
 
+/** A product grouping left out whole: the short reason of its digest line and Exceptions group, and what would fix it. */
+const LEFT_OUT_PRODUCT: Record<LeftOutWhy, { text: string; fix: string }> = {
+  same_shot: { text: "two different photos have the same shot number", fix: "Keep the right photo for each shot number, then send this product in a new batch." },
+  no_shot_numbers: { text: "its photos have no shot numbers", fix: "Add shot numbers to the file names, then send this product in a new batch." },
+  same_product: { text: "two names for the same product", fix: "Keep one name, then send this product in a new batch." },
+  refused: { text: "its name cannot be used for image links", fix: "Rename the files, then send this product in a new batch." },
+  links: { text: "none of its links could be downloaded", fix: "Fix the links, then send this product in a new batch." },
+  unreadable: { text: "none of its photos could be read", fix: FIX_PRODUCT },
+};
+
 const channelOrder = (c: ChannelId | null) => (c ? CHANNEL_ORDER.indexOf(c) : -1);
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -99,6 +111,10 @@ export interface DigestInput {
   sheet: SheetSpec;
   /** Files that never became a photo of a product (buildReport's unsupportedFiles and linkFailures). */
   files: readonly unknown[];
+  /** Products grouping left out whole (buildReport's leftOutProducts): they have no product row, so the digest adds them. */
+  leftOutProducts?: readonly LeftOutProduct[];
+  /** Files that were copies of a photo the product already has (buildReport's sameFiles, as a count). */
+  sameFilesMerged?: number;
   cost: DigestCost;
 }
 
@@ -134,10 +150,14 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
   const hasLink = (identifier: string) => channels.some(c => (rowOf.get(identifier)?.links[c] ?? []).some(Boolean)) && rowOf.get(identifier)?.status !== "missing_images";
   const outputsOf = new Map<string, typeof outputs>();
   for (const o of outputs) { const list = outputsOf.get(o.productId); if (list) list.push(o); else outputsOf.set(o.productId, [o]); }
+  const leftOutProducts = input.leftOutProducts ?? [];
+  const leftOutKeys = new Set(leftOutProducts.map(l => normalizeKey(l.identifier)));
 
   const exceptions: ExceptionRow[] = [], notes: NoteRow[] = [], leftOut: { key: string; reason: string }[] = [];
   let needsYou = 0, unchanged = 0, controlsSkipped = 0, stayedAsSent = 0, completeEveryChannel = 0, productsWithLinks = 0;
   for (const pair of pairs) {
+    // A product list row whose files were all left out has a row of its own: its one exception is the left-out one below.
+    if (leftOutKeys.has(normalizeKey(pair.identifier))) continue;
     const mine = (outputsOf.get(pair.productId) ?? []).filter(o => channels.includes(o.channel));
     const withLinks = hasLink(pair.identifier);
     if (withLinks) productsWithLinks++;
@@ -194,9 +214,20 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     }
     if (withLinks && !productExceptions && !productNotes && channels.every(c => (rowOf.get(pair.identifier)?.links[c] ?? []).some(Boolean))) completeEveryChannel++;
   }
+  // Every product grouping left out, one row each. When its name was the problem, that row speaks for its files; when its
+  // files were, their own rows below say which one and why.
+  const speaksForFiles = new Set<string>();
+  for (const l of leftOutProducts) {
+    const { text, fix } = LEFT_OUT_PRODUCT[l.why];
+    exceptions.push({ identifier: l.identifier, channel: null, image: null, reason: l.reason, fix, group: `Product left out: ${text}` });
+    if (l.why === "links" || l.why === "unreadable") continue;
+    speaksForFiles.add(l.identifier);
+    for (const name of l.files) leftOut.push({ key: `left-out:${l.identifier}/${name}`, reason: text });
+  }
   // Files that never became a photo of a product (unreadable files, links that could not be opened).
   for (const file of input.files) {
     const f = (file ?? {}) as { name?: unknown; originalName?: unknown; identifier?: unknown; url?: unknown; reason?: unknown };
+    if (typeof f.identifier === "string" && speaksForFiles.has(f.identifier)) continue;
     const name = String(f.name ?? f.originalName ?? f.url ?? f.identifier ?? "file");
     const reason = typeof f.reason === "string" && f.reason ? f.reason : "This file could not be read.";
     exceptions.push({ identifier: name, channel: null, image: null, reason, fix: FIX_FILE, group: `File not used: ${shortReason(reason)}` });
@@ -215,8 +246,12 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
   const linksPerChannel = CHANNEL_ORDER.filter(c => channels.includes(c)).map(channel => ({ channel, links: input.sheet.rows.reduce((n, r) => n + (r.status === "missing_images" ? 0 : (r.links[channel] ?? []).filter(Boolean).length), 0) }));
   const digest: BatchDigest = {
     version: 1,
-    products: pairs.length,
+    // A left-out product with a product list row is in `pairs` already.
+    products: new Set([...pairs.map(p => normalizeKey(p.identifier)), ...leftOutKeys]).size,
     productsWithLinks,
+    productsLeftOut: leftOutProducts.length,
+    productsLeftOutReasons: groupReasons(leftOutProducts.map(l => LEFT_OUT_PRODUCT[l.why].text)),
+    sameFilesMerged: input.sameFilesMerged ?? 0,
     completeEveryChannel,
     linksPerChannel,
     provisionalLinks: notes.length,

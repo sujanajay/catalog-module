@@ -3,8 +3,15 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { parseShotName } from "../naming";
 import type { BatchOptions, IdentifierMode, Precedence } from "../types";
 import {
+  baseName,
+  duplicateShotMessage,
   groupItems,
+  leftOutProducts,
+  noIdentifierMessage,
+  noShotNumbersMessage,
+  olderSameProductMessage,
   originalOf,
+  sameProductMessage,
   previewRows,
   shotFlags,
   warningSentences,
@@ -346,5 +353,82 @@ describe("the same photos pairs (spec 14d F10)", () => {
     const one = { sha256: "a", identifiers: ["BAG-BLACK", "BAG-TAN"], name: "BAG_1.jpg" };
     expect(duplicatePhotosPair([one])).toEqual({ headline: "1 photo appears under two products.", detail: "BAG_1.jpg is in BAG-BLACK and BAG-TAN. Check the sheet before starting." });
     expect(duplicatePhotosPair([one, { ...one, sha256: "b" }, { ...one, sha256: "c" }])).toEqual({ headline: "3 photos appear under two products.", detail: "BAG_1.jpg is in BAG-BLACK and BAG-TAN; 2 more. Check the sheet before starting." });
+  });
+});
+
+describe("a clash on one shot number is judged by bytes (R1 exit 2 finding 1)", () => {
+  // The real shape: softlines/vero-moda holds each shot as both X_1.jpg and X_1.jpeg.
+  const shas = (byName: Record<string, string>) => (item: SourceItem) => byName[item.originalName];
+
+  it("keeps one file of X_1.jpg and X_1.jpeg with the same bytes, whatever order they come in, and says so", () => {
+    const items = ["10255347_Black/10255347_Black_1.jpg", "10255347_Black/10255347_Black_1.jpeg", "10255347_Black/10255347_Black_2.jpg", "10255347_Black/10255347_Black_2.jpeg"].map((p) => file(p));
+    const sha = shas({ [items[0]!.originalName]: "a", [items[1]!.originalName]: "a", [items[2]!.originalName]: "b", [items[3]!.originalName]: "b" });
+    const g = groupItems(items, opts(), undefined, sha);
+    expect(g.rejected).toEqual([]);
+    expect(g.products.get("10255347_Black")!.map((i) => [i.n, baseName(i)])).toEqual([[1, "10255347_Black_1.jpeg"], [2, "10255347_Black_2.jpeg"]]);
+    expect(g.products.get("10255347_Black")![0]!.warnings).toEqual(["10255347_Black_1.jpeg and 10255347_Black_1.jpg are the same photo, so one was used."]);
+    expect(g.sameFiles).toEqual([
+      { identifier: "10255347_Black", n: 1, kept: "10255347_Black/10255347_Black_1.jpeg", dropped: ["10255347_Black/10255347_Black_1.jpg"] },
+      { identifier: "10255347_Black", n: 2, kept: "10255347_Black/10255347_Black_2.jpeg", dropped: ["10255347_Black/10255347_Black_2.jpg"] },
+    ]);
+    for (const seed of [1, 7, 42]) expect(groupItems(shuffle(items, seed), opts(), undefined, sha).products.get("10255347_Black")!.map(baseName)).toEqual(["10255347_Black_1.jpeg", "10255347_Black_2.jpeg"]);
+  });
+
+  it("still leaves the product out when the same names hold different bytes", () => {
+    const a = file("10288257_Chocolate-Torte_1.jpg"), b = file("10288257_Chocolate-Torte_1.jpeg"), other = file("10288257_Chocolate-Torte_2.jpg");
+    const g = groupItems([a, b, other], opts(), undefined, shas({ [a.originalName]: "a", [b.originalName]: "b", [other.originalName]: "c" }));
+    expect(g.products.size).toBe(0);
+    expect(g.sameFiles).toBeUndefined();
+    expect(g.rejected.map((r) => r.reason)).toEqual(Array(3).fill("Two files claim shot 1 of 10288257_Chocolate-Torte: 10288257_Chocolate-Torte_1.jpeg, 10288257_Chocolate-Torte_1.jpg. Rename one and re-upload."));
+  });
+
+  it("drops the copies but still refuses a third file with different bytes, and never merges when the bytes are not known", () => {
+    const a = file("M_1.jpg"), b = file("M_1.jpeg"), c = file("M-1.png");
+    const g = groupItems([a, b, c], opts(), undefined, shas({ [a.originalName]: "a", [b.originalName]: "a", [c.originalName]: "z" }));
+    expect(g.products.size).toBe(0);
+    expect(g.rejected[0]!.reason).toBe("Two files claim shot 1 of M: M_1.jpeg, M-1.png. Rename one and re-upload.");
+    expect(groupItems([a, b], opts(), undefined, () => null).products.size).toBe(0);
+    expect(groupItems([a, b], opts()).products.size).toBe(0);
+  });
+
+  it("treats files with no shot number, one stem and the same bytes as one file", () => {
+    const a = file("T.jpg"), b = file("T.jpeg");
+    const g = groupItems([a, b], opts(), undefined, () => "same");
+    expect(g.rejected).toEqual([]);
+    expect(g.products.get("T")!.map((i) => [i.n, baseName(i)])).toEqual([[1, "T.jpeg"]]);
+    expect(groupItems([a, b], opts(), undefined, (i) => i.originalName).products.size).toBe(0);
+  });
+});
+
+describe("leftOutProducts: every product grouping left out, for any reason", () => {
+  const row = (identifier: string, name: string, reason: string) => ({ identifier, name, reason });
+  const NOT_IMAGE = "notes.pdf is not an image.";
+
+  it("names each reason, and leaves out what is not a left-out product", () => {
+    const rejected = [
+      row("DUP", "DUP_1.jpg", duplicateShotMessage(1, "DUP", ["DUP_1.jpeg", "DUP_1.jpg"])), row("DUP", "DUP_1.jpeg", duplicateShotMessage(1, "DUP", ["DUP_1.jpeg", "DUP_1.jpg"])),
+      row("NONUM", "NONUM.jpg", noShotNumbersMessage("NONUM", ["NONUM.jpg", "NONUM.png"])),
+      row("TWO", "TWO_1.jpg", sameProductMessage(["TWO", "TWO-A"])),
+      row("BADNAME", "BADNAME_1.jpg", '"BADNAME" cannot be used in an image link. Rename it.'),
+      row("BMP", "BMP_1.bmp", unsupportedMessage("BMP_1.bmp", "BMP")),
+      row("OLD", "OLD_1.jpg", olderSameProductMessage("OLD", "NEW")),
+      row("notes", "notes.pdf", NOT_IMAGE),
+      row("", "1.jpg", noIdentifierMessage("1.jpg")),
+      row("KEPT", "KEPT_2.bmp", unsupportedMessage("KEPT_2.bmp", "BMP")),
+    ];
+    const left = leftOutProducts(rejected, ["kept", "NEW"]);
+    expect(left.map((l) => [l.identifier, l.why, l.photos])).toEqual([["BADNAME", "refused", 1], ["BMP", "unreadable", 1], ["DUP", "same_shot", 2], ["NONUM", "no_shot_numbers", 1], ["TWO", "same_product", 1]]);
+    expect(left.find((l) => l.identifier === "DUP")).toMatchObject({ files: ["DUP_1.jpg", "DUP_1.jpeg"], reason: duplicateShotMessage(1, "DUP", ["DUP_1.jpeg", "DUP_1.jpg"]) });
+  });
+
+  it("says links when every photo of the product was a link that could not be downloaded", () => {
+    const a1 = link("LNK", 1);
+    const g = groupItems([a1], opts(), new Map([[a1, `Row 2, column Image 1: ${(a1.bytes as { url: string }).url} did not return an image (got 404).`]]));
+    expect(leftOutProducts(g.rejected.map((r) => ({ identifier: r.item.identifier, name: r.item.originalName, reason: r.reason })), g.products.keys())).toMatchObject([{ identifier: "LNK", why: "links", photos: 1 }]);
+  });
+
+  it("gives the preview a sentence for products with no shot numbers, as it has for duplicate ones", () => {
+    const g = groupItems([file("T.jpg"), file("T.png")], opts());
+    expect(warningSentences(g, null, ["noon"])).toEqual([{ headline: "1 product has files with no shot numbers: T.", detail: "They are left out until the files are renamed; see the grouping table." }]);
   });
 });

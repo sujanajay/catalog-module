@@ -160,6 +160,11 @@ export interface BatchCounts {
   products: number; sources: number; outputs: number; verified: number; needsAttention: number;
   attentionProducts: number; failed: number; skipped: number; unchanged: number; skuResolved: number;
   missingImages: number; notInSheet: number; unsupportedFiles: number; duplicateFiles: number;
+  /**
+   * Products grouping left out whole (leftOutProducts): no link is made for them, the digest and the batch page say so,
+   * and the batch's outcome is not a success. Optional and not in EMPTY_BATCH_COUNTS (a new default would need a migration).
+   */
+  productsLeftOut?: number;
   collected: number; collectTotal: number | null; previewReady: boolean; latestExport: number;
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;

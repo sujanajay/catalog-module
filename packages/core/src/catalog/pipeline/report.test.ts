@@ -9,6 +9,12 @@ it("keeps rejected images without DB rows in the final report",async()=>{
   expect(result!.unsupportedFiles).toEqual([expect.objectContaining({name:"A.bmp",identifier:"A"})]);
   expect(result!.duplicates).toHaveLength(2);
 });
+it("lists the products left out in the ledger, reading a state stored before this field existed",async()=>{
+  const ledger={products:[{identifier:"OK",items:[]}],rejected:[{item:{item:{originalName:"B_1.jpg",identifier:"B"}},reason:"Two files claim shot 1 of B: B_1.jpg, B-1.jpg. Rename one and re-upload."},{item:{item:{originalName:"OK_2.bmp",identifier:"OK"}},reason:"OK_2.bmp is a BMP file. Save it as JPEG or PNG and add it again."}]};
+  const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))},"catalog/x/batch");
+  expect(result!.leftOutProducts).toMatchObject([{identifier:"B",why:"same_shot",photos:1,files:["B_1.jpg"]}]);
+  expect(result!.sameFiles).toEqual([]);
+});
 it("lists links that could not be downloaded apart from the unsupported files, as the counts do (spec 14b F5)",async()=>{
   const ledger={rejected:[{item:{item:{originalName:"A.bmp",identifier:"A"}},reason:"A.bmp is a BMP file. Save it as JPEG or PNG and add it again."},{item:{item:{originalName:"L_1.jpg",identifier:"L"}},reason:"Row 2, column 1: https://example.com/L_1.jpg did not return an image (got text/plain, HTTP 404)."}]};
   const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))},"catalog-test/anta/batch");

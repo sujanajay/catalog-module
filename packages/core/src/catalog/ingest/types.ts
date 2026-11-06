@@ -104,7 +104,17 @@ export interface GroupingResult {
   rejected: { item: SourceItem; reason: string }[];  // unsupported, corrupt, duplicate, no identifier
   warnings: string[];                                // batch-level sentences for the step 4 warning list
   roots?: InputRoot[];                               // per-root grouping (M1-F1-R2): each input root and its mode
+  sameFiles?: SameFile[];                            // files that were copies of a photo the product already has
 }
+
+/** A shot that came as two or more files with the same bytes (X_1.jpg and X_1.jpeg): one is used, the rest are named here. */
+export interface SameFile { identifier: string; n: number | null; kept: string; dropped: string[] }
+
+/** Why grouping left a whole product out. */
+export type LeftOutWhy = "same_shot" | "no_shot_numbers" | "same_product" | "refused" | "links" | "unreadable";
+
+/** A product the batch was given that no link is made for, because grouping left every one of its files out. */
+export interface LeftOutProduct { identifier: string; why: LeftOutWhy; reason: string; photos: number; files: string[] }
 
 export interface DetectedStep2 {
   identifierMode: { detected: IdentifierMode; options: IdentifierMode[]; examples: { identifier: string; label: string; thumbs: string[] }[] };

@@ -11,10 +11,15 @@ export interface DigestReason {
 export interface BatchDigest {
   /** Bumped when the shape changes; a page reading an older version still shows the fields it knows. */
   version: 1;
-  /** Products in the batch. */
+  /** Products in the batch, those grouping left out included. */
   products: number;
   /** Products with at least one link in the sheet on the batch's channels. */
   productsWithLinks: number;
+  /** Products grouping left out whole, with their reasons, most common first. Older stored digests have none. */
+  productsLeftOut?: number;
+  productsLeftOutReasons?: DigestReason[];
+  /** Files that were copies of a photo the product already has, so one was used. Older stored digests have none. */
+  sameFilesMerged?: number;
   /** Products with links on every channel of the batch, nothing left out and nothing sent with a note. */
   completeEveryChannel: number;
   /** Links in the sheet per channel, in channel order. */

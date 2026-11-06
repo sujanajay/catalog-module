@@ -107,6 +107,7 @@ describe("Ops reliability card (M6-F3-R5)", () => {
     expect(successRateLine({ days: 7, successes: 99, counted: 100, rate: 0.99 }, 0.99)).toBe("Last 7 days: 99% (99 of 100 batches)");
     expect(successRateText({ successes: 1, counted: 1, rate: 1 })).toBe("100% (1 of 1 batch)");
     // Review 2 P3-A: a quick cancel after Start is not "never started".
+    expect(outcomeText({ success: false, cause: "products_left_out", isTest: false, excluded: false })).toBe("Products were left out");
     expect(outcomeText({ success: false, cause: "cancelled", isTest: false, excluded: true, started: true })).toBe("Cancelled; cancelled right after Start, not counted");
     expect(outcomeText({ success: false, cause: "cancelled", isTest: false, excluded: true, started: false })).toBe("Cancelled; never started, not counted");
     expect(incidentDurationText({ startedAt: ago(10), resolvedAt: null })).toBe("still open");

@@ -1,6 +1,6 @@
 import type { BatchDigest } from "@catalog/core/catalog/digest-types";
 import { channel } from "@catalog/core/catalog/channels";
-import { digestCostLine, digestHeadline, digestReasonLines, digestTiles, digestTimeLine } from "@catalog/core/catalog/digest-copy";
+import { digestCostLine, digestHeadline, digestLeftOutLine, digestReasonLines, digestTiles, digestTimeLine } from "@catalog/core/catalog/digest-copy";
 import LocalTime from "../LocalTime";
 
 /**
@@ -9,12 +9,13 @@ import LocalTime from "../LocalTime";
  */
 export default function DigestTab({ id, digest: d, sheets, onNeedsYou }: { id: string; digest: BatchDigest; sheets: { xlsx: boolean; exceptions: boolean; notes: boolean }; onNeedsYou?: string }) {
   const reasons = digestReasonLines(d);
-  const cost = digestCostLine(d), time = digestTimeLine(d);
+  const cost = digestCostLine(d), time = digestTimeLine(d), leftOut = digestLeftOutLine(d);
   const perChannel = d.linksPerChannel.filter(c => c.links > 0).map(c => `${channel(c.channel).label} ${c.links.toLocaleString("en-US")}`).join(", ");
   return (
     <div className="digest">
       {d.cancelledAt && <p className="lead">Cancelled at <LocalTime at={d.cancelledAt} />. This covers what was sent before that.</p>}
       <p className="headline">{digestHeadline(d)}</p>
+      {leftOut && <div className="warning" role="alert"><p>{leftOut}</p></div>}
       <div className="kpis">
         {digestTiles(d).map(t => (
           <div key={t.label} className={`kpi ${t.label === "Need you" && d.needsYou ? "w" : ""}`}>

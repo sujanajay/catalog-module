@@ -19,7 +19,7 @@ export default function BatchBanner({status, counts, source, updatedAt, startedA
   const at = now ? new Date(now) : new Date();
   const derived = deriveBatchState({status, counts, source, updatedAt, startedAt, now: at, styliSkipped});
   // A batch finished with "Use as is" decisions is Ready, but not every image passed every check.
-  const state = derived.state === "ready" && keptPhotos > 0 ? {...derived, text: readyText(counts.outputs - counts.skipped, keptPhotos, styliSkipped)}
+  const state = derived.state === "ready" && keptPhotos > 0 ? {...derived, text: readyText(counts.outputs - counts.skipped, keptPhotos, styliSkipped, counts.productsLeftOut ?? 0)}
     // A draft whose grouping is ready says so and points at the button.
     : derived.state === "draft" && counts.previewReady ? {...derived, text: DRAFT_READY_TEXT}
     : derived.state === "collecting" && !derived.stalled ? {...derived, text: collectingBannerText(counts, source ?? "upload", at)} : derived;

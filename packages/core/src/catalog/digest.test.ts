@@ -11,7 +11,7 @@ import { batchCostFigure } from "./cost-report";
 import { buildReport } from "./pipeline/report";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
 import { buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
-import { digestCostLine, digestEmail, digestHeadline, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
+import { digestCostLine, digestEmail, digestHeadline, digestLeftOutLine, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
 let db: Db, close: () => Promise<void>, batchId = "";
@@ -46,6 +46,46 @@ async function parts(files: unknown[] = []) {
   expect(fromRows).toEqual(await buildDigest(db, input));
   return { built, ...fromRows };
 }
+
+describe("products grouping left out (R1 exit 2 finding 1)", () => {
+  const sameShot = { identifier: "10255347_Black", why: "same_shot" as const, reason: "Two files claim shot 1 of 10255347_Black: 10255347_Black_1.jpeg, 10255347_Black_1.jpg. Rename one and re-upload.", photos: 2, files: ["10255347_Black_1.jpeg", "10255347_Black_1.jpg"] };
+  const links = { identifier: "LNK", why: "links" as const, reason: "Row 2, Image 1: the link answered 404.", photos: 1, files: ["LNK_1.jpg"] };
+  const digestOf = async (leftOutProducts: Parameters<typeof digestFrom>[0]["leftOutProducts"], files: unknown[] = [], sameFilesMerged = 0) => {
+    const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
+    return digestFrom({ batch: built.batch, sheet: built.sheet, files, cost, leftOutProducts, sameFilesMerged, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+  };
+
+  it("counts them in the total and gives each an Exceptions row with its reason and what to do, so All N can never be said", async () => {
+    const { digest, exceptions } = await digestOf([sameShot, links], [{ name: sameShot.files[0], identifier: sameShot.identifier, reason: sameShot.reason }, { name: "LNK_1.jpg", identifier: "LNK", reason: links.reason }]);
+    expect(digest).toMatchObject({ products: 8, productsWithLinks: 5, productsLeftOut: 2, productsLeftOutReasons: [{ text: "none of its links could be downloaded", count: 1 }, { text: "two different photos have the same shot number", count: 1 }] });
+    expect(exceptions.filter(e => e.identifier === sameShot.identifier)).toEqual([{ identifier: sameShot.identifier, channel: null, image: null, reason: sameShot.reason, fix: "Keep the right photo for each shot number, then send this product in a new batch.", group: "Product left out: two different photos have the same shot number" }]);
+    // A link failure keeps its own file row beside the product's: it says which link.
+    expect(exceptions.filter(e => e.identifier === "LNK").map(e => e.group)).toEqual(["Product left out: none of its links could be downloaded"]);
+    expect(exceptions.some(e => e.identifier === "LNK_1.jpg")).toBe(true);
+    expect(digest.photosLeftOut).toBe(2 + 1 + 1);
+    expect(digestHeadline(digest)).toBe("5 of 8 products have links. 2 do not; the Exceptions sheet says why. 1 needs you.");
+    expect(digestLeftOutLine(digest)).toBe("2 products were left out and have no links: none of its links could be downloaded (1), two different photos have the same shot number (1). The Exceptions sheet names each one and what to do.");
+  });
+
+  it("says All N only when nothing was left out, in the headline, the tile and the email", () => {
+    const whole = digest({ products: 3, productsWithLinks: 3 });
+    expect(digestHeadline(whole)).toBe("All 3 products have links.");
+    expect(digestLeftOutLine(whole)).toBeNull();
+    const left = digest({ products: 477, productsWithLinks: 386, productsLeftOut: 91, productsLeftOutReasons: [{ text: "two different photos have the same shot number", count: 91 }] });
+    expect(digestHeadline(left)).toBe("386 of 477 products have links. 91 do not; the Exceptions sheet says why.");
+    expect(digestTiles(left).find(t => t.label === "Need you")!.meaning).not.toBe("Nothing needs you.");
+    const mail = digestEmail({ name: "Lot", url: "u" }, left);
+    expect(mail.subject).toBe("Lot: links are ready for 386 of 477 products. 91 products were left out.");
+    expect(mail.text).toContain("91 products were left out and have no links: two different photos have the same shot number (91).");
+  });
+
+  it("counts a left-out product with a product list row once, and says when copies of a photo were dropped", async () => {
+    const { digest, exceptions } = await digestOf([{ ...sameShot, identifier: id(1) }], [], 276);
+    expect(digest).toMatchObject({ products: 6, productsLeftOut: 1, sameFilesMerged: 276 });
+    expect(exceptions.filter(e => e.identifier === id(1))).toHaveLength(1);
+    expect(digestReasonLines(digest).lines).toContain("276 files were copies of a photo already in the batch, so one of each was used.");
+  });
+});
 
 describe("buildDigest (M1-F4-R1 to R4)", () => {
   it("counts each kind once: links, notes, left-out photos, controls, held products and unreadable files", async () => {

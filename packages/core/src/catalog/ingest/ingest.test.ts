@@ -28,6 +28,7 @@ import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, I
 import { linkFailuresBlock } from "./detect-step";
 import { lockForInputChange } from "./input-change";
 import { sourceProducerRefsOf } from "../../graph/write-path";
+import { readIngestReport } from "../pipeline/report";
 import { groupingSentence } from "./roots";
 import { linkFailuresOf } from "./link-failures";
 import { manifestPath, type UploadManifest } from "./manifest";
@@ -1782,4 +1783,36 @@ describe("links shared by many rows (all sizes of a colour share the same photos
     expect(Object.values(x.manifest().results).every((r) => r.ok)).toBe(true);
     expect((await uploadRow(x.uploadId)).status).toBe("collected");
   });
+});
+
+describe("a real folder with each shot stored twice (R1 exit 2 finding 1)", () => {
+  it("makes one photo of X_1.jpg and X_1.jpeg with the same bytes, reading each file once; different bytes leave the product out, on the record", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("same-bytes");
+    const [one, two, a, b] = [await jpeg(), await jpeg(), await jpeg(), await jpeg()];
+    const files = { "10255347_Black/10255347_Black_1.jpg": one!, "10255347_Black/10255347_Black_1.jpeg": one!, "10255347_Black/10255347_Black_2.jpg": two!, "10255347_Black/10255347_Black_2.jpeg": two!, "10288257_Choc/10288257_Choc_1.jpg": a!, "10288257_Choc/10288257_Choc_1.jpeg": b! };
+    await folderUpload(w, batch, files);
+    const outcomes = await ingestAll(w, batch);
+    expect(outcomes.at(-1)).toBe("preview ready: 1 products, 2 photos");
+    // The grouping reads no bytes of its own: every file was downloaded once, to hash it.
+    const prefix = `gs://${BUCKET}/${prefixOf(batch)}/uploads/`;
+    const downloads = w.calls.downloads.filter((d) => d.startsWith(prefix) && d.endsWith("_1.jpg"));
+    expect(new Set(downloads).size).toBe(downloads.length);
+
+    const done = await batchRow(batch.id);
+    expect(done.counts).toMatchObject({ products: 1, sources: 2, duplicateFiles: 2, productsLeftOut: 1 });
+    expect((await sourcesOf(batch.id)).map((s) => [s.n, s.originalName]).sort()).toEqual([[1, "10255347_Black/10255347_Black_1.jpeg"], [2, "10255347_Black/10255347_Black_2.jpeg"]]);
+
+    const report = await readIngestReport({ ...w.storage, getBucketName: () => BUCKET } as never, prefixOf(batch));
+    expect(report!.leftOutProducts).toEqual([{
+      identifier: "10288257_Choc", why: "same_shot", photos: 2, files: ["10288257_Choc/10288257_Choc_1.jpeg", "10288257_Choc/10288257_Choc_1.jpg"],
+      reason: "Two files claim shot 1 of 10288257_Choc: 10288257_Choc_1.jpeg, 10288257_Choc_1.jpg. Rename one and re-upload.",
+    }]);
+    expect(report!.sameFiles).toHaveLength(2);
+
+    const preview = await buildPreview(db, batch.id, { storage: w.storage });
+    expect(preview.kpis.products).toBe(1);
+    expect(preview.rows.find((r) => r.identifier === "10255347_Black")).toMatchObject({ status: "ok", shots: 2, notes: expect.arrayContaining(["10255347_Black_1.jpeg and 10255347_Black_1.jpg are the same photo, so one was used."]) });
+    expect(preview.rows.find((r) => r.identifier === "10288257_Choc")).toMatchObject({ status: "duplicate shot" });
+  }, 120_000);
 });
