@@ -20,7 +20,10 @@ export const QA_DEFAULT_FLOOR = 60;
 export const QA_DIMENSIONS = ["complete_product", "same_product", "edge_quality", "background_clean", "no_text_or_watermark", "orientation_ok", "product_intact"] as const;
 export type QaDimension = typeof QA_DIMENSIONS[number];
 export type QaScores = Record<QaDimension, number> & { overall: number };
-/** Dimensions that describe the source photo (image 1): they apply to every channel of that photo. */
+/**
+ * Dimensions that apply to every channel of a photo, so one look decides them. They describe the source photo (image 1), except
+ * `no_text_or_watermark` (M1 D40): the judge reads it on image 2, because only a mark that is still there matters.
+ */
 export const PHOTO_DIMENSIONS = ["complete_product", "same_product", "no_text_or_watermark", "orientation_ok"] as const satisfies readonly QaDimension[];
 /** Dimensions that describe our rendered output (image 2 against image 1): judged per channel. */
 export const OUTPUT_DIMENSIONS = ["product_intact", "edge_quality", "background_clean"] as const satisfies readonly QaDimension[];

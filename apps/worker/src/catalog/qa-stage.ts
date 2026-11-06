@@ -8,7 +8,7 @@ import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DI
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
 import { actionsOn, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
-import { flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
+import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
 import { recordCostEvent, type CostEventInput } from "@catalog/core/cost-events";
 import { qaCallCost } from "@catalog/core/catalog/cost";
@@ -306,6 +306,15 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
   await deps.repairOwnDefects(candidates.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})),{deps,batch,policy,productId,underClaim});
   outputs=await read();
  }
+ await decideOutputs(deps,batch,productId,underClaim,outputs);
+ // M1 D39: image 1 held on every channel and another photo passed: that photo becomes image 1 and the held photo, at its
+ // new number, is decided again (with enough good photos left it is simply left out, and nobody has to look at it).
+ if(!autoDecideOf(batch.options)) return;
+ const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
+ if(product && await promoteOverHeldPhoto(deps,{batch,product,policy,underClaim})) await decideOutputs(deps,batch,productId,underClaim,await read());
+}
+/** Triage and the auto-decide rules over one product's outputs, as read. */
+async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,outputs:Output[]):Promise<void> {
  const sources=await deps.db.select({id:catalogSourceImages.id,n:catalogSourceImages.n,replacesId:catalogSourceImages.replacesId}).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId,batch.id),eq(catalogSourceImages.productId,productId)));
  const replaced=new Set(sources.flatMap(s=>s.replacesId ? [s.replacesId]:[]));
  const shots=new Set(sources.filter(s=>!replaced.has(s.id)).map(s=>s.n));
@@ -313,7 +322,7 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
  const keptLive=live.filter(l=>shots.has(l.n) && !outputs.some(o=>o.channel===l.channel && o.n===l.n && o.decision!=="replaced"));
  const current=outputs.filter(o=>!replaced.has(o.sourceImageId));
  const decisions=triageProduct(current,keptLive);
- // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional) or drop; none waits.
+ // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional), drop or, rarely, a photo held for a person (M1 D39); the batch never waits.
  const auto=autoDecideOf(batch.options);
  await underClaim(async tx=>{
   for(const o of current) {
@@ -335,11 +344,14 @@ export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,
     const d=autoDecide(auto,cause,o);
     // A failed source has no flag to name it; its read error is the reason.
     const problem=why ?? (o.status==="failed" ? o.reason:null);
+    // M1 D39: `hold` keeps the image staged but unpublished, so a person can still "Use as is"; the batch does not wait.
     patch=d.action==="deliver"
      ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
-     : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
+     : d.action==="hold"
+      ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem)}
+      : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
     patch.compliance={...(o.compliance ?? {}),auto_decide:autoDecideRecord(cause,d)};
-    if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":"drop",holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
+    if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":d.action,holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
     await tx.update(catalogOutputs).set({...patch,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
     continue;
    }

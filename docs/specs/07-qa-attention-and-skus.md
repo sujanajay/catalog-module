@@ -120,9 +120,8 @@ that cannot see the other angles). The judge now works like this:
   the `view` first (front, side, back, sole, top, inside, detail, on-model, flat), is told that other
   angles, soles, insides, close-ups and on-model shots of the same item are expected, and answers
   `wrong_item` true only for a clearly different item (another category, or a colourway or design
-  no angle explains), false when unsure. It scores `complete_product`, `no_text_or_watermark`,
-  `orientation_ok` and `is_collage` on image 1 and `edge_quality`, `background_clean` on image 2
-  against image 1, with one `evidence` sentence per failing check. Placement is not asked; code
+  no angle explains), false when unsure. It scores `complete_product`, `orientation_ok` and `is_collage` on image 1 and `edge_quality`, `background_clean` and (M1 D40)
+  `no_text_or_watermark` on image 2 against image 1, with one `evidence` sentence per failing check. Placement is not asked; code
   checks it exactly (05). Reply keys: `view`, `wrong_item`, the five scores, `is_collage`, `evidence`.
 - Verdict (`judge.ts`): every dimension against its own line from the policy, no mean
   (`dimensionThresholds`: output dimensions use `threshold`, photo dimensions and `same_product`
@@ -337,7 +336,7 @@ Each flag has a bold "why" sentence and a "what to do" line. `<k>` is the number
 | `different_product` | "This photo does not match photo 1 of the same identifier." | "If the file was named wrongly, remove it; the rest of the product is unaffected." |
 | `halo` | "The edge of the product looks rough or shows a halo, often white on white." | "Compare the two images. The product itself is never redrawn; only the background changes. "Use as is" keeps it." |
 | `leftover_background` | "Some of the original background is still visible around the product." | "Compare the two images. "Use as is" keeps it; "Replace photo <n>" swaps the photo." |
-| `text_or_watermark` | "The photo carries text, a watermark or a logo overlay. Marketplaces reject these." | "Remove it, or replace it with a clean photo." |
+| `text_or_watermark` (read on image 2 since M1 D40) | "The image still shows text, a watermark or a logo overlay. Marketplaces reject these." | "Remove it, or replace it with a clean photo." |
 | `collage` | "This image combines several photos in one. Marketplaces reject these." | "Remove it, or replace it with the single photos." |
 | `leftover_background`, code-detected (matte stage, busy background) | "The background could not be removed from this photo." | "Use it as is, replace it, or remove it." |
 | `orientation` | "The product looks rotated or upside down." | "If the original is like this, replace it with a corrected photo." |

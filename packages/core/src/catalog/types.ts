@@ -27,13 +27,15 @@ export const OUTPUT_FLAGS = [
   "not_added",
 ] as const;
 /** Why the QA triage would hold an output for a person (qa/triage.ts `HoldCause`). */
-export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged"] as const;
+export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged","visible_defect"] as const;
 /**
  * M1-F3-R1: what an auto-decide rule does with an output the triage would hold. `deliver`: the staged image is
  * published now, flagged `provisional` (only when it exists and passes the channel's hard rules; otherwise the slot is
- * dropped). `drop`: the photo gets no link on that channel and the rest of the set is delivered. Nothing waits for a person.
+ * dropped). `drop`: the photo gets no link on that channel and the rest of the set is delivered. `hold` (owner, 2026-11-06,
+ * M1 D39): the rare last resort. The photo gets no link and waits for a person, while the rest of the set is delivered and
+ * the batch finishes; nothing else waits for it.
  */
-export const AUTO_DECIDE_ACTIONS = ["deliver","drop"] as const;
+export const AUTO_DECIDE_ACTIONS = ["deliver","drop","hold"] as const;
 /** `catalog_auto_decide_rules.channel`: one channel, or `*` for every channel. */
 export const AUTO_DECIDE_CHANNELS = ["*",...CHANNEL_IDS] as const;
 /**
@@ -52,7 +54,7 @@ export const EVENT_KINDS = ["created","overwritten","shots_removed","channel_add
   "sku_ids_added","alias_added","removed_photo","replacement_uploaded","restored","removed",
   // Spec 18 enlargement lifecycle (migration 0006): an operator "Try again" on a failed enlargement, and an operator
   // "Use as is" that accepted plain (not enlarged) outputs after the warning.
-  "enlargement_retried","plain_accepted"] as const;
+  "enlargement_retried","plain_accepted","photo_recut"] as const;
 export const ROLES = ["admin","operator","viewer"] as const;
 
 export type ChannelId = (typeof CHANNEL_IDS)[number];

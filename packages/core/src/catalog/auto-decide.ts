@@ -1,7 +1,8 @@
 // M1-F3 auto-decide (M1-S3, docs/program/requirements/M1-intake.md): what happens to an output the QA triage would
-// hold for a person. Each hold cause maps to `deliver` (published now, flagged `provisional`) or `drop` (no link for
-// that photo on that channel; the rest of the set is delivered), read from `catalog_auto_decide_rules` at Start and
-// kept on the batch (options.autoDecide), so nothing waits for a person and no product becomes `pending_attention`.
+// hold for a person. Each hold cause maps to `deliver` (published now, flagged `provisional`), `drop` (no link for
+// that photo on that channel; the rest of the set is delivered) or, the rare last resort, `hold` (M1 D39: no link for that
+// photo until a person decides; the rest of the set is delivered), read from `catalog_auto_decide_rules` at Start and
+// kept on the batch (options.autoDecide). No product becomes `pending_attention` and no batch waits for a person.
 import { asc, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogAutoDecideRules } from "../db/schema";
@@ -11,14 +12,15 @@ export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
 export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
 
 /**
- * The M1-F3-R1 defaults (and migration 0014's seed rows). Deliver: our own defect after the repair loop, a busy
- * background, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or capped), an encoder
- * fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage (several photos in
- * one is not a product photo for a marketplace; integration decision D7).
+ * The M1-F3-R1 defaults (migration 0014's seed rows, changed by 0028). Hold (M1 D39, owner 2026-11-06): a photo that
+ * could not be cut out, and a defect a shopper would see that the repair loop could not remove. Deliver: a non-visible
+ * problem after the repair loop, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or
+ * capped), an encoder fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage
+ * (several photos in one is not a product photo for a marketplace; integration decision D7).
  */
 export const DEFAULT_AUTO_DECIDE_ACTIONS: Readonly<Record<HoldCause, AutoDecideAction>> = {
-  not_publishable: "deliver", unusable: "deliver", photo_one: "deliver", every_photo: "deliver", unchecked: "deliver",
-  code_fault: "deliver", not_enlarged: "deliver", corrupt: "drop", wrong_item: "drop", collage: "drop",
+  not_publishable: "deliver", unusable: "hold", photo_one: "deliver", every_photo: "deliver", unchecked: "deliver",
+  code_fault: "deliver", not_enlarged: "deliver", corrupt: "drop", wrong_item: "drop", collage: "drop", visible_defect: "hold",
 };
 export const DEFAULT_AUTO_DECIDE_RULES: readonly AutoDecideRule[] = HOLD_CAUSES.map(cause => ({ id: `${cause}:*`, cause, channel: "*", action: DEFAULT_AUTO_DECIDE_ACTIONS[cause] }));
 
@@ -34,7 +36,7 @@ export function autoDecideOf(options: Pick<BatchOptions, "autoDecide"> | null | 
   return value && typeof value === "object" && Array.isArray(value.rules) ? value : null;
 }
 
-/** The channel's own rule, else the `*` rule, else the built-in default (a rule missing from the table never holds). */
+/** The channel's own rule, else the `*` rule, else the built-in default. */
 export function ruleFor(snapshot: AutoDecideSnapshot, cause: HoldCause, channel: ChannelId): AutoDecideRule {
   return snapshot.rules.find(r => r.cause === cause && r.channel === channel)
     ?? snapshot.rules.find(r => r.cause === cause && r.channel === "*")
@@ -54,12 +56,12 @@ export function deliverable(o: AutoDecideTarget): boolean {
 export interface AutoDecision {
   action: AutoDecideAction;
   rule: AutoDecideRule;
-  /** The rule said deliver but there is nothing deliverable, so the slot is dropped with its reason. */
+  /** The rule said deliver or hold but there is nothing deliverable, so the slot is dropped with its reason. */
   fellBack: boolean;
 }
 export function autoDecide(snapshot: AutoDecideSnapshot, cause: HoldCause, o: AutoDecideTarget & { channel: ChannelId }): AutoDecision {
   const rule = ruleFor(snapshot, cause, o.channel);
-  if (rule.action === "deliver" && !deliverable(o)) return { action: "drop", rule, fellBack: true };
+  if (rule.action !== "drop" && !deliverable(o)) return { action: "drop", rule, fellBack: true };
   return { action: rule.action, rule, fellBack: false };
 }
 
@@ -73,9 +75,17 @@ export function autoDecideRecordOf(compliance: unknown): AutoDecideRecord | null
   return r && typeof r === "object" && typeof (r as AutoDecideRecord).rule === "string" ? r as AutoDecideRecord : null;
 }
 
+/** What a person can do with a held photo (M1 D39). */
+export const HOLD_SENTENCE = "It has no link yet and the product's other photos are delivered. Replace it, use it as it is, or remove it.";
+/** An output an auto-decide rule held for a person: no link, and the product and the batch go on without it (M1 D39). */
+export function heldForPerson(o: { status: string; decision?: string | null; compliance: unknown }): boolean {
+  return o.status === "needs_attention" && !o.decision && autoDecideRecordOf(o.compliance)?.action === "hold";
+}
+
 /** The operator sentence of an auto decision: the problem first (when known), then what was done. Model-free. */
 export function autoDecideNote(action: AutoDecideAction, why: string | null): string {
   const lead = why ? `${why.trim()}${/[.!?]$/.test(why.trim()) ? "" : "."} ` : "";
+  if (action === "hold") return `${lead}${HOLD_SENTENCE}`;
   return action === "deliver"
     ? `${lead}${PROVISIONAL_SENTENCE}`
     : `${lead}Left out automatically; this photo gets no link here and the product's other photos are delivered.`;

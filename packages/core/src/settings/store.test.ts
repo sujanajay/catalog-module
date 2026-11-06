@@ -63,7 +63,7 @@ describe("changeSetting", () => {
     expect((await refused(changeSetting(db, { key: "intake.start_countdown_seconds", value: 2.5 }, ADMIN))).status).toBe(400);
     expect((await refused(changeSetting(db, { key: UPSCALE_MIN_SCALE_KEY, value: 1.25 }, ADMIN))).message).toBe("Enlarge with the quality pass above: use steps of 0.1.");
     expect((await refused(changeSetting(db, { key: "intake.auto_start", value: "yes" }, ADMIN))).status).toBe(400);
-    expect((await refused(changeSetting(db, { key: "intake.auto_decide.corrupt", value: "hold" }, ADMIN))).status).toBe(400);
+    expect((await refused(changeSetting(db, { key: "intake.auto_decide.corrupt", value: "pause" }, ADMIN))).status).toBe(400);
     expect((await refused(changeSetting(db, { key: "nothing.here", value: 1 }, ADMIN))).status).toBe(404);
     expect((await refused(changeSetting(db, { key: "intake.start_countdown_seconds", scope: { channel: "noon" }, value: 3 }, ADMIN))).message).toBe("Countdown before a batch starts cannot be set for one channel.");
     expect((await refused(changeSetting(db, { key: "intake.auto_start", scope: { brand: "nobody" }, value: false }, ADMIN))).message).toBe("There is no brand called nobody.");
@@ -76,8 +76,8 @@ describe("changeSetting", () => {
     const key = "intake.auto_decide.unusable";
     await changeSetting(db, { key, scope: { channel: "noon" }, value: "drop" }, ADMIN);
     expect(await currentValue(db, key, { channel: "noon" })).toBe("drop");
-    expect(await currentValue(db, key, { channel: "namshi" })).toBe("deliver");
-    expect(await currentValue(db, key)).toBe("deliver");
+    expect(await currentValue(db, key, { channel: "namshi" })).toBe("hold");
+    expect(await currentValue(db, key)).toBe("hold");
     // A category value covers the nodes under it; a brand value beats a category value (unit check on the cascade).
     const versions = [
       { id: "a", key: "k", scope: { category: "fashion.footwear" }, version: 1, value: 1 },

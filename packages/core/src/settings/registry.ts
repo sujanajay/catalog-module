@@ -58,17 +58,17 @@ export interface SettingDef {
  * M12 doc). Kept equal to `HOLD_CAUSES` in catalog/types.ts once M1-S3 merges; a test then checks they match.
  */
 export const AUTO_DECIDE_CAUSES = [
-  "not_publishable", "unusable", "photo_one", "every_photo", "unchecked", "code_fault", "not_enlarged", "corrupt", "wrong_item", "collage",
+  "not_publishable", "unusable", "photo_one", "every_photo", "unchecked", "code_fault", "not_enlarged", "corrupt", "wrong_item", "collage", "visible_defect",
 ] as const;
 export type AutoDecideCause = (typeof AUTO_DECIDE_CAUSES)[number];
 /** The M1-F3-R1 defaults, as in M1-S3's seed rows. */
-export const AUTO_DECIDE_DEFAULTS: Readonly<Record<AutoDecideCause, "deliver" | "drop">> = {
-  not_publishable: "deliver", unusable: "deliver", photo_one: "deliver", every_photo: "deliver", unchecked: "deliver",
-  code_fault: "deliver", not_enlarged: "deliver", corrupt: "drop", wrong_item: "drop", collage: "drop",
+export const AUTO_DECIDE_DEFAULTS: Readonly<Record<AutoDecideCause, "deliver" | "drop" | "hold">> = {
+  not_publishable: "deliver", unusable: "hold", photo_one: "deliver", every_photo: "deliver", unchecked: "deliver",
+  code_fault: "deliver", not_enlarged: "deliver", corrupt: "drop", wrong_item: "drop", collage: "drop", visible_defect: "hold",
 };
 const AUTO_DECIDE_WHEN: Readonly<Record<AutoDecideCause, string>> = {
   not_publishable: "When an image still breaks a channel rule after the repair tries",
-  unusable: "When the brand photo has a busy background",
+  unusable: "When the photo could not be cut out cleanly",
   photo_one: "When the first image of a product has a problem",
   every_photo: "When every image of a channel has a problem",
   unchecked: "When the quality check could not run",
@@ -77,10 +77,12 @@ const AUTO_DECIDE_WHEN: Readonly<Record<AutoDecideCause, string>> = {
   corrupt: "When the brand photo file is broken",
   wrong_item: "When the image shows a different item",
   collage: "When the photo holds several photos in one",
+  visible_defect: "When an image still shows a visible problem after the repair tries",
 };
 const AUTO_DECIDE_CHOICES = [
   { value: "deliver", label: "Send the best image now" },
   { value: "drop", label: "Leave this photo out" },
+  { value: "hold", label: "Keep this photo back for a person" },
 ] as const;
 
 /** The owner allow-list key (integration decision D2): Sujan's account until roles arrive with M12-F4. */

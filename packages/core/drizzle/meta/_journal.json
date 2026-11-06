@@ -197,6 +197,13 @@
       "when": 1793908131114,
       "tag": "0027_route_drill",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793952653869,
+      "tag": "0028_auto_decide_hold",
+      "breakpoints": true
     }
   ]
 }

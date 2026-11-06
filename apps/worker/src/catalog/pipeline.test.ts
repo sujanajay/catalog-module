@@ -142,7 +142,7 @@ it("M12-S1: every image a batch makes records the batch's settings version set, 
   expect(outputsA.length).toBe(2);expect(outputsB.length).toBe(1);
   expect(outputsA.map(o=>o.settingsSnapshotId)).toEqual([snapA.id,snapA.id]);
   expect(outputsB.map(o=>o.settingsSnapshotId)).toEqual([snapB.id]);
-  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("deliver");
+  expect(settingFrom((await loadSettingsSnapshot(db,outputsA[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("hold");
   expect(settingFrom((await loadSettingsSnapshot(db,outputsB[0]!.settingsSnapshotId!))!,key,{channel:"noon"})).toBe("drop");
 },60_000);
 it("M6-S6: a finalized batch writes its outcome row: success with no touch or incident, then touched after a decision and a re-finalize",async()=>{const w=world(),s=await seed(w,"outcome");await run(w,s);expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const first=(await db.execute(sql`SELECT status,success,cause,touches,incidents,products,products_with_links,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(first).toMatchObject([{status:"done",success:true,cause:null,touches:0,incidents:0,products:1,products_with_links:1}]);await db.execute(sql`INSERT INTO catalog_batch_touches (batch_id, action) VALUES (${s.batch.id}, 'decision')`);await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const again=(await db.execute(sql`SELECT success,cause,touches,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(again).toMatchObject([{success:false,cause:"touched",touches:1}]);expect(String(again[0]!.links_ready_at)).toBe(String(first[0]!.links_ready_at));},60_000);
@@ -569,7 +569,7 @@ it("spec07 v2 placement never comes from the judge, and a photo flag applies to 
  expect(t.deps.judgeOutput).toHaveBeenCalledTimes(1);
  const outputs=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,text.batch.id));
  expect(outputs.map(o=>o.channel).sort()).toEqual(["amazon","noon"]);
- for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"photo_one",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
+ for(const o of outputs) {expect(o.flags).toContain("text_or_watermark");expect(o).toMatchObject({status:"needs_attention",qaScores:{autoAction:"hold",holdCause:"visible_defect",evidence:{text_or_watermark:{sentence:"A price sticker sits on the box.",model:"test/judge"}}}});}
 },60_000);
 it("spec07 v2 an output defect on one channel re-checks the photo's other channels and applies the strictest result",async()=>{
  const w=world(),s=await seed(w,"qa-v2-recheck",{shots:["a","b","c","d"],channels:["noon","amazon"]});

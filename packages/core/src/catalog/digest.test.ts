@@ -241,3 +241,17 @@ describe("R1 exit item 4: the digest cost", () => {
     expect(await batchCostFigure(db, batchId)).toEqual({ usd: 1, products: n, usdPerProduct: 1 / n, basis: "true" });
   });
 });
+
+describe("a photo held for a person (M1 D39)", () => {
+  it("counts the product once under Needs you and lists each channel as an Exceptions row with the fix", async () => {
+    const { batchId: held } = await seedLargeBatch(db, { products: 2, photosPerProduct: 2, channels: ["noon", "namshi"], status: "done" });
+    await db.execute(sql`UPDATE catalog_outputs o SET status = 'needs_attention', is_live = false, reason = 'The image still shows text, a watermark or a logo overlay. Marketplaces reject these.', compliance = '{"auto_decide":{"rule":"visible_defect:*","cause":"visible_defect","action":"hold"}}'::jsonb FROM catalog_products p WHERE p.id = o.product_id AND o.batch_id = ${held} AND o.n = 2 AND p.identifier = (SELECT min(p2.identifier) FROM catalog_products p2 JOIN catalog_outputs o2 ON o2.product_id = p2.id WHERE o2.batch_id = ${held})`);
+    const built = await buildReport(db, held, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
+    const digest = await buildDigest(db, { batch: built.batch, sheet: built.sheet, files: [], cost });
+    expect(digest.digest.needsYou).toBe(1);
+    const rows = digest.exceptions.filter(e => e.group.startsWith("Waiting for you"));
+    expect(rows.map(r => r.channel).sort()).toEqual(["namshi", "noon"]);
+    expect(rows[0]).toMatchObject({ image: 2, fix: expect.stringContaining("replace the photo") });
+    expect(JSON.stringify(rows)).not.toMatch(/birefnet|bria/);
+  }, 120_000);
+});

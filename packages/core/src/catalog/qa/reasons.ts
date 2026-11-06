@@ -52,7 +52,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     matte_passthrough:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
     chart_image:["This photo is a size chart or a text-only image, so it was left out of the marketplace images.","Nothing to do."],
     leftover_background:["Some of the original background is still visible around the product.",`Compare the two images. "Use as is" keeps it; "Replace photo ${n}" swaps the photo.`],
-    text_or_watermark:["The photo carries text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],
+    text_or_watermark:["The image still shows text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],
     orientation:["The product looks rotated or upside down.","If the original is like this, replace it with a corrected photo."],
     placement:[placementWhy(ctx.channel),`Check the other angles of this product. This affects ${ctx.channel ?? "this marketplace"} only; "Remove this photo" removes it for ${ctx.channel ?? "this marketplace"}, "Replace photo ${n}" swaps the photo.`],

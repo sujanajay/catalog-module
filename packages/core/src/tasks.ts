@@ -44,6 +44,8 @@ export const TASK_ROUTES = [
   "/tasks/catalog/auto-start",
   // M1-S4: one try to improve a provisional plain render (apps/worker/src/catalog/improve.ts), sent by the sweep.
   "/tasks/catalog/improve",
+  // M1 D41: cut one delivered photo out again after the matte guard changed (apps/worker/src/catalog/recut.ts), sent by an admin job.
+  "/tasks/catalog/recut",
 ] as const;
 
 export type TaskRoute = (typeof TASK_ROUTES)[number];

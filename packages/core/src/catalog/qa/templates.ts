@@ -5,7 +5,8 @@
  * of a multipack or a size chart of the same listing is never mistaken for a different product.
  * Placement is not asked: code checks it exactly (05). The JSON keys are the ones `judge.ts` reads.
  * `product_intact` (flag `product_removed`) compares how much of the product image 2 still shows;
- * `background_clean` needs a sentence that says where the leftover is.
+ * `background_clean` needs a sentence that says where the leftover is. `no_text_or_watermark` (M1 D40) is read on image 2:
+ * a mark the cut-out removed with the background is no problem, and one that stays is a defect of the delivered image.
  */
 export const CATALOG_QA_TEMPLATE = `You check one product photo for an online catalogue.
 Image 1 is the source photo the brand supplied. Image 2 is the output we rendered from image 1 for <channel>: the product pixels were copied from image 1, never redrawn; only the background, size and position changed. Image 3, when present, is photo 1 of the same product id, for reference only. The product type is <productType>.
@@ -20,10 +21,10 @@ Work in this order.
 Return true only when image 1 clearly shows a different item: another category of product (for example a bag under a shoe listing), or a clearly different design that no angle, multipack, colour or close-up explains. Return false when you are unsure or when there is no image 3.
 3. Score image 1, the photo itself, from 0 to 100, where 100 means no problem:
 complete_product: no part of the product is cut off by the frame edge of image 1. A detail close-up, or an on-model shot that crops the model but shows the product, scores 100.
-no_text_or_watermark: no added text, logo overlay, watermark or price tag, including small AI-tool marks such as a sparkle or star icon in a corner. Brand names, labels and prints that are part of the product itself score 100. A chart view scores 100 here; it is handled separately.
 orientation_ok: the product is upright as a shopper expects for this view.
 is_collage: true only when image 1 combines several separate photos in one frame.
 4. Score image 2 against image 1, from 0 to 100:
+no_text_or_watermark: image 2 itself shows no added text, logo overlay, watermark or price tag, including small AI-tool marks such as a sparkle or star icon, on the product or on the background. A mark in image 1 that is gone from image 2 scores 100. Brand names, labels and prints that are part of the product itself score 100. A chart view scores 100 here; it is handled separately.
 product_intact: image 2 still shows all of the product that image 1 shows. Score below 40 when the cut-out removed a substantial part of the product: missing fabric, missing body of a bag or shoe, a missing sleeve, leg or strap, holes through the product, or only a logo, label, zip or piece of hardware left floating where the product was. A logo or label on its own is not the product. When image 1 is a close-up filled edge to edge by the product, image 2 must still show that whole area of product. The model's skin and hair in an on-model photo count as kept.
 edge_quality: clean edges, no halo, no eroded fringe, and no small parts of the product missing compared with image 1, such as straps, laces, mesh or hair.
 background_clean: only the flat background colour remains around the product, with at most a soft natural shadow under it; no leftover scene, props, blocks or stray shadow patches. Score below 75 only when you can point to the leftover: say where it is in image 2.

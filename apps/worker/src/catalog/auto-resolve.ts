@@ -1,11 +1,13 @@
 import sharp from "sharp";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
-import { batchPrefix, stagingPath } from "@catalog/core/catalog/naming";
+import { batchPrefix, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { imageAsset, recordOutputVersion } from "@catalog/core/graph/write-path";
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
+import { heldForPerson } from "@catalog/core/catalog/auto-decide";
+import { catalogSlotPatch, pickPromotion } from "@catalog/core/catalog/promote";
 import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
-import { strictestChannel } from "@catalog/core/catalog/qa/policy";
+import { shadowSynthesisAllowed, strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
@@ -313,6 +315,63 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
   // Nothing is resolved: `complete_product` stays as the photo's note; only the placement changes.
   for (const o of input.outputs) await writeRender(deps,{...input,trigger:[]},o,renders.get(o.id)!,[action],{sourceFlags:source.flags,qaScores:o.qaScores,variant:variantOf(o.compliance)});
   return action;
+}
+
+/**
+ * M1-F3-R1, M1 D39: image 1 is held on every channel and another photo of the product passed. The two photos change places:
+ * the best other photo showing the whole product (pickPromotion) becomes image 1 and the held photo takes its number, so a
+ * listing never leads with a gap. Both are rendered again at their new numbers (image 1 has its own canvas colour on some
+ * channels), and nothing changes unless every render passes. Staged in a folder of their own (a public copy needs the staged file to carry the public name), so a stop part way leaves the
+ * rows and their staged images as they were. Returns true when the photos changed places.
+ */
+export async function promoteOverHeldPhoto(deps: CatalogDeps, input: { batch: Batch; product: Product; policy: ResolvedPolicy; underClaim: UnderClaim }): Promise<boolean> {
+  const { batch, product, underClaim } = input, trace = { batchId: batch.id, productId: product.id };
+  if (batch.options.append === true) return false;
+  const outputs = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId, batch.id), eq(catalogOutputs.productId, product.id)));
+  const sources = await deps.db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, batch.id), eq(catalogSourceImages.productId, product.id)));
+  const live = await deps.db.select({ channel: catalogOutputs.channel, n: catalogOutputs.n }).from(catalogOutputs).where(and(eq(catalogOutputs.productId, product.id), eq(catalogOutputs.isLive, true)));
+  const pick = pickPromotion({ channels: batch.channels, sources, outputs, live, held: heldForPerson });
+  if (!pick) return false;
+  const { from, to } = pick, route = await routeContext(deps, batch), rules = await deps.channelRules(batch.rulesetVersion), prefix = batchPrefix(batch.brandSlug, batch.id, batch.isTest);
+  const made: { o: Output; source: Source; n: number; r: RenderOutput; jpeg: Buffer; variant: RenderVariant }[] = [];
+  for (const [source, n] of [[from, to.n], [to, from.n]] as const) {
+    const photo = outputs.filter(o => o.sourceImageId === source.id && o.status !== "skipped");
+    try {
+      const prepared = await preparePrimed(deps, { batch, source, underClaim }, trace);
+      const matte = await storedMatte(deps, source, prepared, input.policy.matteModel);
+      if (!matte) return false;
+      const shadowAllowed = shadowSynthesisAllowed(product.productType, source.flags) && !heldInHand(prepared, matte.alpha).held;
+      for (const o of photo) {
+        await underClaim(async()=>{});
+        const variant = variantOf(o.compliance);
+        const r = (await deps.renderAllChannels(prepared, matte, [o.channel], { shotNumber: n, productType: product.productType ?? "other", identifier: product.identifier, publicObjectPath: publicObjectPath(batch.brandSlug, product.pathKey, o.channel, n, batch.isTest), ...rowContext(o), ...variantOptions(variant, shadowAllowed), ...route, trace }))[o.channel];
+        if (!ok(r)) { deps.log("catalog image 1 not replaced", { batchId: batch.id, productId: product.id, channel: o.channel, codes: codes(r) }); return false; }
+        made.push({ o, source, n, r, jpeg: r.jpeg, variant });
+      }
+    } catch (error) {
+      if (error instanceof EnlargementNotReadyError) return false;
+      throw error;
+    }
+  }
+  const staged: { path: string; uri: string; crc32c: string | null; asset: Awaited<ReturnType<typeof imageAsset>> }[] = [];
+  for (const m of made) {
+    const path = stagingPath(`${prefix}.promoted`, product.pathKey, m.o.channel, m.n), uri = deps.storage.toGsUri(deps.storage.getBucketName(), path);
+    await underClaim(async()=>deps.storage.uploadBuffer(path, m.jpeg, "image/jpeg", { cacheControl: deps.storage.PUBLIC_CACHE_CONTROL }));
+    staged.push({ path, uri, crc32c: (await deps.storage.headObject(uri)).crc32c ?? null, asset: await imageAsset(m.jpeg, uri, "image/jpeg") });
+  }
+  const action: AutoAction = { step: "photo_promoted", trigger: [], result: "passed", channels: [...new Set(made.map(m => m.o.channel))], rejudged: false, detail: `image ${from.n} held; photo ${to.n} took its place` };
+  await underClaim(async tx => {
+    await tx.update(catalogSourceImages).set({ n: to.n }).where(eq(catalogSourceImages.id, from.id));
+    await tx.update(catalogSourceImages).set({ n: from.n }).where(eq(catalogSourceImages.id, to.id));
+    for (const [i, m] of made.entries()) {
+      const s = staged[i]!, objectPath = publicObjectPath(batch.brandSlug, product.pathKey, m.o.channel, m.n, batch.isTest);
+      const output = { ...m.o, n: m.n, objectPath }, source = { ...m.source, n: m.n };
+      const key = rerenderedKey(output, m.r.upscale?.model, () => renderKey({ sourceSha256: m.source.sha256, channel: m.o.channel, n: m.n, policyKey: `default|${input.policy.matteModel}`, rulesVersion: rules.keyVersion(m.o.channel) }));
+      await tx.update(catalogOutputs).set({ ...catalogSlotPatch(m.o, m.r, { n: m.n, objectPath, publicUrl: publicUrl(deps.storage.getPublicBucketName(), objectPath), key, stagingUri: s.uri, crc32c: s.crc32c, variant: m.variant, action }), contentVersionId: await recordOutputVersion(tx, { output, source, product, batch, asset: s.asset }), updatedAt: deps.now() }).where(eq(catalogOutputs.id, m.o.id));
+    }
+  });
+  deps.log("catalog image 1 replaced", { batchId: batch.id, productId: product.id, heldPhoto: from.id, newImageOne: to.id });
+  return true;
 }
 
 /** Wrap a re-judge so a spending-limit stop ends the loop instead of failing the chunk. */

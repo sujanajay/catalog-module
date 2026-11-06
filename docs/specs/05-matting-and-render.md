@@ -449,7 +449,7 @@ time, before anything is rendered.
   `PASSTHROUGH_PRODUCT_LOSS_MAX`; eval run 3, Vero Moda Z40E29CD878FAA726501DZ shot 1: a white top on a
   229 grey wall, every matte rejected for a "kept background chunk" that was the top's own folds, and the
   pass-through tore the top and its sleeve; measured 51%), the product is the backdrop's own colour: no
-  pass-through is made and the photo is held as on a busy background (below), recorded
+  pass-through is made and the photo is held as on a busy background (below; since M1 D39 the agreement step runs first), recorded
   `matte_passthrough: failed` ("background matches the product"); the judge-triggered pass-through step
   is skipped for the same reason. Model
   steps are skipped when this delivery has no time left for a matting call; the pass-through always
@@ -507,11 +507,23 @@ time, before anything is rendered.
   leftover background; the step is recorded with trigger `leftover_background`, which is how
   `busyBackgroundHold` in auto-resolve.ts tells the two apart): rendered and staged as `needs_attention`,
   never re-made by the repair loop, a hard
-  hold in triage (07, hold cause `unusable`), card sentence "The background could not be removed from
+  hold in triage (07, hold cause `unusable`; since M1 D39 no link until a person decides, and left out instead when the channel keeps
+  two good photos), card sentence "The background could not be removed from
   this photo. Use it as is, replace it, or remove it." "Use as is" publishes the whole photo, fitted
   with the band note on each channel where a cut side does not sit flush (so the sheet's flush note
   leaves it out), never framed in the source's white strips. The judge-triggered pass-through step (07 auto-resolve) is skipped on a busy
   background ("busy background"), so the photo keeps `product_removed` and triage drops or holds it.
+- Agreement (M1 D39, owner 2026-11-06): the guard judges a matte against an estimate made from the source pixels, and on pale
+  garments, shadows and scenery that estimate is wrong: 18 of 18 ladder-exhausted photos of Vero Moda batch 84a5a30a were false
+  rejections (.runs/2026-11-06-r1-defect-diagnosis.md). After the ladder and before the pass-through, apparel only (no hand
+  rule), step `matte_agreement` keeps the first matte when two models of different families agree (`matteFamily`: birefnet
+  models share their mistakes; a padded matte is no second opinion), with these vetoes against an agreed wrong cut (`matteAgreement`, constants beside it): the frame is not frame-filling, IoU at least 0.98, at least 12% of the frame
+  kept, at least 90% of the kept pixels solid, and the cut follows an edge in the photo (`unsupportedCut`). When the policy's two do not
+  agree, or are one family, one more model is asked (`third`, `thirdOpinionModel`), and a third that passes the guard by itself wins.
+  What these vetoes cannot stop: a wrong cut along real edges in the photo that two families both make (`matte-agreement.test.ts`
+  pins this; on the 8 real controls the families never shared such a cut). Its render leaves the source shadow out
+  (`AGREED_VARIANT`), because floor inside such a cut-out reads as shadow (ZB58D59DC3872166C12DCZ shot 3). The judge still
+  looks at the result and its repair ladder still applies.
 - The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
   auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
 - No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):

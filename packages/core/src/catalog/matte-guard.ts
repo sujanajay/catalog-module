@@ -519,7 +519,10 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
     const background = passthroughBackground(p, region, surfaces);
     for (let i = 0; i < solid.length; i++) solid[i] = background[i] ? 0 : 1;
     // Keep the large product components only (no floating fragments).
-    const { labels, sizes } = components(solid, w, h), largest = Math.max(0, ...sizes.slice(1));
+    // A loop, not Math.max(...sizes): a 5334 x 7112 photo has more components than the call stack holds arguments.
+    const { labels, sizes } = components(solid, w, h);
+    let largest = 0;
+    for (let l = 1; l < sizes.length; l++) if (sizes[l]! > largest) largest = sizes[l]!;
     for (let i = 0; i < solid.length; i++) if (solid[i] && sizes[labels[i]!]! < largest * PASSTHROUGH_KEEP_SHARE) solid[i] = 0;
     // Fill holes: background not connected to the frame edge through background becomes product.
     const outside = new Uint8Array(w * h), queue = new Int32Array(w * h);
@@ -532,6 +535,13 @@ export function passthroughMatte(p: Pick<Prepared, "width" | "height" | "rgb">, 
       for (const j of [x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1, y + 1 < h ? i + w : -1]) if (j >= 0) seed(j);
     }
     for (let i = 0; i < solid.length; i++) if (!outside[i]) solid[i] = 1;
+    // The second line (M1 D39, 5715909336543 and 5715907782472 shot 1): filling holes restores backdrop seen through a
+    // gap, and the flood stops at a thin line the backdrop crosses, so a white box stayed around the product. A pixel every
+    // matte tried dropped and that has the backdrop's colour is backdrop, wherever it lies.
+    if (tried.length) {
+      const color = borderBackground(p).color;
+      for (let i = 0; i < solid.length; i++) if (solid[i] && delta(p.rgb, i, color) <= BACKGROUND_CLUSTER_DELTA && tried.every(m => m.alpha[i]! <= GUARD_ALPHA_EDGE)) solid[i] = 0;
+    }
   }
   const alpha = softenEdge(solid, w, h);
   return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
@@ -948,10 +958,136 @@ export function recoverSoleStrip(p: Pick<Prepared, "width" | "height" | "rgb">, 
   return { alpha, changed, recovered };
 }
 
+/** Does a matte's outline follow an edge in the photo? The photo and matte are read at this long side, so the measure does not depend on the photo's size. */
+export const CUT_SUPPORT_LONG_SIDE = 800;
+/** Each outline pixel compares the mean colour of the kept and the dropped pixels within this many pixels (a 7 x 7 window). */
+export const CUT_SUPPORT_RADIUS = 3;
+/** An outline pixel is unsupported when no channel of those means differs by this much: the two sides are one surface. */
+export const CUT_SUPPORT_DELTA = 3;
+/**
+ * A cut with nothing in the photo to cut along, the one wrong cut two models can share without any other measure seeing it
+ * (a straight cut through skin or plain fabric, a wedge of wall kept with a white top). Rejected above either bar: this share
+ * of the outline unsupported, or one connected unsupported run this long, as a share of the photo's long side. Measured at
+ * 800 px on the real mattes of 19 false rejections of Vero Moda batch 84a5a30a: at most 5.3% and a run of 8% (Z83A7DA7F6815765CDF92Z
+ * shot 4, Z40E29CD878FAA726501DZ shot 1). On wrong mattes of the golden set: Penti Z91D419FC9238E844BF77Z shot 4 13.3% and 26%,
+ * French Connection candle Z15276411CE85C2E728DEZ shot 4 12.9% and 14%, Z281ABDF56606CCDC8E91Z shot 2 (hrsod) 11.0% and 20%.
+ */
+export const CUT_UNSUPPORTED_MAX_SHARE = 0.08;
+export const CUT_UNSUPPORTED_MAX_RUN = 0.1;
+export interface CutSupport { unsupportedShare: number; longestRun: number }
+/** How much of a matte's outline has no edge in the photo under it (see CUT_UNSUPPORTED_MAX_SHARE). */
+export function cutSupport(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer): CutSupport {
+  const f = Math.max(1, Math.ceil(Math.max(p.width, p.height) / CUT_SUPPORT_LONG_SIDE)), w = Math.floor(p.width / f), h = Math.floor(p.height / f), n = w * h;
+  const rgb = new Float32Array(n * 3), kept = new Uint8Array(n);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let a = 0, r = 0, g = 0, b = 0;
+    for (let yy = y * f; yy < (y + 1) * f; yy++) for (let xx = x * f; xx < (x + 1) * f; xx++) { const i = yy * p.width + xx; a += alpha[i]!; r += p.rgb[i * 3]!; g += p.rgb[i * 3 + 1]!; b += p.rgb[i * 3 + 2]!; }
+    const c = f * f, i = y * w + x;
+    kept[i] = a / c > 128 ? 1 : 0; rgb[i * 3] = r / c; rgb[i * 3 + 1] = g / c; rgb[i * 3 + 2] = b / c;
+  }
+  const weak = new Uint8Array(n);
+  let outline = 0, unsupported = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!kept[i] || !((x > 0 && !kept[i - 1]) || (x + 1 < w && !kept[i + 1]) || (y > 0 && !kept[i - w]) || (y + 1 < h && !kept[i + w]))) continue;
+    outline++;
+    const k = [0, 0, 0], d = [0, 0, 0];
+    let nk = 0, nd = 0;
+    for (let yy = Math.max(0, y - CUT_SUPPORT_RADIUS); yy <= Math.min(h - 1, y + CUT_SUPPORT_RADIUS); yy++) for (let xx = Math.max(0, x - CUT_SUPPORT_RADIUS); xx <= Math.min(w - 1, x + CUT_SUPPORT_RADIUS); xx++) {
+      const j = yy * w + xx, side = kept[j] ? k : d;
+      side[0]! += rgb[j * 3]!; side[1]! += rgb[j * 3 + 1]!; side[2]! += rgb[j * 3 + 2]!;
+      if (kept[j]) nk++; else nd++;
+    }
+    if (Math.max(Math.abs(k[0]! / nk - d[0]! / nd), Math.abs(k[1]! / nk - d[1]! / nd), Math.abs(k[2]! / nk - d[2]! / nd)) < CUT_SUPPORT_DELTA) { weak[i] = 1; unsupported++; }
+  }
+  // Connected runs, across gaps of one pixel.
+  const stack: number[] = [];
+  let longest = 0;
+  for (let s = 0; s < n; s++) {
+    if (weak[s] !== 1) continue;
+    let size = 0;
+    weak[s] = 2; stack.push(s);
+    while (stack.length) {
+      const c = stack.pop()!, cx = c % w, cy = (c - cx) / w;
+      size++;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        if (weak[j] === 1) { weak[j] = 2; stack.push(j); }
+      }
+    }
+    if (size > longest) longest = size;
+  }
+  return { unsupportedShare: outline ? unsupported / outline : 0, longestRun: longest / Math.max(w, h) };
+}
+
+/** Two cut-outs agree when, of the pixels either keeps (alpha over 128), this share is kept by both. Measured on the same 19 photos: 0.985 to 1.000 for a bria and a birefnet cut-out. */
+export const AGREEMENT_IOU_MIN = 0.98;
+/** An agreed cut-out keeps at least this share of the frame: a logo or a clasp two models both keep is not the product. The 19 photos keep at least 19%. */
+export const AGREEMENT_KEPT_MIN_SHARE = 0.12;
+/** At least this share of what it keeps is solid (alpha at least GUARD_OPAQUE_ALPHA), not a ghost. The 19 photos: at least 97%. */
+export const AGREEMENT_SOLID_MIN_SHARE = 0.9;
+
+/**
+ * Models of one family share their training and their mistakes, so two of them agreeing says little (the lifestyle candle
+ * Z011CB57531CA8FA0CBDDZ shot 1: birefnet-general and -lite agree at IoU 0.995 on a cut bria-rmbg does not share at 0.26).
+ * Agreement needs two families.
+ */
+export function matteFamily(model: string): string { return model.startsWith("birefnet") ? "birefnet" : model; }
+const THIRD_OPINION_ORDER = ["bria-rmbg", "birefnet-general", "birefnet-general-lite", "birefnet-hrsod"];
+/** The model to ask when the policy's two did not agree: from a family not asked yet, else any other served model. Null when none is served. */
+export function thirdOpinionModel(served: readonly string[], asked: readonly string[]): string | null {
+  const free = THIRD_OPINION_ORDER.filter(m => served.includes(m) && !asked.includes(m)), families = new Set(asked.map(matteFamily));
+  return free.find(m => !families.has(matteFamily(m))) ?? free[0] ?? null;
+}
+
+/** Share of the pixels either matte keeps that both keep. */
+export function keptOverlap(a: Pick<Matte, "alpha">, b: Pick<Matte, "alpha">): number {
+  let both = 0, either = 0;
+  for (let i = 0; i < a.alpha.length; i++) { const x = a.alpha[i]! > 128, y = b.alpha[i]! > 128; if (x || y) either++; if (x && y) both++; }
+  return either ? both / either : 0;
+}
+
+export interface MatteAgreement {
+  /** The cut-out to use, or null. */
+  matte: Matte | null;
+  /** Short technical note for the auto_actions record and the logs; never shown to operators. */
+  detail: string;
+}
+/**
+ * M1 D39. The guard judges a matte against an estimate made from the source pixels, and on pale garments, shadows and scenery that
+ * estimate is what is wrong: all 18 ladder-exhausted photos of Vero Moda batch 84a5a30a were good cut-outs it rejected. Two models of different
+ * families cutting the same outline is better evidence than that estimate, unless they share a mistake. These bars are what
+ * stands in the way of one: a frame-filling photo has no outline to agree on (a salient-object model keeps the logo on a texture,
+ * and so does the next one); a small keep is a logo or a clasp, not the product; a translucent keep is a ghost; a cut with
+ * nothing in the photo under it (cutSupport) is through one surface. Of the pairs, the earliest model asked wins.
+ */
+export function matteAgreement(p: Pick<Prepared, "width" | "height" | "rgb">, mattes: readonly Matte[], region: BackgroundRegion): MatteAgreement {
+  if (region.frameFilling) return { matte: null, detail: "frame-filling" };
+  const notes: string[] = [];
+  for (let a = 0; a < mattes.length; a++) for (let b = a + 1; b < mattes.length; b++) {
+    const x = mattes[a]!, y = mattes[b]!, pair = `${x.model} and ${y.model}`;
+    if (matteFamily(x.model) === matteFamily(y.model)) { notes.push(`${pair}: same family`); continue; }
+    const overlap = keptOverlap(x, y);
+    if (overlap < AGREEMENT_IOU_MIN) { notes.push(`${pair}: overlap ${overlap.toFixed(3)}`); continue; }
+    let kept = 0, solid = 0;
+    for (let i = 0; i < x.alpha.length; i++) if (x.alpha[i]! > 128) { kept++; if (x.alpha[i]! >= GUARD_OPAQUE_ALPHA) solid++; }
+    const keptShare = kept / x.alpha.length, solidShare = kept ? solid / kept : 0;
+    if (keptShare < AGREEMENT_KEPT_MIN_SHARE) { notes.push(`${pair}: keeps ${(keptShare * 100).toFixed(1)}% of the frame`); continue; }
+    if (solidShare < AGREEMENT_SOLID_MIN_SHARE) { notes.push(`${pair}: ${(solidShare * 100).toFixed(1)}% solid`); continue; }
+    const cuts = [x, y].map(m => cutSupport(p, m.alpha)), worstShare = Math.max(cuts[0]!.unsupportedShare, cuts[1]!.unsupportedShare), worstRun = Math.max(cuts[0]!.longestRun, cuts[1]!.longestRun);
+    const support = `${(worstShare * 100).toFixed(1)}% of the outline on no edge, longest run ${(worstRun * 100).toFixed(0)}%`;
+    if (worstShare > CUT_UNSUPPORTED_MAX_SHARE || worstRun > CUT_UNSUPPORTED_MAX_RUN) { notes.push(`${pair}: ${support}`); continue; }
+    return { matte: x, detail: `${pair} agree: overlap ${overlap.toFixed(3)}, keeps ${(keptShare * 100).toFixed(1)}% of the frame, ${(solidShare * 100).toFixed(1)}% solid, ${support}` };
+  }
+  return { matte: null, detail: notes.join("; ") || "one model only" };
+}
+
 /** White border, as a share of the long side, around the photo for the ladder's padded matte. */
 export const GUARD_PAD_FRACTION = 0.2;
-/** The model mattes the ladder may ask for: the policy's second model, then the padded frame with the first and the second model. */
-export type MatteVariant = "second" | "padded_first" | "padded_second";
+/** The model mattes the ladder may ask for: the policy's second model, the padded frame with the first and the second model, then a third opinion (thirdOpinionModel). */
+export type MatteVariant = "second" | "padded_first" | "padded_second" | "third";
 export interface ResolveMatteInput {
   prepared: Pick<Prepared, "width" | "height" | "rgb">;
   /** The policy's first matte. Only a model matte is checked (a transparent source and the simple fallback are not). */
@@ -983,8 +1119,9 @@ export interface MatteResolution {
 /**
  * The cut-out integrity ladder, run on every model matte before anything is rendered: keep the first
  * matte when it passes checkMatteIntegrity; else (a) the policy's second model, (b) the photo framed
- * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) the pass-through
- * matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
+ * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) on apparel (no `handRule`), a cut-out
+ * two models of different families agree on, asking a third model when the policy's two are of one family or disagree
+ * (matteAgreement), (d) the pass-through matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
  * replaces a plain backdrop only: on a busy background (busyBorderShare), or a backdrop of the product's own
  * colour (passthroughProductLoss), the photo is kept whole and held (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
@@ -1001,7 +1138,8 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   };
   if (first.source !== "model") return { matte: first, passthrough: false, busyBackground: false, actions, soleStripRecovered: 0 };
   // Every matte tried is kept: skin or a panel one of them cut through or kept stays product in the pass-through.
-  const region = backgroundRegion(p), tried: Matte[] = [];
+  // `unpadded` holds the mattes that can agree: a padded matte is the same model looking at the same pixels again.
+  const region = backgroundRegion(p), tried: Matte[] = [], unpadded: Matte[] = [first];
   const check = (m: Matte) => { tried.push(m); return checkMatteIntegrity(p, m, { handRule: input.handRule, region }); };
   const verdict = check(first);
   if (verdict.ok) return won(first);
@@ -1010,9 +1148,26 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   for (const [step, variant] of steps) {
     const matte = await input.attempt(variant);
     if (!matte) { record(step, "skipped", `${variant}: not available`); continue; }
+    if (variant === "second") unpadded.push(matte);
     const result = check(matte);
     record(step, result.ok ? "passed" : "failed", `${matte.model}${variant === "second" ? "" : " padded"}: ${result.detail}`);
     if (result.ok) return won(matte);
+  }
+  if (!input.handRule) {
+    // M1 D39: before the guard's doubt ends in a pass-through or a hold, ask whether the models agree with each other. A
+    // frame-filling photo has no outline to agree on, so no third call is spent on it.
+    let agreement = matteAgreement(p, unpadded, region);
+    if (!agreement.matte && !region.frameFilling) {
+      const third = await input.attempt("third");
+      if (third) {
+        unpadded.push(third);
+        const result = check(third);
+        if (result.ok) { record("second_matte", "passed", `third opinion ${third.model}: ${result.detail}`); return won(third); }
+        agreement = matteAgreement(p, unpadded, region);
+      }
+    }
+    record("matte_agreement", agreement.matte ? "passed" : "failed", agreement.detail);
+    if (agreement.matte) return won(agreement.matte);
   }
   const guide = passthroughGuide(p, region, tried), loss = passthroughProductLoss(p, tried, region, guide);
   if (loss > PASSTHROUGH_PRODUCT_LOSS_MAX) {

@@ -17,6 +17,12 @@
 #                                                        # line of its job log ("Run id: evals-..."); sets already
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
+#   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D39: the matte agreement on the 19 real photos and 8 controls.
+#                                                        # Always LIVE_SMOKE=1 for that one execution (spends credit); run
+#                                                        # with "run --live" for the golden set. Writes only under catalog-test/.
+#   bash infra/catalog-output-evals.sh recut --batch <id> --photos <identifier_n,...>
+#                                                        # M1 D41: cuts delivered photos out again, through the worker. This
+#                                                        # replaces live images, so run it only when told to.
 # PowerShell equivalent (from the repo root):
 #   & "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe" infra/catalog-output-evals.sh run
 # Secret values are never read or printed.
@@ -97,9 +103,21 @@ run() {
   echo "If the execution stopped early: bash infra/catalog-output-evals.sh run --resume <run id>"
 }
 
+# One execution of a CLI command other than run; "--live" adds LIVE_SMOKE=1 to that execution only.
+execute_cli() {
+  job_exists || { echo "ERROR: $JOB does not exist yet; run bash infra/deploy.sh first" >&2; exit 1; }
+  local env_flags=() joined
+  if [ "$1" = "--live" ]; then env_flags+=(--update-env-vars=LIVE_SMOKE=1); shift; fi
+  joined=$(cli_args "$@") || exit 2
+  echo "==> $JOB: EXECUTE $* $([ ${#env_flags[@]} -gt 0 ] && echo '(LIVE_SMOKE=1, live judge calls)')"
+  MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
+}
+
 case "${1:-}" in
   deploy) deploy ;;
+  proof) shift; execute_cli --live proof "$@" ;;
+  recut) shift; execute_cli recut "$@" ;;
   upload) shift; upload "$@" ;;
   run) shift; run "$@" ;;
-  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...]" >&2; exit 2 ;;
+  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...] | proof [--limit n] | recut --batch <id> --photos <identifier_n,...>" >&2; exit 2 ;;
 esac
