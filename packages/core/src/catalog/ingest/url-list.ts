@@ -114,7 +114,7 @@ export function urlListItems(table: PastedTable, uploadId: string): SheetSourceI
       const key = normalizeKey(identifier);
       const n = (counts.get(key) ?? 0) + 1;
       counts.set(key, n);
-      return { ...base, identifier, n, suffix: "" as const };
+      return { ...base, identifier, n, suffix: "" as const, positional: true as const };
     }
     if (name) return { ...base, identifier: name, n: i + 1, suffix: "" as const };
     const parsed = parseShotName(originalName);

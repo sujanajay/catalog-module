@@ -57,3 +57,13 @@ it("notes a product whose type could not be checked once, first, with no model i
   const flush="Photos 1 and 2: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image";
   expect(mergeNotes(null,["Noon img 2: Skipped.",note,flush])).toBe(`${note}; ${flush}; Noon img 2: Skipped.`);
 });
+it("carries what the uploads lost before grouping: under 1 KB files, sheet rows and lists not read, each under its product",async()=>{
+  const ledger={products:[{identifier:"OK",items:[]}],rejected:[],uploadRejects:[
+    {name:"A/A_1.jpg",identifier:"A",reason:"A_1.jpg is under 1 KB, so it was treated as a placeholder, not a photo."},
+    {name:"Row 3",identifier:"OK",reason:"Row 3 repeats OK, so its 1 new link was not used: only the first row of an identifier is read."},
+    {name:"items.csv",upload:true,reason:"The product list items.csv could not be read, so nothing could be checked against it."},
+  ]};
+  const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))} as never,"p");
+  expect(result!.unsupportedFiles.map(r=>(r as {name:string}).name)).toEqual(["A/A_1.jpg","Row 3","items.csv"]);
+  expect(result!.leftOutProducts).toMatchObject([{identifier:"A",why:"unreadable",photos:1,files:["A/A_1.jpg"]}]);
+});

@@ -77,29 +77,90 @@ export function isProductRefusal(reason: string): boolean {
   return PRODUCT_REFUSAL.test(reason);
 }
 const OLDER_SPELLING = / is the same product as .+\. Only the newest photos are used\.$/;
+/** True for the files of an older spelling: its product carries on under the newest one, so nothing of it is lost. */
+export function isOlderSpelling(reason: string): boolean {
+  return OLDER_SPELLING.test(reason);
+}
+
+/** What leaving a product out means, in plain words: the short reason of its digest line and Exceptions group, and the fix. */
+export const LEFT_OUT_WORDS: Record<LeftOutWhy, { text: string; fix: string }> = {
+  same_shot: { text: "two different photos have the same shot number", fix: "Keep the right photo for each shot number, then send this product in a new batch." },
+  no_shot_numbers: { text: "its photos have no shot numbers", fix: "Add shot numbers to the file names, then send this product in a new batch." },
+  same_product: { text: "two names for the same product", fix: "Keep one name, then send this product in a new batch." },
+  refused: { text: "its name cannot be used for image links", fix: "Rename the files, then send this product in a new batch." },
+  links: { text: "none of its links could be downloaded", fix: "Fix the links, then send this product in a new batch." },
+  unreadable: { text: "none of its photos could be read", fix: "Send usable photos of this product in a new batch." },
+};
+
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "tif", "tiff", "bmp", "gif", "avif"]);
+/**
+ * A stray document, not a photo of a product: "not an image", an extension that is no image type, and a file that names
+ * itself (`notes.pdf` under `notes`). A `.jpg` with broken bytes, or a PDF inside a product's folder, is not stray: its
+ * product really is left out. A stray file is still a file row and still counted; it just does not make up a product.
+ */
+function isStrayFile(identifier: string, name: string, reason: string): boolean {
+  if (classifyImageReject(reason) !== "not_image") return false;
+  const base = name.split(/[\\/]/).pop() ?? name;
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || IMAGE_EXTENSIONS.has(base.slice(dot + 1).toLowerCase())) return false;
+  return normalizeKey(base.slice(0, dot)).startsWith(normalizeKey(identifier));
+}
+
+/** The same bytes under several product names: never merged, since which name is right would be a guess. */
+export interface SharedPhotos { identifiers: string[]; products: number; photos: number }
+const SHARED_NAMES_KEPT = 10;
+/**
+ * The photos delivered under more than one product, one row per set of products: every shot of a product sent under two
+ * names is one row, and a size chart in 400 products is one row. Reads the hashes already in the ledger, so it costs no read.
+ */
+export function photosUnderSeveralProducts(products: readonly { identifier?: string; items: readonly { sha256?: string | null }[] }[]): SharedPhotos[] {
+  const bySha = new Map<string, Set<string>>();
+  for (const p of products) {
+    if (!p.identifier) continue;
+    for (const i of p.items) {
+      if (!i.sha256) continue;
+      const ids = bySha.get(i.sha256);
+      if (ids) ids.add(p.identifier);
+      else bySha.set(i.sha256, new Set([p.identifier]));
+    }
+  }
+  const rows = new Map<string, { identifiers: string[]; photos: number }>();
+  for (const ids of bySha.values()) {
+    if (ids.size < 2) continue;
+    const identifiers = [...ids].sort(byText);
+    const key = identifiers.join("\n");
+    const row = rows.get(key);
+    if (row) row.photos++;
+    else rows.set(key, { identifiers, photos: 1 });
+  }
+  return [...rows.values()]
+    .map((r) => ({ identifiers: r.identifiers.slice(0, SHARED_NAMES_KEPT), products: r.identifiers.length, photos: r.photos }))
+    .sort((a, b) => byText(a.identifiers[0]!, b.identifiers[0]!) || byText(a.identifiers[1]!, b.identifiers[1]!));
+}
 
 /**
- * Every product grouping left out whole, in identifier order: an identifier with rejected files and no photo in
- * `products`. Not one: files with no identifier and identifiers holding only files that are not images (notes.pdf;
- * those stay file rows), and an older spelling of a product whose newest spelling carries on. The one definition behind
- * the digest, the Exceptions sheet, report.json and the outcome. Rows are the reject ledger, so stored batches can be read.
+ * Every product grouping left out whole, in identifier order, one per product (spellings that normalize alike are one):
+ * an identifier with rejected files and no photo in `products`. Not one: files with no identifier, stray documents
+ * (isStrayFile), and an older spelling of a product whose newest spelling carries on. The one definition behind the
+ * digest, the Exceptions sheet, report.json and the outcome. Rows are the reject ledger, so stored batches can be read.
  */
 export function leftOutProducts(rejected: readonly { identifier: string; name: string; reason: string }[], products: Iterable<string>): LeftOutProduct[] {
   const kept = new Set([...products].map(normalizeKey));
-  const byId = new Map<string, { name: string; reason: string }[]>();
+  const byKey = new Map<string, { identifier: string; rows: { name: string; reason: string }[] }>();
   for (const r of rejected) {
-    if (!r.identifier || kept.has(normalizeKey(r.identifier))) continue;
-    const rows = byId.get(r.identifier);
-    if (rows) rows.push(r);
-    else byId.set(r.identifier, [r]);
+    const key = normalizeKey(r.identifier);
+    if (!r.identifier || !key || kept.has(key)) continue;
+    const entry = byKey.get(key);
+    if (entry) entry.rows.push(r);
+    else byKey.set(key, { identifier: r.identifier, rows: [r] });
   }
   const out: LeftOutProduct[] = [];
-  for (const [identifier, rows] of byId) {
+  for (const { identifier, rows } of byKey.values()) {
     if (rows.some((r) => OLDER_SPELLING.test(r.reason))) continue;
     const first = (test: (reason: string) => boolean) => rows.find((r) => test(r.reason));
     const named: [LeftOutWhy, ((reason: string) => boolean)][] = [["same_shot", (r) => DUPLICATE_REJECT.test(r)], ["no_shot_numbers", (r) => NO_NUMBERS_REJECT.test(r)], ["same_product", isSameProductReject], ["refused", isProductRefusal]];
     const hit = named.find(([, test]) => first(test));
-    const photos = rows.filter((r) => classifyImageReject(r.reason) !== "not_image");
+    const photos = rows.filter((r) => !isStrayFile(identifier, r.name, r.reason));
     if (!hit && !photos.length) continue;
     const why: LeftOutWhy = hit ? hit[0] : photos.every((r) => classifyLinkReject(r.reason)) ? "links" : "unreadable";
     const reason = (hit ? first(hit[1])! : photos[0]!).reason;
@@ -193,38 +254,56 @@ interface Entry { item: SourceItem; id: string; raw: number | null; link: boolea
 const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(a.item.uploadId, b.item.uploadId);
 
 /** The name of an item without its folders and extension: `X.jpg` and `X.jpeg` have one stem. */
-const stemOf = (item: SourceItem) => baseName(item).replace(/\.[^.]*$/, "");
-
 /**
- * One file per photo: entries at one shot number (or, without a number, with one file stem) whose bytes are the same
- * are one file, so the first in list order (name, then upload) is kept and a note names the rest. An entry whose bytes
- * are not known is never merged. Bytes that differ stay, for the clash check to judge.
+ * One file per photo, in every grouping mode: all entries of a product with the same bytes are one file, whatever their
+ * names, folders or shot numbers, so a photo never goes out twice or takes two image slots. The lowest shot number is
+ * kept (then list order: name, then upload) and a note names the rest. A place only a dropped copy held closes up, so it
+ * does not read as a missing shot; a real gap stays. Unknown bytes never merge, and bytes that differ stay for the clash
+ * check to judge.
  */
 function mergeSameFiles(id: string, list: Entry[], sha256Of: (item: SourceItem) => string | null | undefined): { list: Entry[]; same: SameFile[] } {
   const keep = new Map<string, Entry>();
   const dropped = new Map<Entry, Entry[]>();
-  const out: Entry[] = [];
-  for (const e of list) {
+  for (const e of [...list].sort((a, b) => (a.raw ?? Infinity) - (b.raw ?? Infinity))) {
     const sha = sha256Of(e.item);
-    const key = sha ? `${e.raw ?? `stem:${stemOf(e.item)}`}|${sha}` : null;
-    const first = key ? keep.get(key) : undefined;
-    if (first) {
-      dropped.set(first, [...(dropped.get(first) ?? []), e]);
-      continue;
-    }
-    if (key) keep.set(key, e);
-    out.push(e);
+    const first = sha ? keep.get(sha) : undefined;
+    if (first) dropped.set(first, [...(dropped.get(first) ?? []), e]);
+    else if (sha) keep.set(sha, e);
   }
+  if (!dropped.size) return { list, same: [] };
+  const gone = new Set([...dropped.values()].flat());
+  const out = list.filter((e) => !gone.has(e));
+  const held = new Set(out.map((e) => e.raw));
+  const closed = [...new Set([...dropped.values()].flat().map((e) => e.raw))].filter((r): r is number => r !== null && !held.has(r));
   const same: SameFile[] = [];
   return {
     same,
     list: out.map((e) => {
+      const raw = e.raw === null ? null : e.raw - closed.filter((r) => r < e.raw!).length;
       const others = dropped.get(e);
-      if (!others) return e;
-      same.push({ identifier: id, n: e.raw, kept: e.item.originalName, dropped: others.map((o) => o.item.originalName) });
-      return { ...e, notes: [sameFileMessage(baseName(e.item), others.map((o) => baseName(o.item)))] };
+      if (!others) return { ...e, raw };
+      same.push({ identifier: id, n: raw, kept: e.item.originalName, dropped: others.map((o) => o.item.originalName) });
+      return { ...e, raw, notes: [sameFileMessage(baseName(e.item), others.map((o) => baseName(o.item)))] };
     }),
   };
+}
+
+/**
+ * Pasted rows are numbered by their place in their own paste, so two pastes of one product (the same folder name in
+ * vm-ol and vero-moda) both start at 1. Those numbers are not the sender's, so they cannot clash: a later paste carries
+ * on after the one before, the same numbers one paste of both would give.
+ */
+function pastesInOrder(list: Entry[]): Entry[] {
+  const pastes = new Map<string, Entry[]>();
+  for (const e of list) if (e.item.positional && e.raw !== null) pastes.set(e.item.uploadId, [...(pastes.get(e.item.uploadId) ?? []), e]);
+  if (pastes.size < 2) return list;
+  const after = new Map<Entry, number>();
+  let offset = 0;
+  for (const rows of pastes.values()) {
+    for (const e of rows) after.set(e, e.raw! + offset);
+    offset = Math.max(...rows.map((e) => after.get(e)!));
+  }
+  return list.map((e) => (after.has(e) ? { ...e, raw: after.get(e)! } : e));
 }
 
 /**
@@ -292,7 +371,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
 
   const products = new Map<string, SourceItem[]>();
   for (const id of [...byId.keys()].sort(byText)) {
-    let list = byId.get(id)!.sort(byNameThenUpload);
+    let list = pastesInOrder(byId.get(id)!.sort(byNameThenUpload));
     const uploads = list.filter((e) => !e.link);
     const links = list.filter((e) => e.link);
     // Precedence only decides for a product that both kinds have; a product only one kind has keeps it.
@@ -305,14 +384,13 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
       }
     }
     if (!list.length) continue;
-    if (sha256Of) {
-      const merged = mergeSameFiles(id, list, sha256Of);
-      list = merged.list;
-      pushAll(sameFiles, merged.same);
-    }
+    // A product left out takes every file with it, copies included, and records no merge: nothing of it was used.
+    const whole = list;
+    const merged = sha256Of ? mergeSameFiles(id, list, sha256Of) : { list, same: [] };
+    list = merged.list;
 
     const rejectAll = (reason: string) => {
-      for (const e of list) rejected.push({ item: copyOf(e.item, id, e.raw), reason });
+      for (const e of whole) rejected.push({ item: copyOf(e.item, id, e.raw), reason });
     };
 
     // Two different photos at one shot number leave the whole product out: we cannot tell which is right.
@@ -344,6 +422,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
     // An unnumbered file beside numbered ones takes the next free position, in name order.
     for (const e of placedLast) out.push(copyOf(e.item, id, out.length + 1, [...gap, ...(e.notes ?? []), shotMissingMessage(baseName(e.item))]));
     products.set(id, out);
+    pushAll(sameFiles, merged.same);
   }
 
   rejected.sort((a, b) => byText(a.item.identifier, b.item.identifier) || byText(a.item.originalName, b.item.originalName));

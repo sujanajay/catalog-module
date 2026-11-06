@@ -230,7 +230,7 @@ describe("an outcome is honest about what was left out (R1 exit 2 findings 1 and
   it("is not a success when grouping left products out, and counts them in the products total", async () => {
     const id = await batch({ status: "done", finishedAt: at(30), counts: { productsLeftOut: 91 } });
     await output(id, at(5));
-    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "products_left_out", products: 92, productsWithLinks: 1 });
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "input_left_out", products: 92, productsWithLinks: 1 });
   });
 
   it("a person stepping in stays the first cause", async () => {
@@ -241,10 +241,15 @@ describe("an outcome is honest about what was left out (R1 exit 2 findings 1 and
   });
 
   it("is not a success when an upload could not be read at all", async () => {
-    const id = await batch({ status: "done", finishedAt: at(30) });
+    const id = await batch({ status: "done", finishedAt: at(30), counts: { uploadsNotRead: 1 } });
     await output(id, at(5));
-    await db.execute(sql`INSERT INTO catalog_uploads (batch_id, kind, name, status, error) VALUES (${id}, 'zip', 'a.zip', 'failed', 'The zip a.zip was not found in storage.')`);
-    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "products_left_out", products: 1 });
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "input_left_out", products: 1 });
+  });
+
+  it("is not a success when a file was not used", async () => {
+    const id = await batch({ status: "done", finishedAt: at(30), counts: { filesLeftOut: 2 } });
+    await output(id, at(5));
+    expect(await recordBatchOutcome(db, id, at(31))).toMatchObject({ success: false, cause: "input_left_out", products: 1 });
   });
 
   it("counts unchanged products that keep their earlier live links, as the digest does, and not a list row without photos", async () => {

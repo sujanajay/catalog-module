@@ -165,6 +165,10 @@ export interface BatchCounts {
    * and the batch's outcome is not a success. Optional and not in EMPTY_BATCH_COUNTS (a new default would need a migration).
    */
   productsLeftOut?: number;
+  /** Files, rows and links outside those products that gave no photo (written at finalize): not counted once by product. */
+  filesLeftOut?: number;
+  /** Whole inputs that were not read (a failed upload, a product list that could not be used), written at finalize. */
+  uploadsNotRead?: number;
   collected: number; collectTotal: number | null; previewReady: boolean; latestExport: number;
   failReason: string | null; finalizePending: boolean; policyFallback: boolean;
   newProducts: number; existingProducts: number; shotsToRemove: number;

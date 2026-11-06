@@ -18,6 +18,11 @@ export interface BatchDigest {
   /** Products grouping left out whole, with their reasons, most common first. Older stored digests have none. */
   productsLeftOut?: number;
   productsLeftOutReasons?: DigestReason[];
+  /** Files, rows and links outside those products that gave no photo, and whole inputs not read. Older digests have none. */
+  filesLeftOut?: number;
+  uploadsNotRead?: number;
+  /** Photos delivered under more than one product name, for the operator to check. Older digests have none. */
+  photosUnderSeveralProducts?: number;
   /** Files that were copies of a photo the product already has, so one was used. Older stored digests have none. */
   sameFilesMerged?: number;
   /** Products with links on every channel of the batch, nothing left out and nothing sent with a note. */

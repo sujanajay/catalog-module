@@ -22,6 +22,7 @@ export interface SourceItem {
   uploadId: string;
   origin: UploadKind;
   warnings: string[];            // plain sentences, shown in step 4
+  positional?: true;             // `n` is the row's place in its paste, not a number the sender chose
 }
 
 /** The subset of the googleapis Sheets v4 client that ingestion calls (real client or a fake). */
@@ -86,9 +87,12 @@ export interface Detected {                          // stored in catalog_upload
   collisions?: { name: string; rows: number[] }[];
   ignoredCells?: number;
   sample?: { tried: number; ok: number; webPages: number; failures: { url: string; reason: string }[] };
-  rejected?: { name: string; reason: string }[];     // per-upload rejects with their sentences
-  /** M1-F1-R4: a paste of image links listed from this Supabase folder link, and the mode its lines name products by. */
-  supabaseFolder?: { url: string; mode: "folder" | "filename" };
+  rejected?: UploadReject[];                         // per-upload rejects with their sentences
+  /**
+   * M1-F1-R4: a paste of image links listed from this Supabase folder link, and the mode its lines name products by.
+   * `small`: the files under 1 KB the listing skipped (M1-F1-R6), carried here because they never become items.
+   */
+  supabaseFolder?: { url: string; mode: "folder" | "filename"; small?: UploadReject[] };
   message: string;                                   // the one-line text for the wizard
 }
 
@@ -106,6 +110,12 @@ export interface GroupingResult {
   roots?: InputRoot[];                               // per-root grouping (M1-F1-R2): each input root and its mode
   sameFiles?: SameFile[];                            // files that were copies of a photo the product already has
 }
+
+/**
+ * What an upload lost before grouping, so it has no item: a sheet row, a skipped file, a list that could not be read.
+ * `identifier` when it belongs to a product; `upload` when a whole input was not read.
+ */
+export interface UploadReject { name: string; reason: string; identifier?: string; upload?: boolean }
 
 /** A shot that came as two or more files with the same bytes (X_1.jpg and X_1.jpeg): one is used, the rest are named here. */
 export interface SameFile { identifier: string; n: number | null; kept: string; dropped: string[] }

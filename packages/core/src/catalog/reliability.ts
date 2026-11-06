@@ -20,7 +20,6 @@ import {
   catalogIncidents,
   catalogOutputs,
   catalogRevisions,
-  catalogUploads,
   type BatchOutcomeStatus,
   type IncidentKind,
   type IncidentSeverity,
@@ -219,9 +218,8 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
   const [withLinks] = b.channels.length ? await db.select({ n: countDistinct(catalogOutputs.productId) }).from(catalogOutputs)
     .innerJoin(catalogBatchProducts, and(eq(catalogBatchProducts.productId, catalogOutputs.productId), eq(catalogBatchProducts.batchId, batchId)))
     .where(and(eq(catalogOutputs.isLive, true), inArray(catalogOutputs.channel, b.channels), ne(catalogBatchProducts.linkStatus, "missing_images"))) : [{ n: 0 }];
-  // What the batch was given and made no link for: products grouping left out, and uploads that could not be read at all.
-  const [failedUploads] = await db.select({ n: count() }).from(catalogUploads).where(and(eq(catalogUploads.batchId, batchId), eq(catalogUploads.status, "failed")));
-  const productsLeftOut = b.counts.productsLeftOut ?? 0, inputLeftOut = productsLeftOut > 0 || Number(failedUploads?.n ?? 0) > 0;
+  // What the batch was given and made nothing of: products, whole inputs or files. Any of them and it is not a clean run.
+  const productsLeftOut = b.counts.productsLeftOut ?? 0, inputLeftOut = productsLeftOut + (b.counts.uploadsNotRead ?? 0) + (b.counts.filesLeftOut ?? 0) > 0;
   const start = b.startedAt ?? b.createdAt;
   const endedAt = status === "done" ? (b.finishedAt ?? now) : b.updatedAt;
   const linksReadyAt = status === "done" ? (existing?.linksReadyAt ?? b.finishedAt ?? now) : (existing?.linksReadyAt ?? null);
@@ -231,7 +229,7 @@ export async function recordBatchOutcome(db: Db, batchId: string, now: Date = ne
   const success = status === "done" && touchCount === 0 && incidentCount === 0 && !inputLeftOut;
   const row = {
     batchId, status, success,
-    cause: success ? null : status !== "done" ? status : touchCount ? "touched" : incidentCount ? "incident" : "products_left_out",
+    cause: success ? null : status !== "done" ? status : touchCount ? "touched" : incidentCount ? "incident" : "input_left_out",
     isTest: b.isTest,
     // Out of the rate (review P2-1): a batch that never started (intake failed or cancelled before Start), and a cancel
     // within QUICK_CANCEL_MS of start.

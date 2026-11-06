@@ -9,6 +9,7 @@ import {
   leftOutProducts,
   noIdentifierMessage,
   noShotNumbersMessage,
+  photosUnderSeveralProducts,
   olderSameProductMessage,
   originalOf,
   sameProductMessage,
@@ -21,6 +22,9 @@ import {
 import { notImageMessage, unsupportedMessage } from "./image-check";
 import { duplicatePhotosPair, samePhotosPair } from "./same-photos";
 import { linkStatuses } from "./product-list";
+import { supabaseFolderText } from "./supabase-folder";
+import { parseSupabaseFolderLink } from "./supabase-link";
+import { parsePastedLinks, urlListItems } from "./url-list";
 import { sourceItemFromPath } from "./local-files";
 import type { GroupingResult, SourceItem } from "./types";
 import { nestedZipMessage } from "./zip";
@@ -430,5 +434,121 @@ describe("leftOutProducts: every product grouping left out, for any reason", () 
   it("gives the preview a sentence for products with no shot numbers, as it has for duplicate ones", () => {
     const g = groupItems([file("T.jpg"), file("T.png")], opts());
     expect(warningSentences(g, null, ["noon"])).toEqual([{ headline: "1 product has files with no shot numbers: T.", detail: "They are left out until the files are renamed; see the grouping table." }]);
+  });
+});
+
+describe("identical files merge in every grouping mode (PR 187 review P1-3)", () => {
+  const link = parseSupabaseFolderLink("https://projref.supabase.co/storage/v1/object/public/softlines/brand")!;
+  /** Through the real paste path: the folder's listing, its text, the paste parser, its items, the grouping. */
+  const pasted = (names: string[], shaOf: (name: string) => string) => {
+    const { text, mode } = supabaseFolderText(link, names.map((path) => ({ path, size: 90_000 })));
+    const items = urlListItems(parsePastedLinks(text), "u1");
+    return { mode, g: groupItems(items, opts(), undefined, (i) => shaOf(decodeURIComponent(i.originalName.split("/").pop()!))) };
+  };
+  const shot = (name: string) => name.replace(/\.jpe?g$/, "");
+
+  it("merges doubled shots when one stray file name flips the folder to folder mode, and leaves no false gap", () => {
+    const { mode, g } = pasted(["10255347_Black/10255347_Black_1.jpg", "10255347_Black/10255347_Black_1.jpeg", "10255347_Black/10255347_Black_2.jpg", "10255347_Black/10255347_Black_2.jpeg", "10255347_Black/size chart.jpg"], shot);
+    expect(mode).toBe("folder");
+    const items = g.products.get("10255347_Black")!;
+    expect(items.map((i) => i.n)).toEqual([1, 2, 3]);
+    expect(items.every((i) => !shotFlags(i).includes("numbering_gap"))).toBe(true);
+    expect(g.sameFiles).toHaveLength(2);
+    expect(g.rejected).toEqual([]);
+  });
+
+  it("different bytes under one stem stay separate shots in folder mode", () => {
+    const different = pasted(["P/P_1.jpg", "P/P_1.jpeg", "P/size chart.jpg"], (n) => n);
+    expect(different.g.sameFiles).toBeUndefined();
+    expect(different.g.products.get("P")).toHaveLength(3);
+  });
+
+  it("records no merge for a product left out, and lists all of its files, copies too (P3-1)", () => {
+    const items = ["X_1.jpg", "X_1.jpeg", "X_1.png"].map((n) => sourceItemFromPath(n, { kind: "gcs", gsUri: "" }, "u", "image"));
+    const g = groupItems(items, opts(), undefined, (i) => (i.originalName === "X_1.png" ? "other" : "same"));
+    expect(g.products.size).toBe(0);
+    expect(g.sameFiles).toBeUndefined();
+    expect(g.rejected.map((r) => r.item.originalName).sort()).toEqual(["X_1.jpeg", "X_1.jpg", "X_1.png"]);
+  });
+});
+
+describe("leftOutProducts (PR 187 review P1-2, P2-2)", () => {
+  const notImage = (name: string) => ({ name, reason: notImageMessage(name) });
+  it("a photo whose bytes are not an image leaves its product out; a stray document does not make a product", () => {
+    const left = leftOutProducts([{ identifier: "X", ...notImage("X_1.jpg") }, { identifier: "notes", ...notImage("notes.pdf") }, { identifier: "Y", ...notImage("Y/spec.pdf") }], []);
+    expect(left.map((l) => l.identifier)).toEqual(["X", "Y"]);
+    expect(left[0]).toMatchObject({ why: "unreadable", photos: 1 });
+  });
+  it("two spellings of one product are one left out, as the digest counts them", () => {
+    const reason = "Two files claim shot 1 of ABC-1: a, b. Rename one and re-upload.";
+    const left = leftOutProducts([{ identifier: "ABC-1", name: "ABC-1_1.jpg", reason }, { identifier: "abc1", name: "abc1_1.jpg", reason }], []);
+    expect(left).toHaveLength(1);
+    expect(left[0]!.files).toEqual(["ABC-1_1.jpg", "abc1_1.jpg"]);
+  });
+});
+
+describe("copies across folders and names (owner, 2026-11-06)", () => {
+  const link = parseSupabaseFolderLink("https://projref.supabase.co/storage/v1/object/public/softlines/all")!;
+  const paste = (uploadId: string, paths: string[]) => urlListItems(parsePastedLinks(supabaseFolderText(link, paths.map((path) => ({ path, size: 90_000 }))).text), uploadId);
+  const fileItems = (names: string[]) => names.map((n) => sourceItemFromPath(n, { kind: "gcs", gsUri: `gs://b/${n}` }, "u", "image"));
+  const shaByFile = (shas: Record<string, string>) => (i: { originalName: string; bytes: { kind: string } }) => shas[decodeURIComponent(i.originalName.split("/").pop()!)];
+
+  it("(a) one product in two folders of one paste: same bytes are one photo, new photos are added", () => {
+    const items = paste("u1", ["vm-ol/X/X_1.jpg", "vm-ol/X/X_2.jpg", "vero-moda/X/X_1.jpg", "vero-moda/X/X_3.jpg"]);
+    const g = groupItems(items, opts(), undefined, (i) => (i.originalName.endsWith("_3.jpg") ? "c" : i.originalName.endsWith("_2.jpg") ? "b" : "a"));
+    expect(g.products.get("X")!.map((i) => i.n)).toEqual([1, 2, 3]);
+    expect(g.sameFiles).toHaveLength(1);
+    expect(g.rejected).toEqual([]);
+  });
+
+  it("(a) one product across two pastes: identical pastes make one set, and row numbers never clash", () => {
+    const row = (u: string, ...urls: string[]) => urlListItems(parsePastedLinks(urls.map((url) => `X\thttps://h/${u}/${url}`).join("\n")), u);
+    const same = groupItems([...row("u1", "a.jpg", "b.jpg"), ...row("u2", "a.jpg", "b.jpg")], opts(), undefined, (i) => i.originalName);
+    expect(same.products.get("X")!.map((i) => [i.n, i.originalName])).toEqual([[1, "a.jpg"], [2, "b.jpg"]]);
+    const other = groupItems([...row("u1", "a.jpg", "b.jpg"), ...row("u2", "c.jpg", "d.jpg")], opts(), undefined, (i) => i.originalName);
+    expect(other.rejected).toEqual([]);
+    expect(other.products.get("X")!.map((i) => [i.n, i.originalName])).toEqual([[1, "a.jpg"], [2, "b.jpg"], [3, "c.jpg"], [4, "d.jpg"]]);
+  });
+
+  it("(a) one product in two folders with different bytes at one named shot is a choice we do not guess: left out, on the record", () => {
+    const g = groupItems(fileItems(["vm-ol/X/X_1.jpg", "vero-moda/X/X_1.jpeg"]), opts(), undefined, (i) => i.originalName);
+    expect(g.products.size).toBe(0);
+    expect(leftOutProducts(g.rejected.map((r) => ({ identifier: r.item.identifier, name: r.item.originalName, reason: r.reason })), [])).toMatchObject([{ identifier: "X", why: "same_shot" }]);
+  });
+
+  it("(b) the same bytes under different shot numbers or names take one slot, and later shots close up", () => {
+    const g = groupItems(fileItems(["X_1.jpg", "X_2.jpg", "X_3.jpg", "X_4.jpg"]), opts(), undefined, shaByFile({ "X_1.jpg": "a", "X_2.jpg": "b", "X_3.jpg": "a", "X_4.jpg": "c" }) as never);
+    expect(g.products.get("X")!.map((i) => [i.n, i.originalName])).toEqual([[1, "X_1.jpg"], [2, "X_2.jpg"], [3, "X_4.jpg"]]);
+    expect(g.products.get("X")!.every((i) => !shotFlags(i).includes("numbering_gap"))).toBe(true);
+    expect(g.sameFiles).toEqual([{ identifier: "X", n: 1, kept: "X_1.jpg", dropped: ["X_3.jpg"] }]);
+  });
+
+  it("(b) keeps the lowest shot number whichever name sorts first", () => {
+    const g = groupItems(fileItems(["X_10.jpg", "X_2.jpg"]), opts(), undefined, () => "a");
+    expect(g.products.get("X")!.map((i) => i.originalName)).toEqual(["X_2.jpg"]);
+  });
+
+  it("(c) the same bytes under two product names are both kept and named, one row per pair, and a shared chart is one row", () => {
+    const g = groupItems(fileItems(["A_1.jpg", "A_2.jpg", "B_1.jpg", "B_2.jpg", "C_1.jpg"]), opts(), undefined, shaByFile({ "A_1.jpg": "x", "A_2.jpg": "y", "B_1.jpg": "x", "B_2.jpg": "y", "C_1.jpg": "z" }) as never);
+    expect([...g.products.keys()]).toEqual(["A", "B", "C"]);
+    const row = (identifier: string, ...sha: string[]) => ({ identifier, items: sha.map((sha256) => ({ sha256 })) });
+    expect(photosUnderSeveralProducts([row("A", "x", "y"), row("B", "x", "y"), row("C", "z")])).toEqual([{ identifiers: ["A", "B"], products: 2, photos: 2 }]);
+    expect(photosUnderSeveralProducts(Array.from({ length: 400 }, (_, i) => row(`P${String(i).padStart(3, "0")}`, "chart", `own${i}`)))).toEqual([expect.objectContaining({ products: 400, photos: 1 })]);
+  });
+
+  it("(d) a re-sent copy changed only by extension or path gives the same shot and bytes, so the same render key and live links", () => {
+    const first = groupItems(fileItems(["X_1.jpg", "X_2.jpg"]), opts(), undefined, (i) => baseName(i).replace(/\..*$/, ""));
+    const moved = groupItems(fileItems(["new/place/X_1.jpeg", "new/place/X_2.jpeg"]), opts(), undefined, (i) => baseName(i).replace(/\..*$/, ""));
+    const key = (g: GroupingResult) => g.products.get("X")!.map((i) => [i.n, baseName(i).replace(/\..*$/, "")]);
+    expect(key(moved)).toEqual(key(first));
+  });
+
+  it("stays fast at real size: 30,000 files, all copied once", () => {
+    const names = Array.from({ length: 15_000 }, (_, i) => `P${i % 3000}_${i % 5 + 1}`);
+    const items = fileItems(names.flatMap((n) => [`${n}.jpg`, `${n}.jpeg`]));
+    const started = Date.now();
+    const g = groupItems(items, opts(), undefined, (i) => baseName(i).replace(/\..*$/, ""));
+    expect(g.products.size).toBe(3000);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });

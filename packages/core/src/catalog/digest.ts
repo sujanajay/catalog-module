@@ -10,7 +10,8 @@ import { autoDecideRecordOf } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
 import { batchCostFigure, type BatchCostFigure } from "./cost-report";
 import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
-import type { LeftOutProduct, LeftOutWhy } from "./ingest/types";
+import { LEFT_OUT_WORDS, type SharedPhotos } from "./ingest/group";
+import type { LeftOutProduct } from "./ingest/types";
 import { normalizeKey } from "./naming";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
@@ -92,21 +93,11 @@ export function groupReasons(texts: readonly string[]): DigestReason[] {
   return [...counts].map(([text, count]) => ({ text, count })).sort((a, b) => b.count - a.count || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
 }
 
-/** A product grouping left out whole: the short reason of its digest line and Exceptions group, and what would fix it. */
-const LEFT_OUT_PRODUCT: Record<LeftOutWhy, { text: string; fix: string }> = {
-  same_shot: { text: "two different photos have the same shot number", fix: "Keep the right photo for each shot number, then send this product in a new batch." },
-  no_shot_numbers: { text: "its photos have no shot numbers", fix: "Add shot numbers to the file names, then send this product in a new batch." },
-  same_product: { text: "two names for the same product", fix: "Keep one name, then send this product in a new batch." },
-  refused: { text: "its name cannot be used for image links", fix: "Rename the files, then send this product in a new batch." },
-  links: { text: "none of its links could be downloaded", fix: "Fix the links, then send this product in a new batch." },
-  unreadable: { text: "none of its photos could be read", fix: FIX_PRODUCT },
-};
-
 const channelOrder = (c: ChannelId | null) => (c ? CHANNEL_ORDER.indexOf(c) : -1);
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
 export interface DigestInput {
-  batch: { id: string; channels: ChannelId[]; status: string; startedAt: Date | null; updatedAt: Date };
+  batch: { id: string; channels: ChannelId[]; status: string; startedAt: Date | null; updatedAt: Date; counts?: { filesLeftOut?: number; uploadsNotRead?: number } };
   /** The links sheet of the same snapshot (buildReport): a slot with a link there is never an exception. */
   sheet: SheetSpec;
   /** Files that never became a photo of a product (buildReport's unsupportedFiles and linkFailures). */
@@ -115,6 +106,8 @@ export interface DigestInput {
   leftOutProducts?: readonly LeftOutProduct[];
   /** Files that were copies of a photo the product already has (buildReport's sameFiles, as a count). */
   sameFilesMerged?: number;
+  /** The same bytes under several product names (photosUnderSeveralProducts): each is delivered, and said here. */
+  sharedPhotos?: readonly SharedPhotos[];
   cost: DigestCost;
 }
 
@@ -217,17 +210,21 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
   // Every product grouping left out, one row each. When its name was the problem, that row speaks for its files; when its
   // files were, their own rows below say which one and why.
   const speaksForFiles = new Set<string>();
+  for (const s of input.sharedPhotos ?? []) {
+    const names = s.products > 3 ? `${s.identifiers.slice(0, 3).join(", ")} and ${(s.products - 3).toLocaleString("en-US")} more` : `${s.identifiers.slice(0, -1).join(", ")} and ${s.identifiers.at(-1)}`;
+    exceptions.push({ identifier: s.identifiers[0]!, channel: null, image: null, reason: `${s.photos.toLocaleString("en-US")} ${s.photos === 1 ? "photo is" : "photos are"} the same in ${names}. Each product kept its links; nothing was merged.`, fix: "Check these are different products. If they are one product, send it under one name in a new batch.", group: "Check: the same photo under more than one product" });
+  }
   for (const l of leftOutProducts) {
-    const { text, fix } = LEFT_OUT_PRODUCT[l.why];
+    const { text, fix } = LEFT_OUT_WORDS[l.why];
     exceptions.push({ identifier: l.identifier, channel: null, image: null, reason: l.reason, fix, group: `Product left out: ${text}` });
     if (l.why === "links" || l.why === "unreadable") continue;
-    speaksForFiles.add(l.identifier);
+    speaksForFiles.add(normalizeKey(l.identifier));
     for (const name of l.files) leftOut.push({ key: `left-out:${l.identifier}/${name}`, reason: text });
   }
   // Files that never became a photo of a product (unreadable files, links that could not be opened).
   for (const file of input.files) {
     const f = (file ?? {}) as { name?: unknown; originalName?: unknown; identifier?: unknown; url?: unknown; reason?: unknown };
-    if (typeof f.identifier === "string" && speaksForFiles.has(f.identifier)) continue;
+    if (typeof f.identifier === "string" && speaksForFiles.has(normalizeKey(f.identifier))) continue;
     const name = String(f.name ?? f.originalName ?? f.url ?? f.identifier ?? "file");
     const reason = typeof f.reason === "string" && f.reason ? f.reason : "This file could not be read.";
     exceptions.push({ identifier: name, channel: null, image: null, reason, fix: FIX_FILE, group: `File not used: ${shortReason(reason)}` });
@@ -250,8 +247,11 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     products: new Set([...pairs.map(p => normalizeKey(p.identifier)), ...leftOutKeys]).size,
     productsWithLinks,
     productsLeftOut: leftOutProducts.length,
-    productsLeftOutReasons: groupReasons(leftOutProducts.map(l => LEFT_OUT_PRODUCT[l.why].text)),
+    productsLeftOutReasons: groupReasons(leftOutProducts.map(l => LEFT_OUT_WORDS[l.why].text)),
+    filesLeftOut: input.batch.counts?.filesLeftOut ?? 0,
+    uploadsNotRead: input.batch.counts?.uploadsNotRead ?? 0,
     sameFilesMerged: input.sameFilesMerged ?? 0,
+    photosUnderSeveralProducts: (input.sharedPhotos ?? []).reduce((sum, s) => sum + s.photos, 0),
     completeEveryChannel,
     linksPerChannel,
     provisionalLinks: notes.length,

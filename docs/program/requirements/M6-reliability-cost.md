@@ -286,8 +286,8 @@ batch has its own row; the parent links to the child.
 
 **Open questions.**
 - Q: Does a provisional link count against success? Default: no (it is by design); an exception (no link at all) does
-  not either, but both are shown. One change (R1 exit 2, 2026-11-06): a product grouping left out, or an upload that could
-  not be read, was never attempted at all, so the batch is not a success (cause `products_left_out`). `products` counts
+  not either, but both are shown. One change (R1 exit 2, 2026-11-06): a product grouping left out, a file not used or an
+  input that could not be read was never attempted at all, so the batch is not a success (cause `input_left_out`). `products` counts
   the left-out products, and `products_with_links` counts every product with a live link on the batch's channels,
   unchanged products included, as the digest does (so the Ops cost per product uses the digest's own count). Rows written
   before this keep their old numbers.

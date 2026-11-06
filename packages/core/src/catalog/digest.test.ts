@@ -50,9 +50,9 @@ async function parts(files: unknown[] = []) {
 describe("products grouping left out (R1 exit 2 finding 1)", () => {
   const sameShot = { identifier: "10255347_Black", why: "same_shot" as const, reason: "Two files claim shot 1 of 10255347_Black: 10255347_Black_1.jpeg, 10255347_Black_1.jpg. Rename one and re-upload.", photos: 2, files: ["10255347_Black_1.jpeg", "10255347_Black_1.jpg"] };
   const links = { identifier: "LNK", why: "links" as const, reason: "Row 2, Image 1: the link answered 404.", photos: 1, files: ["LNK_1.jpg"] };
-  const digestOf = async (leftOutProducts: Parameters<typeof digestFrom>[0]["leftOutProducts"], files: unknown[] = [], sameFilesMerged = 0) => {
+  const digestOf = async (leftOutProducts: Parameters<typeof digestFrom>[0]["leftOutProducts"], files: unknown[] = [], sameFilesMerged = 0, sharedPhotos: Parameters<typeof digestFrom>[0]["sharedPhotos"] = []) => {
     const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
-    return digestFrom({ batch: built.batch, sheet: built.sheet, files, cost, leftOutProducts, sameFilesMerged, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+    return digestFrom({ batch: built.batch, sheet: built.sheet, files, cost, leftOutProducts, sameFilesMerged, sharedPhotos, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
   };
 
   it("counts them in the total and gives each an Exceptions row with its reason and what to do, so All N can never be said", async () => {
@@ -63,8 +63,8 @@ describe("products grouping left out (R1 exit 2 finding 1)", () => {
     expect(exceptions.filter(e => e.identifier === "LNK").map(e => e.group)).toEqual(["Product left out: none of its links could be downloaded"]);
     expect(exceptions.some(e => e.identifier === "LNK_1.jpg")).toBe(true);
     expect(digest.photosLeftOut).toBe(2 + 1 + 1);
-    expect(digestHeadline(digest)).toBe("5 of 8 products have links. 2 do not; the Exceptions sheet says why. 1 needs you.");
-    expect(digestLeftOutLine(digest)).toBe("2 products were left out and have no links: none of its links could be downloaded (1), two different photos have the same shot number (1). The Exceptions sheet names each one and what to do.");
+    expect(digestHeadline(digest)).toBe("5 of 8 products have links. 2 products were left out; the Exceptions sheet says why. 1 needs you.");
+    expect(digestLeftOutLine(digest)).toBe("2 products were left out of this batch: none of its links could be downloaded (1), two different photos have the same shot number (1). Any links they already had stay as they were. The Exceptions sheet names each one and what to do.");
   });
 
   it("says All N only when nothing was left out, in the headline, the tile and the email", () => {
@@ -72,11 +72,31 @@ describe("products grouping left out (R1 exit 2 finding 1)", () => {
     expect(digestHeadline(whole)).toBe("All 3 products have links.");
     expect(digestLeftOutLine(whole)).toBeNull();
     const left = digest({ products: 477, productsWithLinks: 386, productsLeftOut: 91, productsLeftOutReasons: [{ text: "two different photos have the same shot number", count: 91 }] });
-    expect(digestHeadline(left)).toBe("386 of 477 products have links. 91 do not; the Exceptions sheet says why.");
+    expect(digestHeadline(left)).toBe("386 of 477 products have links. 91 products were left out; the Exceptions sheet says why.");
     expect(digestTiles(left).find(t => t.label === "Need you")!.meaning).not.toBe("Nothing needs you.");
     const mail = digestEmail({ name: "Lot", url: "u" }, left);
     expect(mail.subject).toBe("Lot: links are ready for 386 of 477 products. 91 products were left out.");
-    expect(mail.text).toContain("91 products were left out and have no links: two different photos have the same shot number (91).");
+    expect(mail.text).toContain("91 products were left out of this batch: two different photos have the same shot number (91).");
+  });
+
+  it("never says all done while anything is out: a failed upload or an unused file, in the headline, the line, the tile and the email (P1-1)", () => {
+    const failed = digest({ products: 3, productsWithLinks: 3, uploadsNotRead: 1 });
+    expect(digestHeadline(failed)).toBe("All 3 products have links. 1 upload could not be read; the Exceptions sheet says why.");
+    expect(digestLeftOutLine(failed)).toBe("1 upload could not be read, so what it holds is not in this batch. The Exceptions sheet names each one and what to do.");
+    expect(digestTiles(failed).find(t => t.label === "Need you")!.meaning).not.toBe("Nothing needs you.");
+    expect(digestEmail({ name: "Lot", url: "u" }, failed).text).not.toContain("Nothing needs you.");
+    const files = digest({ products: 1, productsWithLinks: 1, filesLeftOut: 2 });
+    expect(digestHeadline(files)).toBe("The product has links. 2 files were not used; the Exceptions sheet says why.");
+    expect(digestHeadline(digest({ products: 0, productsWithLinks: 0, uploadsNotRead: 2 }))).toBe("This batch had no products. 2 uploads could not be read; the Exceptions sheet says why.");
+    expect(digestHeadline(digest({ products: 4, productsWithLinks: 1, productsLeftOut: 2, filesLeftOut: 3, uploadsNotRead: 1 }))).toBe("1 of 4 products have links. 1 does not; the Exceptions sheet says why. 2 products were left out, 1 upload could not be read and 3 files were not used; the Exceptions sheet says why.");
+  });
+
+  it("names the same photo under two product names on the Exceptions sheet and the digest, without changing what counts as out", async () => {
+    const { digest: d, exceptions } = await digestOf([], [], 0, [{ identifiers: ["A", "B"], products: 2, photos: 3 }, { identifiers: ["C", "D", "E", "F"], products: 400, photos: 1 }]);
+    expect(d.productsLeftOut).toBe(0);
+    expect(d.photosUnderSeveralProducts).toBe(4);
+    expect(exceptions.filter(e => e.group.startsWith("Check:")).map(e => e.reason)).toEqual(["3 photos are the same in A and B. Each product kept its links; nothing was merged.", "1 photo is the same in C, D, E and 397 more. Each product kept its links; nothing was merged."]);
+    expect(digestReasonLines(d).lines.join(" ")).toContain("4 photos are under more than one product name.");
   });
 
   it("counts a left-out product with a product list row once, and says when copies of a photo were dropped", async () => {

@@ -125,6 +125,21 @@ describe("links-sheet.detectColumns", () => {
     ], "anta-oct.xlsx"));
     expect(r.items.map((i) => [i.identifier, i.n, i.sheetRow])).toEqual([["ABC-123", 1, 2], ["ABC-123", 2, 2], ["XYZ9", 1, 4]]);
     expect(r.warnings).toEqual(["2 identifiers appear more than once in anta-oct.xlsx; the first row of each is used."]);
+    // Each later row held a link the first did not: those photos are named, under their product.
+    expect(r.rejected).toEqual([
+      { name: "Row 3", identifier: "abc123", reason: "Row 3 repeats abc123, so its 1 new link was not used: only the first row of an identifier is read." },
+      { name: "Row 5", identifier: "XYZ 9", reason: "Row 5 repeats XYZ 9, so its 1 new link was not used: only the first row of an identifier is read." },
+    ]);
+  });
+
+  it("loses nothing when a repeated row holds the same links (the sizes of one colour)", () => {
+    const r = read(table([
+      ["Option ID", "Image 1"],
+      ["ABC-123", img("ABC123", 1)],
+      ["ABC-123", img("ABC123", 1)],
+    ]));
+    expect(r.items).toHaveLength(1);
+    expect(r.rejected).toEqual([]);
   });
 
   it("rejects a row without an identifier with its row number", () => {

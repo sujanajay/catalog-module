@@ -401,6 +401,7 @@ describe("runIngest", () => {
     expect(w.calls.fetches.every((f) => f.startsWith("GET "))).toBe(true);
     const [sheet] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, sheetId));
     expect((sheet!.detected as { rejected: unknown[] }).rejected).toEqual([
+      { name: "Row 3", identifier: "X1", reason: "Row 3 repeats X1, so its 1 new link was not used: only the first row of an identifier is read." },
       { name: "missing.jpg", reason: `Row 4, column Image 1: ${HOST}/missing.jpg did not return an image (got 404).` },
     ]);
     const [zip] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, zipId));
@@ -1135,7 +1136,7 @@ describe("cancel guards (spec 14c F4 part 2)", () => {
 
 /** A distinct tiny jpeg per index (the colour encodes it), quick enough for a thousand photos. */
 async function tinyJpeg(i: number): Promise<Buffer> {
-  return sharp({ create: { width: 32, height: 32, channels: 3, background: { r: i % 256, g: Math.floor(i / 256) % 256, b: 101 } } }).jpeg().toBuffer();
+  return sharp({ create: { width: 32, height: 32, channels: 3, background: { r: i % 256, g: (i % 4) * 60, b: Math.floor(i / 256) * 40 % 256 } } }).jpeg().toBuffer();
 }
 
 type PlaceBody = { batchId: string; uploadId: string; cursor?: string; run?: string; place?: string };
@@ -1797,6 +1798,7 @@ describe("a real folder with each shot stored twice (R1 exit 2 finding 1)", () =
     // The grouping reads no bytes of its own: every file was downloaded once, to hash it.
     const prefix = `gs://${BUCKET}/${prefixOf(batch)}/uploads/`;
     const downloads = w.calls.downloads.filter((d) => d.startsWith(prefix) && d.endsWith("_1.jpg"));
+    expect(downloads.length).toBeGreaterThan(0);
     expect(new Set(downloads).size).toBe(downloads.length);
 
     const done = await batchRow(batch.id);
@@ -1815,4 +1817,58 @@ describe("a real folder with each shot stored twice (R1 exit 2 finding 1)", () =
     expect(preview.rows.find((r) => r.identifier === "10255347_Black")).toMatchObject({ status: "ok", shots: 2, notes: expect.arrayContaining(["10255347_Black_1.jpeg and 10255347_Black_1.jpg are the same photo, so one was used."]) });
     expect(preview.rows.find((r) => r.identifier === "10288257_Choc")).toMatchObject({ status: "duplicate shot" });
   }, 120_000);
+});
+
+describe("nothing is lost without a word at grouping (owner, 2026-11-06)", () => {
+  const reportOf = (w: World, batch: CatalogBatch) => readIngestReport({ ...w.storage, getBucketName: () => BUCKET } as never, prefixOf(batch));
+
+  it("when every product is left out it says why, not that no photos were found (P2-1)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("all-left-out");
+    await folderUpload(w, batch, { "P_1.jpg": await jpeg(), "P_1.jpeg": await jpeg() });
+    await ingestAll(w, batch);
+    const done = await batchRow(batch.id);
+    expect(done.counts.failReason).toBe("The product could not be used: two different photos have the same shot number. Fix the files and start again.");
+  }, 60_000);
+
+  it("a left-out product on the product list is that row and not a second product (P2-3)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("left-out-on-list");
+    await folderUpload(w, batch, { "OK1_1.jpg": await jpeg(), "CL1_1.jpg": await jpeg(), "CL1_1.jpeg": await jpeg() });
+    const listPath = `${prefixOf(batch)}/uploads/items.csv`;
+    w.put(listPath, Buffer.from("Style\nOK1\nCL-1\nNOPHOTOS\n"));
+    await newUpload(batch, "product_list", "items.csv", `gs://${BUCKET}/${listPath}`);
+    await ingestAll(w, batch);
+    const report = await reportOf(w, batch);
+    expect(report!.leftOutProducts!.map((l) => l.identifier)).toEqual(["CL1"]);
+    const preview = await buildPreview(db, batch.id, { storage: w.storage });
+    expect(preview.rows.filter((r) => /^cl-?1$/i.test(r.identifier ?? "")).map((r) => r.identifier)).toHaveLength(1);
+    expect(preview.rows.map((r) => r.identifier)).toContain("NOPHOTOS");
+    expect((await batchRow(batch.id)).counts).toMatchObject({ products: 1, productsLeftOut: 1 });
+  }, 60_000);
+
+  it("a product list that cannot be used is named in the report as an input not read", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("list-not-read");
+    await folderUpload(w, batch, { "OK1_1.jpg": await jpeg() });
+    const listPath = `${prefixOf(batch)}/uploads/items.csv`;
+    w.put(listPath, Buffer.from("Image 1\nhttps://example.com/a.jpg\n"));
+    await newUpload(batch, "product_list", "items.csv", `gs://${BUCKET}/${listPath}`);
+    await ingestAll(w, batch);
+    const report = await reportOf(w, batch);
+    expect(report!.unsupportedFiles).toEqual([expect.objectContaining({ name: "items.csv", upload: true, reason: expect.stringContaining("could not be read") })]);
+  }, 60_000);
+
+  it("carries a Supabase folder's files under 1 KB into the ledger; a folder of only those is a product left out", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("under-1kb");
+    const id = await folderUpload(w, batch, { "OK1_1.jpg": await jpeg() });
+    const small = [{ name: "T/T_1.jpg", identifier: "T", reason: "T_1.jpg is under 1 KB, so it was treated as a placeholder, not a photo." }];
+    await db.update(catalogUploads).set({ detected: { kind: "image", supabaseFolder: { url: "u", mode: "folder", small } } }).where(eq(catalogUploads.id, id));
+    await ingestAll(w, batch);
+    const report = await reportOf(w, batch);
+    expect(report!.leftOutProducts).toMatchObject([{ identifier: "T", photos: 1, files: ["T/T_1.jpg"] }]);
+    expect(report!.unsupportedFiles).toEqual([expect.objectContaining({ name: "T/T_1.jpg", identifier: "T" })]);
+    expect((await batchRow(batch.id)).counts).toMatchObject({ products: 1, productsLeftOut: 1 });
+  }, 60_000);
 });

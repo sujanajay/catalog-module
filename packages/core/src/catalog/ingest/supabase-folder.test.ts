@@ -5,7 +5,7 @@ import { DEFAULT_BATCH_OPTIONS } from "../../db/schema";
 import { detectPastedText } from "./detect";
 import { groupItems } from "./group";
 import {
-  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
+  isReadCall, listSupabaseFolder, parseSupabaseFolderLink, SUPABASE_MAX_FILES, readSupabaseFolder, SUPABASE_CALL_TIMEOUT_MS, SUPABASE_EMPTY, SUPABASE_GLOBAL_CONCURRENCY, SUPABASE_MAX_PAUSES, supabaseFolderFailsMessage, SUPABASE_LIST_ATTEMPTS, SUPABASE_LIST_CONCURRENCY, SUPABASE_PAUSED, retryAfterMs, SupabaseHttpError, SUPABASE_MAX_FOLDERS, SUPABASE_SLICE_MS,
   SUPABASE_OFF, SUPABASE_OTHER_PROJECT, SUPABASE_PRIVATE, SUPABASE_TOO_LARGE, SUPABASE_UNREADABLE, supabaseFolderLinks, supabaseFolderText,
   supabaseStorageClient, type SupabaseListState, type SupabaseStorageLike,
 } from "./supabase-folder";
@@ -59,7 +59,7 @@ describe("Supabase folder links (M1-F1-R4)", () => {
     if (!listed.done) throw new Error("not listed in one request");
     expect(listed.files).toHaveLength(1008);
     expect(listed.skipped).toBe(1);
-    expect(listed.truncated).toBe(false);
+    expect(listed.small).toEqual(["ZSKU3/tiny.jpg"]);
     expect(calls).toContain("list softlines anta/Many 1000");
     expect(calls.every((c) => c.startsWith("list") || c.startsWith("bucket"))).toBe(true);
   });
@@ -435,5 +435,27 @@ describe("bounded, jittered Supabase retries (review 2)", () => {
     const { client, calls } = folders((prefix) => (prefix === "brand/P5" ? new SyntaxError("Unexpected token < in JSON") : null));
     expect(await readSupabaseFolder(client, LINK, { sleep: async () => undefined })).toEqual({ ok: false, error: SUPABASE_UNREADABLE });
     expect(calls.get("brand/P5")).toBe(1);
+  });
+});
+
+describe("nothing in a Supabase folder is lost without a word (owner, 2026-11-06)", () => {
+  it("refuses a folder over the batch limit whole, rather than cut it part way through a product", async () => {
+    const paths: Record<string, number | undefined> = {};
+    for (let i = 0; i <= SUPABASE_MAX_FILES; i++) paths[`anta/P${String(i).padStart(5, "0")}_1.jpg`] = undefined;
+    const { client } = fakeClient(paths);
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    expect(read).toEqual({ ok: false, error: SUPABASE_TOO_LARGE });
+    expect(SUPABASE_TOO_LARGE).toContain("30,000");
+  }, 60_000);
+
+  it("names each file under 1 KB under its product", async () => {
+    const { client } = fakeClient({ "anta/A/A_1.jpg": undefined, "anta/A/A_2.jpg": 300, "anta/B/B_1.jpg": 200 });
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    if (!read.ok) throw new Error("not read");
+    expect(read.small).toEqual([
+      { name: "A/A_2.jpg", identifier: "A", reason: "A_2.jpg is under 1 KB, so it was treated as a placeholder, not a photo." },
+      { name: "B/B_1.jpg", identifier: "B", reason: "B_1.jpg is under 1 KB, so it was treated as a placeholder, not a photo." },
+    ]);
+    expect(read.message).toContain("2 files under 1 KB skipped.");
   });
 });

@@ -153,7 +153,7 @@ it("R1 exit 2 finding 1: a product grouping left out is on the digest, the excep
  expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
  const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
  expect(batch!.digest).toMatchObject({products:2,productsWithLinks:1,productsLeftOut:1,sameFilesMerged:1,photosLeftOut:2});
- expect(digestHeadline(batch!.digest!)).toBe("1 of 2 products have links. 1 does not; the Exceptions sheet says why.");
+ expect(digestHeadline(batch!.digest!)).toBe("1 of 2 products have links. 1 product was left out; the Exceptions sheet says why.");
  expect(batch!.counts.productsLeftOut).toBe(1);
  const csv=(await w.deps.storage.downloadBuffer(batch!.digest!.page!.exceptionsCsv!)).buf.toString();
  expect(csv).toContain("DIFF");expect(csv).toContain("Keep the right photo for each shot number");
@@ -162,9 +162,26 @@ it("R1 exit 2 finding 1: a product grouping left out is on the digest, the excep
  expect(report.leftOutProducts).toMatchObject([{identifier:"DIFF",why:"same_shot",photos:2}]);
  expect(report.sameFiles).toHaveLength(1);
  const state=deriveBatchState({status:batch!.status,counts:batch!.counts});
- expect(state.text).not.toContain("Nothing needs your attention");expect(state.text).toContain("1 product was left out and has no links");
+ expect(state.text).not.toContain("Nothing needs your attention");expect(state.text).toContain("1 product was left out; the digest says why.");
  const row=(await db.execute(sql`SELECT success,cause,products,products_with_links FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;
- expect(row).toMatchObject([{success:false,cause:"products_left_out",products:2,products_with_links:1}]);
+ expect(row).toMatchObject([{success:false,cause:"input_left_out",products:2,products_with_links:1}]);
+},60_000);
+it("R1 exit 2 review P1-1: a failed upload is never all done, on the digest, the exceptions sheet, report.json, the banner and the outcome",async()=>{
+ const w=world(),s=await seed(w,"failed-upload");
+ await db.insert(catalogUploads).values({batchId:s.batch.id,kind:"zip",name:"a.zip",status:"failed",error:"The zip a.zip was not found in storage."});
+ await run(w,s);
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.digest).toMatchObject({products:1,productsWithLinks:1,uploadsNotRead:1,filesLeftOut:0});
+ expect(digestHeadline(batch!.digest!)).toBe("The product has links. 1 upload could not be read; the Exceptions sheet says why.");
+ const csv=(await w.deps.storage.downloadBuffer(batch!.digest!.page!.exceptionsCsv!)).buf.toString();
+ expect(csv).toContain("a.zip was not found in storage");
+ const report=JSON.parse((await w.deps.storage.downloadBuffer(batch!.reportUri!)).buf.toString());
+ expect(report.summary).toMatchObject({uploadsNotRead:1,filesLeftOut:0});
+ const state=deriveBatchState({status:batch!.status,counts:batch!.counts});
+ expect(state.text).not.toContain("Nothing needs your attention");expect(state.text).toContain("1 upload could not be read; the digest says why.");
+ const row=(await db.execute(sql`SELECT success,cause FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;
+ expect(row).toMatchObject([{success:false,cause:"input_left_out"}]);
 },60_000);
 it("R1 exit 2 finding 5: the outcome counts an unchanged product that keeps its live links, the same as the digest",async()=>{
  const w=world(),first=await seed(w,"outcome-unchanged");await run(w,first);expect((await handleFinalizeTask(w.deps,{batchId:first.batch.id})).outcome).toBe("done");
@@ -173,6 +190,19 @@ it("R1 exit 2 finding 5: the outcome counts an unchanged product that keeps its 
  expect(batch!.digest).toMatchObject({products:1,productsWithLinks:1,unchanged:1});
  const row=(await db.execute(sql`SELECT success,products,products_with_links FROM catalog_batch_outcomes WHERE batch_id=${next.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;
  expect(row).toMatchObject([{success:true,products:1,products_with_links:1}]);
+},60_000);
+it("a re-sent copy changed only by extension or path stays unchanged and keeps its live links",async()=>{
+ const w=world(),first=await seed(w,"resend-moved");await run(w,first);
+ const [live]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId,first.batch.id));
+ const next=await seed(w,"resend-moved-next",{productId:first.product.id});
+ await db.update(catalogSourceImages).set({originalName:"new/place/resend_1.jpeg"}).where(eq(catalogSourceImages.batchId,next.batch.id));
+ const copies=w.copy.mock.calls.length;
+ await run(w,next);
+ expect(w.copy.mock.calls.length).toBe(copies);
+ const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));
+ expect(pair!.change).toBe("unchanged");
+ const [still]=await db.select().from(catalogOutputs).where(eq(catalogOutputs.id,live!.id));
+ expect(still).toMatchObject({isLive:true,publicUrl:live!.publicUrl,generation:live!.generation});
 },60_000);
 it("M6-S6: a finalized batch writes its outcome row: success with no touch or incident, then touched after a decision and a re-finalize",async()=>{const w=world(),s=await seed(w,"outcome");await run(w,s);expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const first=(await db.execute(sql`SELECT status,success,cause,touches,incidents,products,products_with_links,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(first).toMatchObject([{status:"done",success:true,cause:null,touches:0,incidents:0,products:1,products_with_links:1}]);await db.execute(sql`INSERT INTO catalog_batch_touches (batch_id, action) VALUES (${s.batch.id}, 'decision')`);await enqueueFinalize(w.deps,s.batch.id,undefined,{reopen:true});expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");const again=(await db.execute(sql`SELECT success,cause,touches,links_ready_at FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;expect(again).toMatchObject([{success:false,cause:"touched",touches:1}]);expect(String(again[0]!.links_ready_at)).toBe(String(first[0]!.links_ready_at));},60_000);
 it("redelivery repeats no finished matte, render or copy; identical reupload keeps generations",async()=>{const w=world(),s=await seed(w,"repeat");await run(w,s);await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id));await handlePublishTask(w.deps,{batchId:s.batch.id,productId:s.product.id});expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const next=await seed(w,"repeat2",{productId:s.product.id});await run(w,next);expect(w.deps.matteFor).toHaveBeenCalledTimes(1);expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);expect(w.copy).toHaveBeenCalledTimes(1);const [pair]=await db.select().from(catalogBatchProducts).where(eq(catalogBatchProducts.batchId,next.batch.id));expect(pair!.change).toBe("unchanged");},60_000);

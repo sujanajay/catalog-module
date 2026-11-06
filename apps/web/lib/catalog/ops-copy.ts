@@ -229,7 +229,7 @@ export function incidentDurationText(i: { startedAt: Date; resolvedAt: Date | nu
 export const OUTCOME_CAUSE_WORDS: Record<string, string> = {
   touched: "A person stepped in",
   incident: "Something went wrong on our side",
-  products_left_out: "Products were left out",
+  input_left_out: "Some of what was sent was left out",
   failed: "Stopped",
   cancelled: "Cancelled",
 };
