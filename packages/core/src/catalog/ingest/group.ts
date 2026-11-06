@@ -301,7 +301,7 @@ function namedShot(e: Entry): number | null {
 export function notChosenMessage(name: string, precedence: BatchOptions["precedence"], shot: number | null): string {
   if (precedence === "links_only") return `${name} was not used: this product also came as links, and this batch uses links first.`;
   if (precedence === "uploads_only") return `${name} was not used: this product also came as uploaded files, and this batch uses uploaded files first.`;
-  return `${name} was not used: shot ${shot} also came as an uploaded file with a different photo, and the uploaded file was kept.`;
+  return `${name} was not used. An uploaded file has shot ${shot}, and we kept that file.`;
 }
 
 /**

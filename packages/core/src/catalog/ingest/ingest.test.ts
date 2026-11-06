@@ -1872,7 +1872,7 @@ describe("nothing is lost without a word at grouping (owner, 2026-11-06)", () =>
     const report = await reportOf(w, batch);
     const reasons = report!.unsupportedFiles.map((f) => (f as { reason: string }).reason);
     expect(reasons).toEqual(expect.arrayContaining([
-      "X_1.jpeg was not used: shot 1 also came as an uploaded file with a different photo, and the uploaded file was kept.",
+      "X_1.jpeg was not used. An uploaded file has shot 1, and we kept that file.",
       'Row 3: "htp://bad/side.jpg" is not a working link, so it was not used.',
     ]));
     expect(report!.leftOutProducts).toEqual([]);
