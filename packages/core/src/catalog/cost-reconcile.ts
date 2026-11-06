@@ -27,6 +27,7 @@ import { currentValue } from "../settings/store";
 import { OVERFLOW_ADAPTERS } from "../vendor/routes";
 import { openIncident, SUCCESS_TARGET, successRate } from "./reliability";
 import { pushAll } from "../arrays";
+import { googleTrafficAudit, syncTrafficShifts, type GooglePost, type TrafficAudit } from "./traffic-sync";
 
 const DAY_MS = 86_400_000;
 const GIB = 1024 ** 3;
@@ -155,13 +156,16 @@ export interface BillableSample { name: string; kind: "service" | "job"; region:
 export interface CostReaders {
   resources(): Promise<RunResource[]>;
   billableSeconds(from: Date, to: Date): Promise<BillableSample[]>;
+  /** Fills missing traffic shift records before the days are read (M6 decision C7). */
+  trafficAudit?: TrafficAudit;
 }
 
 /** A GET of a Google API URL that returns its JSON body (google-auth-library's client.request in the job). */
 export type GoogleGet = (url: string) => Promise<unknown>;
 
-export function googleCostReaders(get: GoogleGet, project: string): CostReaders {
+export function googleCostReaders(get: GoogleGet, project: string, post?: GooglePost): CostReaders {
   return {
+    ...(post ? { trafficAudit: googleTrafficAudit(post, project) } : {}),
     async resources() {
       const out: RunResource[] = [];
       for (const region of COST_REGIONS) {
@@ -301,7 +305,7 @@ function missingRecordAlerts(day: string, history: TrafficHistory, samples: read
   }
   return [...byService].map(([service, revisions]) => ({
     code: "traffic_shift_missing" as const, day, component: service, detail: { revisions: [...revisions] },
-    text: `${[...revisions].join(", ")} served traffic but has no traffic shift record, so its time is counted as serving and a batch around the shift can read deploy_overlap false. Re-run infra/deploy.sh before the service moves on, or record it by hand with the job catalog-traffic-shift.`,
+    text: `${[...revisions].join(", ")} served traffic but has no traffic shift record, so its time is counted as serving and a batch around the shift can read deploy_overlap false. The audit log has no usable entry for it yet; the next deploy and the next daily check try again.`,
   }));
 }
 
@@ -718,11 +722,33 @@ async function writeAlert(db: Db, a: CostAlert, now: Date): Promise<boolean> {
  * fails part-way writes no rows, records a `run_failed` alert (once per UTC day; emailed through daily_check_alert)
  * when the database still answers, and throws.
  */
+/**
+ * Runs before the days are read, so a lost record is back with its real time and no batch loses its cost. A failure costs
+ * no day: the day uses the records it has and findLostRecords, and the alert says the records may be short.
+ */
+async function syncShiftsForCost(db: Db, audit: TrafficAudit, resources: readonly RunResource[], now: Date): Promise<CostAlert[]> {
+  const day = utcDay(now, 0);
+  try {
+    const { recorded, unknownTime } = await syncTrafficShifts(db, audit, resources, now);
+    if (recorded.length) log("INFO", "traffic shifts filled from the audit log", { revisions: recorded });
+    return unknownTime.length ? [{
+      code: "traffic_shift_missing", day, component: null, detail: { revisions: unknownTime },
+      text: `${unknownTime.join(", ")} is serving, but neither a record nor the audit log says when it took traffic. Batches since the service's last record read deploy_overlap true, as they may have overlapped.`,
+    }] : [];
+  } catch (error) {
+    return [{
+      code: "traffic_shift_missing", day, component: null,
+      text: `The audit log could not be read to check traffic shift records, so deploy_overlap can read false for a move with no record, and a batch's idle can be short. It is tried again on the next deploy and the next daily check: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500),
+    }];
+  }
+}
+
 export async function runCostReconcile(db: Db, readers: CostReaders, options: { now?: Date; days?: number } = {}): Promise<RunResult> {
   const now = options.now ?? new Date();
   const count = Math.min(MAX_RECONCILE_DAYS, Math.max(1, Math.floor(options.days ?? RECONCILE_DAYS)));
   try {
     const resources = await readers.resources();
+    const syncAlerts = readers.trafficAudit ? await syncShiftsForCost(db, readers.trafficAudit, resources, now) : [];
     const plans: DayPlan[] = [];
     for (let n = 1; n <= count; n++) {
       const day = utcDay(now, n);
@@ -731,7 +757,7 @@ export async function runCostReconcile(db: Db, readers: CostReaders, options: { 
       plans.push(await planDay(db, day, { samples, resources, provisional: n <= 2 }));
     }
     const days = plans.map((p) => p.result);
-    const alerts = days.flatMap((d) => d.alerts);
+    const alerts = [...syncAlerts, ...days.flatMap((d) => d.alerts)];
     const rate = await successRate(db, new Date(+now - 7 * DAY_MS), now);
     if (rate.rate !== null && rate.rate < SUCCESS_TARGET) {
       alerts.push({ code: "success_under_target", day: utcDay(now, 0), component: null, text: `${rate.successes} of ${rate.counted} batches in the last 7 days finished with links and no person stepping in, under the ${Math.round(SUCCESS_TARGET * 100)}% target.`, detail: rate });

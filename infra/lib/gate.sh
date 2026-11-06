@@ -69,7 +69,7 @@ gate_measure_tagged() {
   [ "$(gate_json '(j?.status?.traffic ?? []).some((t) => t.revisionName === a[0] && String(t.tag ?? "").startsWith("measure-")) ? 1 : 0' "$1")" = 1 ]
 }
 
-# gate_record_shift <service> <revision> [time] [if-missing]: traffic moved, so write that down (catalog_traffic_shifts, read
+# gate_record_shift <service> <revision>: traffic moved, so write that down (catalog_traffic_shifts, read
 # by deploy_overlap and the daily cost check). This laptop cannot reach the private database, so it starts one execution
 # of the job catalog-traffic-shift (infra/deploy.sh keeps it on this commit's image) and does not wait. The time is taken
 # here, so a repeated start or a late write is the same row, and a network error is retried. Traffic has moved already,
@@ -87,68 +87,71 @@ gate_shift_lost() { # <service> <revision> <env values> <reason>
 }
 gate_record_shift() {
   [ "${CATALOG_PREVIEW:-0}" != 1 ] || return 0
-  local service=$1 revision=$2 at=${3:-} args err execution status=0
-  [ -n "$at" ] || at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local service=$1 revision=$2 at args err execution status=0
+  at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   args="SHIFT_SERVICE=$service,SHIFT_REVISION=$revision,SHIFT_AT=$at"
-  [ "${4:-}" != if-missing ] || args+=",SHIFT_IF_MISSING=1"
-  err=$(mktemp)
-  execution=$(gcloud_retry gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region="$GATE_SHIFT_REGION" --async --update-env-vars="$args" --format='value(metadata.name)' --quiet 2>"$err") || status=$?
+  err=$(mktemp) || err=""
+  execution=$(gcloud_retry gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region="$GATE_SHIFT_REGION" --async --update-env-vars="$args" --format='value(metadata.name)' --quiet 2>"${err:-/dev/null}") || status=$?
   execution=${execution//$'\r'/}; execution=${execution//$'\n'/}
   if [ "$status" != 0 ] || [ -z "$execution" ]; then
-    gate_shift_lost "$service" "$revision" "$args" "could not start the record job (exit $status): $(tail -n 1 "$err" | tr -d '\r' | cut -c1-200)"
+    gate_shift_lost "$service" "$revision" "$args" "could not start the record job (exit $status): $( [ -z "$err" ] || tail -n 1 "$err" | tr -d '\r' | cut -c1-200)"
   else
     GATE_SHIFT_STARTED+=("$execution|$service|$revision|$args")
   fi
-  rm -f "$err"
+  [ -z "$err" ] || rm -f "$err"
   return 0
 }
 
-# gate_confirm_live: a service the gate found already live (SKIP) gets a record of that revision if it has none, so a
-# re-run repairs a lost record: the first run's failed record, a shift that landed although gcloud reported a failure, a
-# hand move to a matching revision. The true time is gone, so it uses the revision's creation time: from then on its
-# time counts as serving, which at worst charges its probes to a batch rather than losing a batch's cost. A revision
-# with a record is left as it is (SHIFT_IF_MISSING in the job).
-gate_confirm_live() {
-  [ "${GATE_CONFIRM_LIVE:-0}" = 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ] || return 0
-  local json created=""
-  if json=$(gate_describe run revisions describe "$GATE_REVISION" --region="$SVC_REGION" 2>/dev/null); then
-    created=$(gate_json 'j?.metadata?.creationTimestamp' <<<"$json")
-  fi
-  if [ -z "$created" ]; then
-    gate_shift_lost "$SVC_NAME" "$GATE_REVISION" "SHIFT_SERVICE=$SVC_NAME,SHIFT_REVISION=$GATE_REVISION,SHIFT_AT=<when it took traffic>,SHIFT_IF_MISSING=1" "could not read when the revision was created, so its record was not checked"
+# gate_shift_report: waits for the record executions to end, starts one sync from Cloud Audit Logs, which fills any record
+# still missing with its real time on any commit (SHIFT_SYNC, packages/core/src/catalog/traffic-sync.ts), then says loudly
+# which shifts have no record. The audit log can lag the very last shift by a moment; the daily cost check syncs again.
+# An async execution's own failure shows up only here. Never fails the deploy. Called before the deploy report and on any
+# exit, and empties its lists, so nothing is said twice.
+gate_shift_wait() { # <execution>: sets GATE_SHIFT_STATE, until the deadline in GATE_SHIFT_DEADLINE
+  local json
+  while :; do
+    GATE_SHIFT_STATE=unreadable
+    if json=$(gcloud_retry gate_gcloud run jobs executions describe "$1" --region="$GATE_SHIFT_REGION" --format=json 2>/dev/null); then
+      GATE_SHIFT_STATE=$(printf '%s' "$json" | gcloud_job_state) || GATE_SHIFT_STATE=unreadable
+    fi
+    [ "$GATE_SHIFT_STATE" = running ] || return 0
+    if [ "$SECONDS" -ge "$GATE_SHIFT_DEADLINE" ]; then GATE_SHIFT_STATE="still running after $GATE_SHIFT_WAIT_S s (it may yet succeed)"; return 0; fi
+    sleep "$GCLOUD_POLL_S"
+  done
+}
+gate_shift_sync() {
+  [ "${CATALOG_PREVIEW:-0}" != 1 ] && [ "${GATE_SHIFT_SYNCED:-0}" != 1 ] || return 0
+  GATE_SHIFT_SYNCED=1
+  local execution
+  if ! execution=$(gcloud_retry gate_gcloud run jobs execute "$GATE_SHIFT_JOB" --region="$GATE_SHIFT_REGION" --async --update-env-vars=SHIFT_SYNC=1 --format='value(metadata.name)' --quiet 2>/dev/null); then
+    echo "WARN: could not start the traffic shift sync from the audit log; the daily cost check tries again" >&2
     return 0
   fi
-  gate_record_shift "$SVC_NAME" "$GATE_REVISION" "$created" if-missing
+  execution=${execution//$'\r'/}; execution=${execution//$'\n'/}
+  GATE_SHIFT_DEADLINE=$((SECONDS + GATE_SHIFT_WAIT_S))
+  gate_shift_wait "$execution"
+  if [ "$GATE_SHIFT_STATE" = succeeded ]; then echo "==> traffic shift sync from the audit log: done"
+  else echo "WARN: the traffic shift sync from the audit log did not finish ($execution: $GATE_SHIFT_STATE); the daily cost check tries again" >&2; fi
 }
-
-# gate_shift_report: waits for the record executions to end, then says loudly which traffic shifts have no record and how
-# to repair them. The async execution's own failure shows up only here. Never fails the deploy. Called before the deploy
-# report and on any exit, and empties its lists, so nothing is said twice.
 gate_shift_report() {
-  local entry execution service revision args state json deadline=$((SECONDS + GATE_SHIFT_WAIT_S)) ok=0
+  local entry execution service revision args ok=0
+  GATE_SHIFT_DEADLINE=$((SECONDS + GATE_SHIFT_WAIT_S))
   for entry in "${GATE_SHIFT_STARTED[@]}"; do
     IFS='|' read -r execution service revision args <<<"$entry"
-    while :; do
-      state=unreadable
-      if json=$(gcloud_retry gate_gcloud run jobs executions describe "$execution" --region="$GATE_SHIFT_REGION" --format=json 2>/dev/null); then
-        state=$(printf '%s' "$json" | gcloud_job_state) || state=unreadable
-      fi
-      [ "$state" = running ] || break
-      if [ "$SECONDS" -ge "$deadline" ]; then state="still running after $GATE_SHIFT_WAIT_S s (it may yet succeed)"; break; fi
-      sleep "$GCLOUD_POLL_S"
-    done
-    if [ "$state" = succeeded ]; then ok=$((ok + 1)); else gate_shift_lost "$service" "$revision" "$args" "execution $execution: $state"; fi
+    gate_shift_wait "$execution"
+    if [ "$GATE_SHIFT_STATE" = succeeded ]; then ok=$((ok + 1)); else gate_shift_lost "$service" "$revision" "$args" "execution $execution: $GATE_SHIFT_STATE"; fi
   done
   GATE_SHIFT_STARTED=()
   if [ "$ok" -gt 0 ]; then echo "==> traffic shift records: $ok written"; fi
+  gate_shift_sync
   if [ ${#GATE_SHIFT_LOST[@]} -gt 0 ]; then
     {
       echo "################################################################################"
       echo "WARNING: ${#GATE_SHIFT_LOST[@]} TRAFFIC SHIFT RECORD(S) NOT WRITTEN. The deploy itself is not affected."
       for entry in "${GATE_SHIFT_LOST[@]}"; do echo "  $entry"; done
-      echo "Until repaired, batches around these shifts can read deploy_overlap=false and the daily cost check raises an alert."
-      echo "To repair: re-run bash infra/deploy.sh (a service already live gets its record), or run the line above,"
-      echo "before the service next moves to another revision."
+      echo "Until repaired, batches around these shifts can read deploy_overlap=false."
+      echo "To repair now: run the line above, it has the exact time. Otherwise the next deploy and the daily cost"
+      echo "check fill it from Cloud Audit Logs with the real time, and raise an alert if they cannot."
       echo "################################################################################"
     } >&2
   fi
@@ -236,7 +239,7 @@ gate_matches_live() {
 # same three steps for several services, the first two at once.
 deploy_service() {
   gate_prepare "$1" || return $?
-  if [ "$GATE_PROBE_NEEDED" != 1 ]; then gate_confirm_live; return 0; fi
+  [ "$GATE_PROBE_NEEDED" = 1 ] || return 0
   gate_probe || return $?
   gate_promote
 }
@@ -251,7 +254,7 @@ gate_prepare() {
   SVC_TAG=""; SVC_MAX=""
   "$fn"
   GATE_URL=""; GATE_TAG_URL=""; GATE_REVISION=""; GATE_PREVIOUS=""; GATE_CHANGED=0
-  GATE_PROBE_NEEDED=0; GATE_NEEDS_SHIFT=0; GATE_NEEDS_MAX=0; GATE_PREVIOUS_MEASURE=0; GATE_CONFIRM_LIVE=0
+  GATE_PROBE_NEEDED=0; GATE_NEEDS_SHIFT=0; GATE_NEEDS_MAX=0; GATE_PREVIOUS_MEASURE=0
   tag=${SVC_TAG:-$CANDIDATE_TAG}
   if [ "$SVC_DEPLOY" = skip ]; then
     echo "==> $SVC_NAME: not deployed (${SVC_SKIP_REASON:-not used by this deploy})"
@@ -297,7 +300,6 @@ gate_prepare() {
     # In a group (GATE_DEFER_MAX=1) the max waits for gate_promote, which runs only when every probe of the group
     # passed (2026-11-05 review P2-1).
     if [ "$SVC_SHIFT" = 1 ]; then
-      GATE_CONFIRM_LIVE=1
       if [ "${GATE_DEFER_MAX:-0}" = 1 ]; then GATE_NEEDS_MAX=1; else gate_service_max "$service_json" || return 1; fi
     fi
     return 0
@@ -404,7 +406,7 @@ gate_promote() {
     }
   fi
   gate_gcloud run services update-traffic "$SVC_NAME" --region="$SVC_REGION" --to-revisions="$GATE_REVISION=100" --quiet >/dev/null || {
-    gate_fail "the traffic shift to $GATE_REVISION failed (if it did land, a re-run of the deploy records it)"
+    gate_fail "the traffic shift to $GATE_REVISION failed (if it did land, the audit log sync records it)"
     return 1
   }
   if [ "$GATE_PREVIOUS" != "$GATE_REVISION" ]; then gate_record_shift "$SVC_NAME" "$GATE_REVISION"; fi
@@ -443,7 +445,7 @@ GATE_GROUP_SHIFTED=()
 # The GATE_* values of the current service as shell assignments (round 1 and 2 run in subshells).
 gate_state() {
   local v
-  for v in GATE_URL GATE_TAG_URL GATE_REVISION GATE_PREVIOUS GATE_CHANGED GATE_PROBE_NEEDED GATE_NEEDS_SHIFT GATE_NEEDS_MAX GATE_PREVIOUS_MEASURE GATE_CONFIRM_LIVE GATE_STATUS; do
+  for v in GATE_URL GATE_TAG_URL GATE_REVISION GATE_PREVIOUS GATE_CHANGED GATE_PROBE_NEEDED GATE_NEEDS_SHIFT GATE_NEEDS_MAX GATE_PREVIOUS_MEASURE GATE_STATUS; do
     printf '%s=%q\n' "$v" "${!v}"
   done
 }
@@ -506,7 +508,6 @@ gate_group() {
   for name in "$@"; do
     gate_group_load "$name"
     gate_promote || return 1
-    gate_confirm_live
     if [ "$GATE_NEEDS_SHIFT" = 1 ]; then GATE_GROUP_SHIFTED+=("$name"); fi
   done
 }

@@ -1041,6 +1041,8 @@ export const catalogTrafficShifts = pgTable(
     service: text("service").notNull(),
     revision: text("revision").notNull(),
     shiftedAt: timestamp("shifted_at", { withTimezone: true }).notNull(),
+    /** Set when the time is unknown (M6 decision C6): traffic moved somewhere from shifted_at to this. */
+    shiftedUntil: timestamp("shifted_until", { withTimezone: true }),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

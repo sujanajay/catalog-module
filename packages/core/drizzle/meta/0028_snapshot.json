@@ -7307,6 +7307,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "shifted_until": {
+          "name": "shifted_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "recorded_at": {
           "name": "recorded_at",
           "type": "timestamp with time zone",

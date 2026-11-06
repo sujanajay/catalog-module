@@ -566,18 +566,30 @@ test('a network error on the record is retried with the same time, so it stays o
   assert.doesNotMatch(r.err, /not recorded/);
 });
 
-test('a re-run repairs a lost record: SKIP asks the job to record the live revision at its creation time, only if it has none', () => {
-  const r = run('record-repair', 'deploy_service test-svc', {LIVE_MATCH: '1'});
+test('every report starts one audit log sync, on any commit and with nothing moved, and it moves no traffic', () => {
+  const sync = 'run jobs execute catalog-traffic-shift --region=asia-south1 --async --update-env-vars=SHIFT_SYNC=1 --format=value(metadata.name) --quiet';
+  let r = run('sync-skip', 'deploy_service test-svc; gate_shift_report; gate_shift_report', {LIVE_MATCH: '1', GCLOUD_POLL_S: '0'});
   assert.equal(r.status, 0, r.err);
-  assert.ok(lines(r.out).some((l) => l.includes('SKIP')), r.out);
-  assert.deepEqual(recordCalls(r), [`run jobs execute catalog-traffic-shift --region=asia-south1 --async --update-env-vars=SHIFT_SERVICE=test-svc,SHIFT_REVISION=${OLD},SHIFT_AT=2026-11-01T02:03:04.123456Z,SHIFT_IF_MISSING=1 --format=value(metadata.name) --quiet`]);
-  assert.ok(!r.calls.some((c) => c.includes('update-traffic')), 'a repair moves no traffic');
-  const group = run('record-repair-group', `service_catalog_matting() { service_test_svc; SVC_NAME=catalog-matting; }
-gate_group catalog-matting`, {LIVE_MATCH: '1'});
-  assert.equal(group.status, 0, group.err);
-  assert.match(recordCalls(group)[0], /SHIFT_SERVICE=catalog-matting,.*SHIFT_IF_MISSING=1/);
-  const preview = run('record-repair-preview', 'deploy_service test-svc', {LIVE_MATCH: '1', CATALOG_PREVIEW: '1'});
-  assert.deepEqual(recordCalls(preview), []);
+  assert.deepEqual(recordCalls(r).filter((c) => c !== sync), [], 'a SKIP records nothing itself');
+  assert.equal(r.calls.filter((c) => c === sync).length, 1, r.calls.join('\n'));
+  assert.ok(!r.calls.some((c) => c.includes('update-traffic')));
+  assert.ok(r.out.includes('traffic shift sync from the audit log: done'), r.out);
+  // The sync runs after the records have ended, so its check of what is serving sees them.
+  r = run('sync-order', 'deploy_service test-svc; gate_shift_report', {GCLOUD_POLL_S: '0'});
+  const at = (text) => r.calls.findIndex((c) => c.includes(text));
+  assert.ok(at('SHIFT_REVISION=') < at('executions describe') && at('executions describe') < at('SHIFT_SYNC=1'), r.calls.join('\n'));
+  // Its failure warns and fails nothing.
+  r = run('sync-failed', 'gate_shift_report; echo "RC=$?"', {RECORD_FAILS: '1', GCLOUD_POLL_S: '0'});
+  assert.equal(r.status, 0, r.err);
+  assert.ok(r.out.includes('RC=0'), r.out);
+  assert.match(r.err, /the traffic shift sync from the audit log did not finish .*the daily cost check tries again/);
+  assert.doesNotMatch(r.err, /NOT WRITTEN/);
+  r = run('sync-unstarted', 'gate_shift_report; echo "RC=$?"', {RECORD_ERROR: '1'});
+  assert.ok(r.out.includes('RC=0'), r.out);
+  assert.match(r.err, /could not start the traffic shift sync/);
+  // The preview stack is not the live one.
+  r = run('sync-preview', 'gate_shift_report', {CATALOG_PREVIEW: '1'});
+  assert.ok(!r.calls.some((c) => c.includes('SHIFT_SYNC')));
 });
 
 test('the end of a deploy says loudly which records were not written and how to repair them, and never fails', () => {
@@ -593,7 +605,8 @@ test('the end of a deploy says loudly which records were not written and how to 
   assert.match(r.err, /WARNING: 1 TRAFFIC SHIFT RECORD\(S\) NOT WRITTEN/);
   assert.ok(r.err.includes(`test-svc ${NEW}: execution catalog-traffic-shift-abc12: failed: database refused`), r.err);
   assert.match(r.err, /by hand: gcloud run jobs execute catalog-traffic-shift --region=asia-south1 --async --update-env-vars=SHIFT_SERVICE=test-svc,/);
-  assert.match(r.err, /re-run bash infra\/deploy\.sh/);
+  assert.match(r.err, /To repair now: run the line above.*\n.*Cloud Audit Logs with the real time/);
+  assert.ok(r.err.indexOf('by hand: gcloud run jobs execute') < r.err.indexOf('To repair now'));
   // Could not start it: the same block, with gcloud's reason.
   r = run('report-unstarted', 'deploy_service test-svc; gate_shift_report', {RECORD_ERROR: '1'});
   assert.equal(r.status, 0, r.err);
@@ -614,9 +627,9 @@ test('deploy.sh: the record report runs before the deploy report and on any exit
   assert.ok(!/echo "gcloud run services update-traffic \$name --to-revisions \$previous/.test(gate));
 });
 
-test('nothing is recorded when traffic did not move: failed probe, failed shift, no-shift candidate, the preview stack', () => {
+test('nothing is recorded when traffic did not move: SKIP, failed probe, failed shift, no-shift candidate, the preview stack', () => {
   for (const [label, env] of [
-    ['norecord-probe', {PROBE: 'exit 3'}], ['norecord-shift', {SHIFT_ERROR: '1'}],
+    ['norecord-skip', {LIVE_MATCH: '1'}], ['norecord-probe', {PROBE: 'exit 3'}], ['norecord-shift', {SHIFT_ERROR: '1'}],
     ['norecord-noshift', {SHIFT: '0', CAND_TAG: 'c1'}], ['norecord-preview', {CATALOG_PREVIEW: '1'}],
   ]) {
     const r = run(label, 'deploy_service test-svc || true', env);

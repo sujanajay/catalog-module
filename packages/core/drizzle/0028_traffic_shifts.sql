@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS "catalog_traffic_shifts" (
 	"service" text NOT NULL,
 	"revision" text NOT NULL,
 	"shifted_at" timestamp with time zone NOT NULL,
+	"shifted_until" timestamp with time zone,
 	"recorded_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "catalog_traffic_shifts_revision_shifted_at_pk" PRIMARY KEY("revision","shifted_at")
 );

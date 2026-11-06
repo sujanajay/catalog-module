@@ -35,7 +35,7 @@ gate_gcloud() {
       if [ "${LIVE_MATCH:-0}" = 1 ]; then
         env=$(node -e 'console.log(JSON.stringify(process.argv[1].split(",").map((p) => ({name: p.split("=")[0], value: p.slice(p.indexOf("=") + 1)})).concat([{name: "DB_PASSWORD", valueFrom: {secretKeyRef: {name: "s", key: "latest"}}}])))' "$SVC_ENV,DEPLOY_ARGS_SHA=${LIVE_FP:-$(gate_fingerprint)}")
       fi
-      printf '%s\r\n' '{"metadata":{"creationTimestamp":"2026-11-01T02:03:04.123456Z"},"spec":{"containers":[{"env":'"$env"'}]},"status":{"imageDigest":"asia-south1-docker.pkg.dev/p/apps/test@'"${LIVE_DIGEST:-$DIGEST}"'"}}' ;;
+      printf '%s\r\n' '{"spec":{"containers":[{"env":'"$env"'}]},"status":{"imageDigest":"asia-south1-docker.pkg.dev/p/apps/test@'"${LIVE_DIGEST:-$DIGEST}"'"}}' ;;
     "run services update")
       if [ "${MAX_ERROR:-0}" = 1 ]; then echo "ERROR: update mocked" >&2; return 1; fi ;;
     "run services update-traffic")

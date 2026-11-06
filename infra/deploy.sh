@@ -453,6 +453,11 @@ if [ "$MEASURE_ONLY" != 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
     --service-account="$WORKER_SA" --max-retries=2 --task-timeout=300 "${NET[@]}" --labels="$SHIFT_JOB_LABELS" \
     --set-secrets="$SECRETS" --set-env-vars="$ENV_VARS,DB_POOL_MAX=$JOB_DB_POOL_MAX" \
     || echo "WARN: could not update the job catalog-traffic-shift; this deploy's traffic shifts may go unrecorded (the end of the deploy lists them with the line to run)" >&2
+  # The job and the daily cost check read Cloud Audit Logs for missing records (M6 decision C6). Read only.
+  if ! gcloud_retry gcloud projects get-iam-policy "$PROJECT" --flatten='bindings[].members' --filter="bindings.role=roles/logging.viewer" --format='value(bindings.members)' 2>/dev/null | tr -d '\r' | grep -qxF "serviceAccount:$WORKER_SA"; then
+    gcloud_retry gcloud projects add-iam-policy-binding "$PROJECT" --quiet --condition=None --member="serviceAccount:$WORKER_SA" --role=roles/logging.viewer >/dev/null \
+      || echo "WARN: could not grant roles/logging.viewer to $WORKER_SA; the audit log sync will warn and the daily cost check will raise an alert" >&2
+  fi
 fi
 
 

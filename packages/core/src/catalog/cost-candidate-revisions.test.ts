@@ -8,7 +8,8 @@ import type { Db } from "../db/client";
 import { catalogTrafficShifts } from "../db/schema";
 import { createTestDb } from "../db/testing";
 import { recordTrafficShift } from "./reliability";
-import { billedLines, googleCostReaders, reconcileDay, runResourceFrom, samplesFrom, trafficHistory, waitingForTraffic, type BillableSample, type MonitoringSeries, type RunResource } from "./cost-reconcile";
+import type { TrafficEntry } from "./traffic-sync";
+import { runCostReconcile, billedLines, googleCostReaders, reconcileDay, runResourceFrom, samplesFrom, trafficHistory, waitingForTraffic, type BillableSample, type MonitoringSeries, type RunResource } from "./cost-reconcile";
 
 const DAY = "2026-11-10";
 const SERVICE = "catalog-upscale-gpu", LIVE = `${SERVICE}-00030-liv`, CANDIDATE = `${SERVICE}-00031-can`, FAILED = `${SERVICE}-00032-bad`;
@@ -154,8 +155,43 @@ describe("a candidate revision overlapping a batch", () => {
     const live = { ...RESOURCE, liveRevisions: [CANDIDATE] };
     const args = { samples: [sample(CANDIDATE, "10:00", 30)], resources: [live], provisional: true, now: new Date("2026-11-11T06:00:00Z") };
     expect((await reconcileDay(db, DAY, args)).alerts.map((x) => x.code)).toContain("traffic_shift_missing");
-    await recordTrafficShift(db, { service: SERVICE, revision: CANDIDATE, at: new Date(`${DAY}T09:00:00Z`), ifMissing: true });
+    await recordTrafficShift(db, { service: SERVICE, revision: CANDIDATE, at: new Date(`${DAY}T09:00:00Z`) });
     expect((await reconcileDay(db, DAY, args)).alerts.map((x) => x.code)).not.toContain("traffic_shift_missing");
+  });
+
+  describe("the daily run fills records from the audit log first", () => {
+    // Review round 2, P3-1: all of X's work ends inside the old revision's idle tail, so the fail-safe alone cannot see it.
+    const X = `${SERVICE}-00034-xxx`;
+    const samples = [sample(LIVE, "09:57", 33), sample(X, "10:05", 25)];
+    const run = (trafficAudit?: () => Promise<TrafficEntry[]>) => runCostReconcile(db, {
+      resources: async () => [RESOURCE],
+      billableSeconds: async (from) => (from.toISOString().startsWith(DAY) ? samples : []),
+      ...(trafficAudit ? { trafficAudit } : {}),
+    }, { now: new Date("2026-11-11T06:00:00Z"), days: 1 });
+
+    it("the narrow gap: the lost move comes back, so the batch keeps X's idle", async () => {
+      await run(async () => [{ service: SERVICE, atMs: min("10:05"), serving: [X] }]);
+      const { rows } = (await db.execute(sql`SELECT count(*)::int AS n FROM catalog_traffic_shifts WHERE revision = ${X} AND shifted_at = ${new Date(min("10:05")).toISOString()}::timestamptz`)) as unknown as { rows: { n: number }[] };
+      expect(rows[0]!.n).toBe(1);
+      expect((await allocation()).idle).toBeCloseTo((58 * 60 - 600) * USD_PER_S, 6);
+    });
+
+    it("the same day with no audit read shows the gap the sync closes: X is taken for a candidate, with no alert", async () => {
+      const result = await run();
+      expect((await allocation()).idle).toBeCloseTo((33 * 60 - 600) * USD_PER_S, 6);
+      expect(result.alerts.filter((x) => x.code === "traffic_shift_missing")).toEqual([]);
+    });
+
+    it("an unreadable audit log still closes the day and raises the alert", async () => {
+      const result = await run(async () => { throw new Error("403 from logging"); });
+      expect(result.days).toHaveLength(1);
+      expect(result.alerts.find((x) => x.code === "traffic_shift_missing" && x.component === null)?.text).toContain("403 from logging");
+    });
+
+    it("a serving revision with no time at all raises the alert and counts as serving", async () => {
+      const result = await runCostReconcile(db, { resources: async () => [{ ...RESOURCE, liveRevisions: [X] }], billableSeconds: async () => [], trafficAudit: async () => [] }, { now: new Date("2026-11-11T06:00:00Z"), days: 1 });
+      expect(result.alerts.find((x) => x.code === "traffic_shift_missing" && x.component === null)?.detail).toEqual({ revisions: [X] });
+    });
   });
 
   it("the same day read per service, or before any shift was recorded, keeps the old rule", async () => {

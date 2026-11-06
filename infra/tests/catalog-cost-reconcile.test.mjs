@@ -22,7 +22,7 @@ fs.mkdirSync(path.join(dir, 'state'));
 const WORKER = 'catalog-worker@image-links-agent.iam.gserviceaccount.com';
 const IMAGE = 'asia-south1-docker.pkg.dev/image-links-agent/apps/worker:abc1234';
 const URI = 'https://run.googleapis.com/v2/projects/image-links-agent/locations/asia-south1/jobs/catalog-cost-reconcile:run';
-const ROLES = ['roles/monitoring.viewer', 'roles/run.viewer', 'roles/run.invoker'];
+const ROLES = ['roles/monitoring.viewer', 'roles/run.viewer', 'roles/logging.viewer', 'roles/run.invoker'];
 
 const workerEnv = [
   {name: 'GCP_PROJECT', value: 'image-links-agent'}, {name: 'REGION', value: 'asia-south1'},
@@ -99,8 +99,8 @@ try {
   assert.ok(sched, 'schedule not created');
   for (const part of ['--schedule=0 6 * * *', '--time-zone=Etc/UTC', `--uri=${URI}`, '--http-method=POST', `--oauth-service-account-email=${WORKER}`]) assert.ok(sched.includes(part), 'schedule lacks ' + part);
   assert.ok(r.calls.some((x) => x.endsWith('gcloud run jobs execute catalog-cost-reconcile --region=asia-south1 --update-env-vars=COST_RECONCILE_DAYS=14 --wait')), 'first backfill not run');
-  assert.equal(lines(r, 'CREATE').length, 6, r.stdout);
-  console.log('PASS first run creates three read roles, job and schedule, then runs a 14-day backfill');
+  assert.equal(lines(r, 'CREATE').length, 7, r.stdout);
+  console.log('PASS first run creates four read roles, job and schedule, then runs a 14-day backfill');
   cases++;
 
   // 2. Second run against that state: nothing created or updated.
