@@ -132,6 +132,11 @@ describe("links-sheet.detectColumns", () => {
     ]);
   });
 
+  it("a repeated row whose link differs only by its token holds no new link", () => {
+    const r = read(table([["Option ID", "Image 1"], ["ABC-123", `${img("ABC123", 1)}?token=a`], ["ABC-123", `${img("ABC123", 1)}?token=b`]]));
+    expect(r.rejected).toEqual([]);
+  });
+
   it("loses nothing when a repeated row holds the same links (the sizes of one colour)", () => {
     const r = read(table([
       ["Option ID", "Image 1"],

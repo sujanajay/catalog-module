@@ -7,7 +7,7 @@ import { fileTypeFromBuffer } from "file-type";
 import { safeFetch, type SafeFetchOptions } from "../../safe-url";
 import { normalizeKey, parseShotName } from "../naming";
 import { extOf, isLinkToken, splitCell, urlFileName, type SheetSourceItem } from "./links-sheet";
-import type { Adapter, IngestDeps, SourceItem } from "./types";
+import type { Adapter, CollectInput, IngestDeps, SourceItem, UploadReject } from "./types";
 import { maxOf, minOf } from "../../arrays";
 
 /**
@@ -24,8 +24,17 @@ export interface PastedTable {
   linksPerRow: { min: number; max: number };
   shape: "one_per_line" | "id_and_links" | "links_grid";
   ignoredCells: number;
+  /** Cells that look like a link but cannot be read as one: a photo the paste meant and does not deliver. */
+  badLinks: { row: number; cell: string; identifier: string | null }[];
   collisions: { name: string; rows: number[] }[];
 }
+
+/**
+ * A cell that meant to be a link: a scheme or `www.`, or on a row with no link at all, an image file name. Beside a real
+ * link, a file name is only a label; other extra cells (a colour, a price) are not photos.
+ */
+const LOOKS_LIKE_LINK = /:\/\/|^www\./i;
+const IMAGE_FILE_NAME = /\.(jpe?g|png|webp|heic|heif|tiff?|bmp|gif|avif)$/i;
 
 /** Cells that are never an identifier: blank, `0`, `-` and `n/a`. */
 const FILLER = new Set(["", "0", "-", "n/a"]);
@@ -43,9 +52,13 @@ const FILLER = new Set(["", "0", "-", "n/a"]);
 export function parsePastedLinks(text: string): PastedTable {
   const rows: PastedRow[] = [];
   let ignoredCells = 0;
+  const badLinks: PastedTable["badLinks"] = [];
   text.split(/\r?\n/).forEach((line, i) => {
     const tokens = line.includes("\t") ? line.split("\t").flatMap((cell) => (cell.trim() === "" ? [""] : splitCell(cell))) : splitCell(line);
     const urls = tokens.filter(isLinkToken);
+    const isBad = (t: string) => !isLinkToken(t) && (LOOKS_LIKE_LINK.test(t) || (!urls.length && IMAGE_FILE_NAME.test(t)));
+    const firstCell = tokens.find((t) => !isLinkToken(t) && !isBad(t) && !FILLER.has(t.toLowerCase())) ?? null;
+    for (const token of tokens) if (isBad(token)) badLinks.push({ row: i + 1, cell: token.split("?")[0]!.slice(0, 80), identifier: firstCell });
     if (!urls.length) return;
     const columns = tokens.flatMap((token, k) => (isLinkToken(token) ? [k + 1] : []));
     let identifier: string | null = null;
@@ -73,7 +86,7 @@ export function parsePastedLinks(text: string): PastedTable {
   return {
     rows, links: counts.reduce((a, b) => a + b, 0),
     linksPerRow: { min: minOf(counts) ?? 0, max: maxOf(counts) ?? 0 },
-    shape, ignoredCells, collisions,
+    shape, ignoredCells, badLinks, collisions,
   };
 }
 
@@ -123,12 +136,21 @@ export function urlListItems(table: PastedTable, uploadId: string): SheetSourceI
 }
 
 /** kind "url_list". */
+/** The pasted text of an upload. */
+export async function pastedText(input: Pick<CollectInput, "upload" | "deps">): Promise<string> {
+  const { upload, deps } = input;
+  return upload.gcsUri ? (await deps.storage.downloadBuffer(upload.gcsUri)).buf.toString("utf8") : (upload.sourceUrl ?? "");
+}
+
+/** The cells of a paste that look like a link and are not one, as rejects under their row's product. */
+export function badLinkRejects(table: Pick<PastedTable, "badLinks">): UploadReject[] {
+  return table.badLinks.map(({ row, cell, identifier }) => ({ name: `Row ${row}`, ...(identifier ? { identifier } : {}), reason: `Row ${row}: "${cell}" is not a working link, so it was not used.` }));
+}
+
 export const urlListAdapter: Adapter = {
   kind: "url_list",
   async collect(input) {
-    const { upload, deps } = input;
-    const text = upload.gcsUri ? (await deps.storage.downloadBuffer(upload.gcsUri)).buf.toString("utf8") : (upload.sourceUrl ?? "");
-    return urlListItems(parsePastedLinks(text), upload.id);
+    return urlListItems(parsePastedLinks(await pastedText(input)), input.upload.id);
   },
 };
 

@@ -448,6 +448,14 @@ describe("nothing in a Supabase folder is lost without a word (owner, 2026-11-06
     expect(SUPABASE_TOO_LARGE).toContain("30,000");
   }, 60_000);
 
+  it("a tiny file inside a real product is a file of it, not a product of its own; system files are not listed (P2-D)", async () => {
+    const { client } = fakeClient({ "anta/10255347_Black/10255347_Black_1.jpg": undefined, "anta/10255347_Black/thumb.jpg": 300, "anta/10288257_Red/10288257_Red_1.jpg": undefined, "anta/10288257_Red/thumb.jpg": 300, "anta/10288257_Red/Thumbs.db": 200, "anta/OnlyTiny/thumb.jpg": 100 });
+    const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });
+    if (!read.ok || !("small" in read)) throw new Error("not read");
+    expect(read.mode).toBe("filename");
+    expect(read.small.map((r) => [r.name, r.identifier])).toEqual([["10255347_Black/thumb.jpg", "10255347_Black"], ["10288257_Red/thumb.jpg", "10288257_Red"], ["OnlyTiny/thumb.jpg", "OnlyTiny"]]);
+  });
+
   it("names each file under 1 KB under its product", async () => {
     const { client } = fakeClient({ "anta/A/A_1.jpg": undefined, "anta/A/A_2.jpg": 300, "anta/B/B_1.jpg": 200 });
     const read = await readSupabaseFolder(client, PUBLIC, { sliceMs: 1e9 });

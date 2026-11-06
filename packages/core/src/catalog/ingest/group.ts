@@ -1,7 +1,7 @@
 // Grouping (spec 04, "Grouping"): which product every file belongs to and at which shot position,
 // under the three identifier modes and the three precedences; the step 4 grouping rows and warning
 // sentences. Deterministic: the order items arrive in never changes the result.
-import { normalizeKey, renumberShots } from "../naming";
+import { normalizeKey, parseShotName, renumberShots } from "../naming";
 import type { BatchOptions, ChannelId, IdentifierMode, OutputFlag } from "../types";
 import { classifyImageReject } from "./image-check";
 import { classifyLinkReject } from "./link-reasons";
@@ -77,7 +77,7 @@ export function isProductRefusal(reason: string): boolean {
   return PRODUCT_REFUSAL.test(reason);
 }
 const OLDER_SPELLING = / is the same product as .+\. Only the newest photos are used\.$/;
-/** True for the files of an older spelling: its product carries on under the newest one, so nothing of it is lost. */
+/** True for the files of an older spelling: its product carries on under the newest one, though a photo only it had is not used. */
 export function isOlderSpelling(reason: string): boolean {
   return OLDER_SPELLING.test(reason);
 }
@@ -249,7 +249,7 @@ export function originalOf(item: SourceItem): SourceItem {
   return originals.get(item) ?? item;
 }
 
-interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean; mode: IdentifierMode; notes?: string[] }
+interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean; mode: IdentifierMode; notes?: string[]; shown?: number | null }
 
 const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(a.item.uploadId, b.item.uploadId);
 
@@ -281,11 +281,27 @@ function mergeSameFiles(id: string, list: Entry[], sha256Of: (item: SourceItem) 
     list: out.map((e) => {
       const raw = e.raw === null ? null : e.raw - closed.filter((r) => r < e.raw!).length;
       const others = dropped.get(e);
-      if (!others) return { ...e, raw };
+      if (!others) return { ...e, raw, shown: e.raw };
       same.push({ identifier: id, n: raw, kept: e.item.originalName, dropped: others.map((o) => o.item.originalName) });
-      return { ...e, raw, notes: [sameFileMessage(baseName(e.item), others.map((o) => baseName(o.item)))] };
+      return { ...e, raw, shown: e.raw, notes: [sameFileMessage(baseName(e.item), others.map((o) => baseName(o.item)))] };
     }),
   };
+}
+
+/**
+ * The shot a pasted row's file name states for this product (`X_2.jpg` under X), or null. A row's own number is only its
+ * place, but a name like this is the sender's: two different photos named X_2, or an upload X_2 beside it, are one shot.
+ */
+function namedShot(e: Entry): number | null {
+  const parsed = parseShotName(baseName(e.item));
+  return parsed.n !== null && normalizeKey(parsed.identifier) === normalizeKey(e.id) ? parsed.n : null;
+}
+
+/** The file row for a photo precedence did not choose (its bytes are not among the photos used). */
+export function notChosenMessage(name: string, precedence: BatchOptions["precedence"], shot: number | null): string {
+  if (precedence === "links_only") return `${name} was not used: this product also came as links, and this batch uses links first.`;
+  if (precedence === "uploads_only") return `${name} was not used: this product also came as uploaded files, and this batch uses uploaded files first.`;
+  return `${name} was not used: shot ${shot} also came as an uploaded file with a different photo, and the uploaded file was kept.`;
 }
 
 /**
@@ -297,9 +313,12 @@ function pastesInOrder(list: Entry[]): Entry[] {
   const pastes = new Map<string, Entry[]>();
   for (const e of list) if (e.item.positional && e.raw !== null) pastes.set(e.item.uploadId, [...(pastes.get(e.item.uploadId) ?? []), e]);
   if (pastes.size < 2) return list;
+  // Ordered by what the paste holds, never its upload id: an unchanged re-send gets a new id and must keep its shot order.
+  const linksOf = (rows: Entry[]) => rows.map((e) => (e.item.bytes.kind === "url" ? e.item.bytes.url.split("?")[0]! : "")).sort(byText).join("\n");
+  const inOrder = [...pastes.values()].map((rows) => ({ rows, key: linksOf(rows) })).sort((a, b) => byText(a.key, b.key));
   const after = new Map<Entry, number>();
   let offset = 0;
-  for (const rows of pastes.values()) {
+  for (const { rows } of inOrder) {
     for (const e of rows) after.set(e, e.raw! + offset);
     offset = Math.max(...rows.map((e) => after.get(e)!));
   }
@@ -376,11 +395,27 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
     const links = list.filter((e) => e.link);
     // Precedence only decides for a product that both kinds have; a product only one kind has keeps it.
     if (uploads.length && links.length) {
-      if (options.precedence === "uploads_only") list = uploads;
-      else if (options.precedence === "links_only") list = links;
-      else {
+      // A row's place is not a shot the sender named, so a pasted row with no named shot follows the uploads and loses nothing.
+      let lost: { e: Entry; shot: number | null }[];
+      if (options.precedence === "uploads_only") {
+        list = uploads;
+        lost = links.map((e) => ({ e, shot: null }));
+      } else if (options.precedence === "links_only") {
+        list = links;
+        lost = uploads.map((e) => ({ e, shot: null }));
+      } else {
         const taken = new Set(uploads.map((e) => e.raw).filter((n) => n !== null));
-        list = [...uploads, ...links.filter((e) => e.raw === null || !taken.has(e.raw))];
+        const claimOf = (e: Entry) => (e.item.positional ? namedShot(e) : e.raw);
+        lost = links.flatMap((e) => (claimOf(e) !== null && taken.has(claimOf(e)!) ? [{ e, shot: claimOf(e) }] : []));
+        const gone = new Set(lost.map((l) => l.e));
+        let next = Math.max(uploads.length, ...uploads.map((e) => e.raw ?? 0));
+        const placed = links.filter((e) => !gone.has(e)).sort((a, b) => (a.raw ?? Infinity) - (b.raw ?? Infinity)).map((e) => (e.item.positional ? { ...e, raw: ++next } : e));
+        list = [...uploads, ...placed];
+      }
+      // A distinct photo never goes without a word: the same bytes are only a copy, anything else is a file row.
+      if (sha256Of) {
+        const used = new Set(list.map((e) => sha256Of(e.item)));
+        for (const { e, shot } of lost) if (!used.has(sha256Of(e.item))) rejected.push({ item: copyOf(e.item, id, e.raw), reason: notChosenMessage(baseName(e.item), options.precedence, shot) });
       }
     }
     if (!list.length) continue;
@@ -393,12 +428,17 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
       for (const e of whole) rejected.push({ item: copyOf(e.item, id, e.raw), reason });
     };
 
-    // Two different photos at one shot number leave the whole product out: we cannot tell which is right.
+    // Two different photos at one shot number leave the whole product out: we cannot tell which is right. For pasted rows
+    // the shot is the one their file name states, so the result never depends on what else is in the folder.
     const claims = new Map<number, Entry[]>();
-    for (const e of list) if (e.raw !== null) claims.set(e.raw, [...(claims.get(e.raw) ?? []), e]);
+    for (const e of list) {
+      const claim = e.item.positional ? namedShot(e) : e.raw;
+      if (claim !== null) claims.set(claim, [...(claims.get(claim) ?? []), e]);
+    }
     const clash = [...claims.entries()].filter(([, es]) => es.length > 1).sort(([a], [b]) => a - b)[0];
     if (clash) {
-      rejectAll(duplicateShotMessage(clash[0], id, namesOf(clash[1].map((e) => e.item))));
+      const stated = clash[1][0]!.item.positional ? clash[0] : (clash[1][0]!.shown ?? clash[0]);
+      rejectAll(duplicateShotMessage(stated, id, namesOf(clash[1].map((e) => e.item))));
       continue;
     }
 

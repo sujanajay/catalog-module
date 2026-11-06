@@ -101,13 +101,15 @@ export async function readIngestReport(store:Pick<typeof storage,"headObject"|"d
   const uri=`gs://${store.getBucketName()}/${prefix}/derived/_ingest/preview-state.json`;
   if(!(await store.headObject(uri)).exists) return undefined;
   type StoredOrigin={rawUri:string|null;sha256?:string|null;item:{originalName:string;origin:string;bytes:{kind:string;url?:string}}};
-  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{identifier?:string;items:StoredOrigin[]}[];sameFiles?:SameFile[];uploadRejects?:UploadReject[]};
-  const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason}));
+  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{sha256?:string|null;item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{identifier?:string;items:StoredOrigin[]}[];sameFiles?:SameFile[];uploadRejects?:UploadReject[]};
+  // An older spelling's photo is out unless the product carrying on already holds the same bytes.
+  const keptShas=new Map((state.products ?? []).map(p=>[normalizeKey(p.identifier ?? ""),new Set(p.items.map(i=>i.sha256))] as const));
+  const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason,...(isOlderSpelling(r.reason) && r.item.sha256 && keptShas.get(normalizeKey(r.item.item.identifier))?.has(r.item.sha256) ? {copyOfKept:true}:{})}));
   const uploadRejects=state.uploadRejects ?? [];
   const sourceOrigins:NonNullable<IngestReport["sourceOrigins"]>={};
   for(const source of (state.products ?? []).flatMap(p=>p.items)) if(source.rawUri) sourceOrigins[source.rawUri]={origin:source.item.origin,...(source.item.bytes.kind==="url" ? {sourceUrl:source.item.bytes.url}:{relativePath:source.item.originalName})};
   // Links that could not be downloaded are listed on their own, as counts.linkFailures counts them (spec 14b F5).
-  return {unsupportedFiles:[...rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),...uploadRejects.filter(r=>!isLinkReject(r.reason))],linkFailures:[...rejected.filter(r=>isLinkReject(r.reason)),...uploadRejects.filter(r=>isLinkReject(r.reason))],duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins,leftOutProducts:leftOutProducts([...rejected,...uploadRejects.map(r=>({identifier:r.identifier ?? "",name:r.name,reason:r.reason}))],(state.products ?? []).flatMap(p=>p.identifier ? [p.identifier]:[])),sameFiles:state.sameFiles ?? [],sharedPhotos:photosUnderSeveralProducts(state.products ?? [])};
+  return {unsupportedFiles:[...rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),...uploadRejects.filter(r=>!isLinkReject(r.reason))],linkFailures:[...rejected.filter(r=>isLinkReject(r.reason)),...uploadRejects.filter(r=>isLinkReject(r.reason))],duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins,leftOutProducts:leftOutProducts([...rejected,...uploadRejects.map(r=>({identifier:r.identifier ?? "",name:r.name,reason:r.reason}))],(state.products ?? []).flatMap(p=>p.identifier ? [p.identifier]:[])),sameFiles:(state.sameFiles ?? []).filter(s=>keptShas.has(normalizeKey(s.identifier)) || !state.products),sharedPhotos:photosUnderSeveralProducts(state.products ?? [])};
 }
 export async function workbookCsvSheets(bytes:Buffer):Promise<{name:string;csv:string}[]> {
   const workbook=new ExcelJS.Workbook(); await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
@@ -204,11 +206,11 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
   const failedUploads=uploads.flatMap(u=>u.status==="failed" ? [{name:u.name,reason:u.error ?? `${u.name} could not be read.`,upload:true}]:[]);
   const unsupportedFiles=[...(extra.ingest?.unsupportedFiles ?? []),...uploadOnly.filter(r=>!isLink(r)),...failedUploads],linkFailures=[...(extra.ingest?.linkFailures ?? []),...uploadOnly.filter(isLink)];
   // What the batch was given and made nothing of, counted once each: by product, else by whole input, else by file. An
-  // older spelling's files are not out: their product carries on under the newest one.
+  // older spelling's file that the product carrying on already holds is only a copy.
   const leftOut=extra.ingest?.leftOutProducts ?? [],leftOutKeys=new Set(leftOut.map(l=>normalizeKey(l.identifier)));
-  const notUsed=[...unsupportedFiles,...linkFailures] as {reason?:unknown;identifier?:unknown;upload?:unknown}[];
+  const notUsed=[...unsupportedFiles,...linkFailures] as {reason?:unknown;identifier?:unknown;upload?:unknown;copyOfKept?:unknown}[];
   const uploadsNotRead=notUsed.filter(f=>f.upload===true).length;
-  const filesLeftOut=notUsed.filter(f=>f.upload!==true && !(typeof f.reason==="string" && isOlderSpelling(f.reason)) && !(typeof f.identifier==="string" && leftOutKeys.has(normalizeKey(f.identifier)))).length;
+  const filesLeftOut=notUsed.filter(f=>f.upload!==true && f.copyOfKept!==true && !(typeof f.identifier==="string" && leftOutKeys.has(normalizeKey(f.identifier)))).length;
   // qaCapped is a jsonb-only key (not in BatchCounts) read by deriveBatchState for the 07 4.5 banner.
   const counts = {...batch.counts,...(extra.ingest?.leftOutProducts ? {productsLeftOut:leftOut.length}:{}),filesLeftOut,uploadsNotRead,qaCapped:qaCap,verified:selected.filter(o=>o.status==="verified" && o.isLive).length+unchanged,needsAttention:selected.filter(o=>o.status==="needs_attention").length,attentionProducts:pairs.filter(p=>p.pair.change==="pending_attention").length,failed:selected.filter(o=>o.status==="failed").length,skipped:selected.filter(o=>o.status==="skipped").length,unchanged,heldLinks:delivery.held,provisional:selected.filter(o=>o.status==="verified" && o.flags.includes("provisional")).length,recheckOk:split.ok,recheckTotal:split.total,recheckCarriedOk:split.carriedOk,recheckCarriedTotal:split.carriedTotal};
   const line=costLine({cost:batch.cost,products:pairs.map(({pair,product})=>({change:pair.change,outputs:(selectedOf.get(product.id) ?? []).filter(output=>output.decision!=="replaced")}))});

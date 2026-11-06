@@ -297,7 +297,8 @@ export function readLinksSheet(table: SheetTable, options: Pick<BatchOptions, "s
   const rejected: UploadReject[] = [];
   const warnings: string[] = [];
   const rows = sheetDataRows(table, detection.headerRow);
-  const linksOf = (cells: string[]) => detection.urlColumns.flatMap((c) => cellUrls(cells[c]));
+  // Compared without the query: the same signed link with a new token is the same photo.
+  const linksOf = (cells: string[]) => detection.urlColumns.flatMap((c) => cellUrls(cells[c])).map((url) => url.split("?")[0]!);
 
   if (detection.identifierColumn >= 0) {
     const composite = detection.styleColumn !== null && detection.colourColumn !== null;

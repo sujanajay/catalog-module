@@ -60,7 +60,7 @@ import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts, uploadTimes } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
 import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SameFile, SourceItem, UploadReject } from "./types";
-import { fetchSourceUrl, urlListAdapter } from "./url-list";
+import { badLinkRejects, fetchSourceUrl, parsePastedLinks, pastedText, urlListAdapter } from "./url-list";
 import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
 import type { InputRoot, StoredRoot } from "./roots";
@@ -299,7 +299,8 @@ async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "ve
   if (upload.kind === "url_list") detected.rows = items.length;
   // A Supabase folder paste keeps its link and naming mode (M1-F1-R4) for the grouping sentence.
   if (prior?.supabaseFolder) detected.supabaseFolder = prior.supabaseFolder;
-  if (prior?.supabaseFolder?.small?.length) detected.rejected = prior.supabaseFolder.small;
+  const lostBefore = [...(prior?.supabaseFolder?.small ?? []), ...(upload.kind === "url_list" ? badLinkRejects(parsePastedLinks(await pastedText(input))) : [])];
+  if (lostBefore.length) detected.rejected = lostBefore;
   return { items, warnings: [], productList: false, detected };
 }
 

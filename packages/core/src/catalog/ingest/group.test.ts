@@ -9,6 +9,7 @@ import {
   leftOutProducts,
   noIdentifierMessage,
   noShotNumbersMessage,
+  notChosenMessage,
   photosUnderSeveralProducts,
   olderSameProductMessage,
   originalOf,
@@ -457,10 +458,17 @@ describe("identical files merge in every grouping mode (PR 187 review P1-3)", ()
     expect(g.rejected).toEqual([]);
   });
 
-  it("different bytes under one stem stay separate shots in folder mode", () => {
+  it("different bytes at one named shot leave the product out in folder mode too, the same as filename mode (P2-A)", () => {
     const different = pasted(["P/P_1.jpg", "P/P_1.jpeg", "P/size chart.jpg"], (n) => n);
-    expect(different.g.sameFiles).toBeUndefined();
-    expect(different.g.products.get("P")).toHaveLength(3);
+    expect(different.mode).toBe("folder");
+    expect(different.g.products.size).toBe(0);
+    expect(different.g.rejected[0]!.reason).toBe(duplicateShotMessage(1, "P", ["P_1.jpeg", "P_1.jpg"]));
+  });
+
+  it("the clash sentence names the shot the sender numbered, not the closed-up one (P3-1)", () => {
+    const items = ["X_1.jpg", "X_2.jpg", "X_3.jpg", "X_3.jpeg"].map((n) => sourceItemFromPath(n, { kind: "gcs", gsUri: "" }, "u", "image"));
+    const g = groupItems(items, opts(), undefined, (i) => (i.originalName.startsWith("X_3") ? i.originalName : "same"));
+    expect(g.rejected[0]!.reason).toContain("shot 3 of X");
   });
 
   it("records no merge for a product left out, and lists all of its files, copies too (P3-1)", () => {
@@ -536,11 +544,39 @@ describe("copies across folders and names (owner, 2026-11-06)", () => {
     expect(photosUnderSeveralProducts(Array.from({ length: 400 }, (_, i) => row(`P${String(i).padStart(3, "0")}`, "chart", `own${i}`)))).toEqual([expect.objectContaining({ products: 400, photos: 1 })]);
   });
 
-  it("(d) a re-sent copy changed only by extension or path gives the same shot and bytes, so the same render key and live links", () => {
-    const first = groupItems(fileItems(["X_1.jpg", "X_2.jpg"]), opts(), undefined, (i) => baseName(i).replace(/\..*$/, ""));
-    const moved = groupItems(fileItems(["new/place/X_1.jpeg", "new/place/X_2.jpeg"]), opts(), undefined, (i) => baseName(i).replace(/\..*$/, ""));
-    const key = (g: GroupingResult) => g.products.get("X")!.map((i) => [i.n, baseName(i).replace(/\..*$/, "")]);
-    expect(key(moved)).toEqual(key(first));
+  it("two pastes keep one shot order whatever their upload ids, so a re-send stays unchanged (P2-B)", () => {
+    const row = (u: string, dir: string, ...names: string[]) => urlListItems(parsePastedLinks(names.map((n) => `X\thttps://h/${dir}/${n}`).join("\n")), u);
+    const order = (one: string, two: string) => groupItems([...row(one, "vm-ol", "a.jpg", "b.jpg"), ...row(two, "vero-moda", "a.jpg", "b.jpg")], opts(), undefined, (i) => (i.bytes.kind === "url" ? i.bytes.url : "")).products.get("X")!.map((i) => (i.bytes.kind === "url" ? i.bytes.url : ""));
+    expect(order("u1", "u2")).toEqual(order("zz", "aa"));
+    expect(order("u1", "u2")).toHaveLength(4);
+  });
+
+  describe("a product with both uploads and links never loses a distinct photo silently (P1-A)", () => {
+    const row = (...names: string[]) => urlListItems(parsePastedLinks(names.map((n) => `X\thttps://h/p/${n}`).join("\n")), "paste");
+    const sha = (i: { originalName: string }) => i.originalName;
+
+    it("pasted rows with no named shot follow the uploads", () => {
+      const g = groupItems([...fileItems(["X_1.jpg", "X_2.jpg"]), ...row("front.jpg", "back.jpg", "side.jpg")], opts(), undefined, sha as never);
+      expect(g.products.get("X")!.map((i) => [i.n, i.originalName])).toEqual([[1, "X_1.jpg"], [2, "X_2.jpg"], [3, "front.jpg"], [4, "back.jpg"], [5, "side.jpg"]]);
+      expect(g.rejected).toEqual([]);
+    });
+
+    it("a pasted row naming an uploaded shot with other bytes is a file row; with the same bytes it is only a copy", () => {
+      const g = groupItems([...fileItems(["X_1.jpg"]), ...row("X_1.jpeg", "X_2.jpeg")], opts(), undefined, sha as never);
+      expect(g.products.get("X")!.map((i) => i.originalName)).toEqual(["X_1.jpg", "X_2.jpeg"]);
+      expect(g.rejected.map((r) => [r.item.originalName, r.reason])).toEqual([["X_1.jpeg", notChosenMessage("X_1.jpeg", "uploads_then_links", 1)]]);
+      const copy = groupItems([...fileItems(["X_1.jpg"]), ...row("X_1.jpeg")], opts(), undefined, () => "same");
+      expect(copy.rejected).toEqual([]);
+    });
+
+    it("uploads_only and links_only name each photo they did not choose, and the product carries on", () => {
+      const both = () => [...fileItems(["X_1.jpg"]), ...row("back.jpg")];
+      const uploads = groupItems(both(), opts("filename", "uploads_only"), undefined, sha as never);
+      expect(uploads.rejected.map((r) => [r.item.originalName, r.reason])).toEqual([["back.jpg", notChosenMessage("back.jpg", "uploads_only", null)]]);
+      const links = groupItems(both(), opts("filename", "links_only"), undefined, sha as never);
+      expect(links.rejected.map((r) => r.item.originalName)).toEqual(["X_1.jpg"]);
+      expect(leftOutProducts(uploads.rejected.map((r) => ({ identifier: r.item.identifier, name: r.item.originalName, reason: r.reason })), uploads.products.keys())).toEqual([]);
+    });
   });
 
   it("stays fast at real size: 30,000 files, all copied once", () => {

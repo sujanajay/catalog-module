@@ -298,18 +298,25 @@ export function supabaseFolderText(link: SupabaseFolderLink, files: SupabaseFile
   return { text: lines.join("\n"), mode };
 }
 
+/** What a system writes beside photos: not a photo anyone sent. */
+const SYSTEM_FILE = /^(thumbs\.db|desktop\.ini|\.ds_store)$/i;
+
 /**
- * The files under 1 KB as rejects, under the product each would have named (the same rule as the paste text), so a
- * folder holding only such files reads as a product left out, not as nothing.
+ * The files under 1 KB as rejects, under a product only when they really name one: a stem a real file has, a stem with
+ * a shot number, else the folder. So `X/thumb.jpg` is a file of X and not a product called thumb, and a folder holding
+ * only such files reads as a product left out, not as nothing. System files are not listed.
  */
 export function supabaseSmallRejects(link: SupabaseFolderLink, small: string[], files: SupabaseFile[], mode: "folder" | "filename"): UploadReject[] {
   const own = link.prefix.split("/").pop()!;
   const direct = onlyShapeFolders(files.map((f) => f.path.split("/").slice(0, -1)));
-  return small.map((path) => {
-    const item = sourceItemFromPath(direct ? `${own}/${path}` : path, { kind: "gcs", gsUri: "" }, "supabase", "drive_folder");
-    const folder = folderIdentifier(item);
-    const name = path.split("/").pop()!;
-    return { name: path, identifier: (mode === "folder" || !normalizeKey(item.identifier) ? folder : item.identifier) || folder, reason: `${name} is under 1 KB, so it was treated as a placeholder, not a photo.` };
+  const itemOf = (path: string) => sourceItemFromPath(direct ? `${own}/${path}` : path, { kind: "gcs", gsUri: "" }, "supabase", "drive_folder");
+  const realStems = new Set(mode === "folder" ? [] : files.map((f) => normalizeKey(itemOf(f.path).identifier)));
+  return small.filter((path) => !SYSTEM_FILE.test(path.split("/").pop()!)).map((path) => {
+    const item = itemOf(path);
+    const stem = normalizeKey(item.identifier);
+    const named = mode !== "folder" && !!stem && (realStems.has(stem) || item.n !== null);
+    const identifier = (named ? item.identifier : folderIdentifier(item)) || "";
+    return { name: path, ...(identifier ? { identifier } : {}), reason: `${path.split("/").pop()!} is under 1 KB, so it was treated as a placeholder, not a photo.` };
   });
 }
 

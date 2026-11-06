@@ -446,7 +446,7 @@ describe("POST /retry-links re-fetches only the failed links (spec 14b F5 part 1
   /** A fake image host: `answer(url)` is the status; 200 serves a HEIC photo. Records every GET. */
   function host(answer:(url:string)=>number){
     const calls:string[]=[];
-    const fetch=vi.fn(async(input:RequestInfo|URL)=>{const url=String(input);calls.push(url);const s=answer(url);return s===200?new Response(new Uint8Array(heicFixture(1200,1600)),{headers:{"content-type":"image/heic"}}):new Response("no",{status:s,headers:{"content-type":"text/plain"}});});
+    const fetch=vi.fn(async(input:RequestInfo|URL)=>{const url=String(input);calls.push(url);const s=answer(url);return s===200?new Response(new Uint8Array(heicFixture(1200+[...url].reduce((k,c)=>k+c.charCodeAt(0),0)%400,1600)),{headers:{"content-type":"image/heic"}}):new Response("no",{status:s,headers:{"content-type":"text/plain"}});});
     return {fetch:fetch as unknown as typeof globalThis.fetch,calls};
   }
   /** The retry waits a temporary failure (503) asks for, recorded instead of slept: real waits cost 10 s per test and time out under load. */

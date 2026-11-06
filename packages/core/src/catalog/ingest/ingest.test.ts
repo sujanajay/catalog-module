@@ -1859,6 +1859,26 @@ describe("nothing is lost without a word at grouping (owner, 2026-11-06)", () =>
     expect(report!.unsupportedFiles).toEqual([expect.objectContaining({ name: "items.csv", upload: true, reason: expect.stringContaining("could not be read") })]);
   }, 60_000);
 
+  it("a product with uploads and a paste: a distinct photo follows the uploads, one naming a taken shot is on the record, and a bad cell too (P1-A, P2-E)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("uploads-and-paste");
+    await folderUpload(w, batch, { "X_1.jpg": await jpeg() });
+    w.web.set(`${HOST}/front.jpg`, await jpeg());
+    w.web.set(`${HOST}/X_1.jpeg`, await jpeg());
+    const [paste] = await db.insert(catalogUploads).values({ batchId: batch.id, kind: "url_list", name: "paste", gcsUri: null, status: "uploaded", sourceUrl: `X\t${HOST}/front.jpg\nX\t${HOST}/X_1.jpeg\nX\thtp://bad/side.jpg\t${HOST}/none.jpg` }).returning();
+    expect(paste).toBeTruthy();
+    w.web.set(`${HOST}/none.jpg`, await jpeg());
+    await ingestAll(w, batch);
+    const report = await reportOf(w, batch);
+    const reasons = report!.unsupportedFiles.map((f) => (f as { reason: string }).reason);
+    expect(reasons).toEqual(expect.arrayContaining([
+      "X_1.jpeg was not used: shot 1 also came as an uploaded file with a different photo, and the uploaded file was kept.",
+      'Row 3: "htp://bad/side.jpg" is not a working link, so it was not used.',
+    ]));
+    expect(report!.leftOutProducts).toEqual([]);
+    expect((await sourcesOf(batch.id)).map((src) => src.originalName).sort()).toEqual(["X_1.jpg", "front.jpg", "none.jpg"]);
+  }, 60_000);
+
   it("carries a Supabase folder's files under 1 KB into the ledger; a folder of only those is a product left out", async () => {
     const w = fakeWorld();
     const batch = await newBatch("under-1kb");
