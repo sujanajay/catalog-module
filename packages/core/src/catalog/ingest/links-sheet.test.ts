@@ -139,6 +139,7 @@ describe("links-sheet.detectColumns", () => {
     expect(byId.rejected.map((r) => r.name)).toEqual(["Row 3", "Row 4"]);
     expect(rows("https://drive.google.com/uc?export=download&id=AAA", "https://drive.google.com/uc?export=download&id=BBB").rejected).toHaveLength(1);
     expect(rows("https://h/a.jpg?X-Amz-Signature=1&X-Amz-Date=2", "https://h/a.jpg?X-Amz-Signature=3&X-Amz-Date=4").rejected).toEqual([]);
+    expect(rows("https://h/download?token=AAA", "https://h/download?token=BBB").rejected).toHaveLength(1);
   });
 
   it("a repeated row whose link differs only by its token holds no new link", () => {

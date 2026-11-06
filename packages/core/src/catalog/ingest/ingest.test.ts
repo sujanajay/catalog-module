@@ -26,6 +26,7 @@ import { buildZip } from "../../../test-fixtures/catalog/ingest-a/builders";
 import { mergeCounts, PLACING_LEASE_MS } from "../counts";
 import { buildPreview, deliveryToken, failStoppedIngest, GROUP_TIME_BUDGET_MS, INGEST_STOPPED_TEXT, INGEST_TIME_BUDGET_MS, LINK_MAX_ATTEMPTS, LINK_RETRY_ATTEMPTS, PLACE_BUDGET_ITEMS, runIngest } from "./index";
 import { linkFailuresBlock } from "./detect-step";
+import { collectDriveFolderOnWeb } from "./drive-folder";
 import { lockForInputChange } from "./input-change";
 import { sourceProducerRefsOf } from "../../graph/write-path";
 import { readIngestReport } from "../pipeline/report";
@@ -1877,6 +1878,29 @@ describe("nothing is lost without a word at grouping (owner, 2026-11-06)", () =>
     ]));
     expect(report!.leftOutProducts).toEqual([]);
     expect((await sourcesOf(batch.id)).map((src) => src.originalName).sort()).toEqual(["X_1.jpg", "front.jpg", "none.jpg"]);
+  }, 60_000);
+
+  it("a Drive file the web step skipped reaches the report, once, through runIngest (P1-C)", async () => {
+    const w = fakeWorld();
+    const batch = await newBatch("drive-skipped");
+    const photo = await jpeg();
+    const files = [{ id: "b", name: "X_1.jpg" }, { id: "a", name: "X_1.jpg" }, { id: "c", name: "X_2.jpg" }].map((f) => ({ ...f, mimeType: "image/jpeg", size: String(photo.length) }));
+    const drive = {
+      files: {
+        list: async () => ({ data: { files, nextPageToken: null } }),
+        get: async () => ({ data: Readable.from([photo]) }),
+      },
+    };
+    const id = await newUpload(batch, "drive_folder", "folder", null);
+    const [row] = await db.update(catalogUploads).set({ sourceUrl: "https://drive.google.com/drive/folders/1xYzRootFolderId_abc" }).where(eq(catalogUploads.id, id)).returning();
+    await collectDriveFolderOnWeb({ batchId: batch.id, brandSlug: batch.brandSlug, prefix: prefixOf(batch), upload: row!, options: batch.options, deps: { ...deps(w), drive } as never }, db);
+    await ingestAll(w, batch);
+    const reason = "X_1.jpg would be stored under the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch.";
+    const report = await reportOf(w, batch);
+    expect(report!.unsupportedFiles).toEqual([expect.objectContaining({ name: "X_1.jpg", reason })]);
+    const [after] = await db.select().from(catalogUploads).where(eq(catalogUploads.id, id));
+    expect((after!.detected as { rejected: { reason: string }[] }).rejected.filter((r) => r.reason === reason)).toHaveLength(1);
+    expect((await batchRow(batch.id)).status).toBe("draft");
   }, 60_000);
 
   it("carries a Supabase folder's files under 1 KB into the ledger; a folder of only those is a product left out", async () => {

@@ -88,6 +88,8 @@ export interface Detected {                          // stored in catalog_upload
   ignoredCells?: number;
   sample?: { tried: number; ok: number; webPages: number; failures: { url: string; reason: string }[] };
   rejected?: UploadReject[];                         // per-upload rejects with their sentences
+  /** What the web step skipped before the worker lists (a Drive folder): kept apart, since `rejected` is rewritten at the end of a read. */
+  webRejected?: UploadReject[];
   /**
    * M1-F1-R4: a paste of image links listed from this Supabase folder link, and the mode its lines name products by.
    * `small`: the files under 1 KB the listing skipped (M1-F1-R6), carried here because they never become items.

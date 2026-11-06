@@ -73,7 +73,9 @@ export async function listDriveFolder(drive: DriveLike, folderId: string): Promi
       pageToken = res.data.nextPageToken ?? undefined;
     } while (pageToken);
   }
-  return out.sort((a, b) => (a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0));
+  // By path, then file id: Drive's own order is not promised, and two files with one name must resolve the same way on every send.
+  const byValue = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
+  return out.sort((a, b) => byValue(a.relativePath, b.relativePath) || byValue(a.id, b.id));
 }
 
 async function readCapped(stream: Readable, maxBytes: number, name: string): Promise<Buffer | string> {
@@ -127,7 +129,7 @@ export async function collectDriveFolderOnWeb(input: CollectInput, db?: Db): Pro
   for (const e of entries) {
     if (e.mimeType.startsWith(GOOGLE_APPS_PREFIX)) rejected.push({ name: e.relativePath, reason: `${e.relativePath} is not an image.` });
     else if ((e.size ?? 0) > DRIVE_FILE_MAX_BYTES) rejected.push({ name: e.relativePath, reason: `${e.relativePath} is larger than 40 MB and was skipped.` });
-    else if (stored.has(uploadObjectPath(prefix, upload.id, e.relativePath))) rejected.push({ name: e.relativePath, reason: `${e.relativePath} has the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch.` });
+    else if (stored.has(uploadObjectPath(prefix, upload.id, e.relativePath))) rejected.push({ name: e.relativePath, reason: `${e.relativePath} would be stored under the same name as another file in this Drive folder, so it was not used. Rename one and send it in a new batch.` });
     else {
       stored.add(uploadObjectPath(prefix, upload.id, e.relativePath));
       copy.push(e);
@@ -168,7 +170,7 @@ export async function collectDriveFolderOnWeb(input: CollectInput, db?: Db): Pro
     kind: "drive_folder", fileCount: copied, topLevelFolders, rejected,
     message: `Drive folder, ${copied} files copied.`,
   };
-  return finish(detected, prefixUri);
+  return finish(rejected.length ? { ...detected, webRejected: rejected } : detected, prefixUri);
 }
 
 /**

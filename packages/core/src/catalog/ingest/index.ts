@@ -299,7 +299,8 @@ async function listUpload(input: CollectInput): Promise<Omit<UploadManifest, "ve
   if (upload.kind === "url_list") detected.rows = items.length;
   // A Supabase folder paste keeps its link and naming mode (M1-F1-R4) for the grouping sentence.
   if (prior?.supabaseFolder) detected.supabaseFolder = prior.supabaseFolder;
-  const lostBefore = [...(prior?.supabaseFolder?.small ?? []), ...(upload.kind === "url_list" ? badLinkRejects(parsePastedLinks(await pastedText(input))) : [])];
+  if (prior?.webRejected?.length) detected.webRejected = prior.webRejected;
+  const lostBefore = [...(prior?.webRejected ?? []), ...(prior?.supabaseFolder?.small ?? []), ...(upload.kind === "url_list" ? badLinkRejects(parsePastedLinks(await pastedText(input))) : [])];
   if (lostBefore.length) detected.rejected = lostBefore;
   return { items, warnings: [], productList: false, detected };
 }
