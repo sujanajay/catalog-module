@@ -1,5 +1,5 @@
 {
-  "id": "ebc2b4b3-19a5-40bb-81a6-8564b5703692",
+  "id": "7821363c-349b-45a3-b5e0-6cf659f47b82",
   "prevId": "053f5a2b-4e2d-4121-9184-ad8ad0741300",
   "version": "7",
   "dialect": "postgresql",
@@ -333,7 +333,7 @@
       "checkConstraints": {
         "catalog_auto_decide_rules_cause_check": {
           "name": "catalog_auto_decide_rules_cause_check",
-          "value": "\"catalog_auto_decide_rules\".\"cause\" IN ('wrong_item', 'collage', 'unusable', 'corrupt', 'unchecked', 'photo_one', 'every_photo', 'not_publishable', 'code_fault', 'not_enlarged', 'visible_defect')"
+          "value": "\"catalog_auto_decide_rules\".\"cause\" IN ('wrong_item', 'collage', 'unusable', 'corrupt', 'unchecked', 'photo_one', 'every_photo', 'not_publishable', 'code_fault', 'not_enlarged')"
         },
         "catalog_auto_decide_rules_channel_check": {
           "name": "catalog_auto_decide_rules_channel_check",
@@ -341,7 +341,7 @@
         },
         "catalog_auto_decide_rules_action_check": {
           "name": "catalog_auto_decide_rules_action_check",
-          "value": "\"catalog_auto_decide_rules\".\"action\" IN ('deliver', 'drop', 'hold')"
+          "value": "\"catalog_auto_decide_rules\".\"action\" IN ('deliver', 'drop')"
         }
       },
       "isRLSEnabled": false
@@ -5284,7 +5284,7 @@
       "checkConstraints": {
         "catalog_product_events_kind_check": {
           "name": "catalog_product_events_kind_check",
-          "value": "\"catalog_product_events\".\"kind\" IN ('created', 'overwritten', 'shots_removed', 'channel_added', 'unchanged', 'reordered', 'sku_ids_added', 'alias_added', 'removed_photo', 'replacement_uploaded', 'restored', 'removed', 'enlargement_retried', 'plain_accepted', 'photo_recut')"
+          "value": "\"catalog_product_events\".\"kind\" IN ('created', 'overwritten', 'shots_removed', 'channel_added', 'unchanged', 'reordered', 'sku_ids_added', 'alias_added', 'removed_photo', 'replacement_uploaded', 'restored', 'removed', 'enlargement_retried', 'plain_accepted')"
         }
       },
       "isRLSEnabled": false
@@ -7283,6 +7283,74 @@
           "value": "\"catalog_taxonomy_nodes\".\"status\" IN ('released', 'not_released', 'retired')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.catalog_traffic_shifts": {
+      "name": "catalog_traffic_shifts",
+      "schema": "",
+      "columns": {
+        "service": {
+          "name": "service",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shifted_at": {
+          "name": "shifted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shifted_until": {
+          "name": "shifted_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "catalog_traffic_shifts_shifted_at_idx": {
+          "name": "catalog_traffic_shifts_shifted_at_idx",
+          "columns": [
+            {
+              "expression": "shifted_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "catalog_traffic_shifts_revision_shifted_at_pk": {
+          "name": "catalog_traffic_shifts_revision_shifted_at_pk",
+          "columns": [
+            "revision",
+            "shifted_at"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.catalog_treatment_assignments": {

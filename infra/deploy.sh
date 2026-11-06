@@ -85,6 +85,7 @@ if [ "${1:-}" = --rollback ]; then
   source infra/lib/services.sh
   # shellcheck source=lib/gate.sh
   source infra/lib/gate.sh
+  trap 'gate_shift_report || true' EXIT
   rollback_service "$2" "${3:-}"
   exit
 fi
@@ -441,6 +442,23 @@ elif [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
 else
   echo "==> migrate: SKIP (preview uses the existing schema)"
 fi
+# R1 exit finding 3 (M6-F3-R1, M6 decision C6): the job that records each traffic shift (gate_record_shift in
+# infra/lib/gate.sh), on this commit's image and after the migration, so it is ready before the first shift. A job of
+# one quick insert; up to one execution per service, so a group's shifts briefly hold one connection each, inside the
+# budget's headroom. It only records: a failure here warns and never stops a deploy.
+if [ "$MEASURE_ONLY" != 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
+  SHIFT_JOB_LABELS=$(catalog_labels catalog-traffic-shift live)
+  catalog_labels_check catalog-traffic-shift "$SHIFT_JOB_LABELS" || exit 1
+  gcloud_retry gcloud run jobs deploy catalog-traffic-shift --quiet --image="$AR/worker:$TAG" --command=node --args=dist/catalog-traffic-shift.js \
+    --service-account="$WORKER_SA" --max-retries=2 --task-timeout=300 "${NET[@]}" --labels="$SHIFT_JOB_LABELS" \
+    --set-secrets="$SECRETS" --set-env-vars="$ENV_VARS,DB_POOL_MAX=$JOB_DB_POOL_MAX" \
+    || echo "WARN: could not update the job catalog-traffic-shift; this deploy's traffic shifts may go unrecorded (the end of the deploy lists them with the line to run)" >&2
+  # The job and the daily cost check read Cloud Audit Logs for missing records (M6 decision C6). Read only.
+  if ! gcloud_retry gcloud projects get-iam-policy "$PROJECT" --flatten='bindings[].members' --filter="bindings.role=roles/logging.viewer" --format='value(bindings.members)' 2>/dev/null | tr -d '\r' | grep -qxF "serviceAccount:$WORKER_SA"; then
+    gcloud_retry gcloud projects add-iam-policy-binding "$PROJECT" --quiet --condition=None --member="serviceAccount:$WORKER_SA" --role=roles/logging.viewer >/dev/null \
+      || echo "WARN: could not grant roles/logging.viewer to $WORKER_SA; the audit log sync will warn and the daily cost check will raise an alert" >&2
+  fi
+fi
 
 
 # --- 5. Queues the new revisions will use ----------------------------------------------
@@ -466,6 +484,8 @@ fi
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
+# However this run ends, say which traffic shifts have no record (R1 exit finding 3).
+trap 'gate_shift_report || true' EXIT
 MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""; UPSCALE_GPU_SERVICE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
@@ -647,7 +667,7 @@ if node -e '
 else
   echo "==> CORS on $ASSETS_BUCKET: ADD catalog origins, preserving existing sites"
   CORS_FILE=$(mktemp)
-  trap 'rm -f "$CORS_FILE"' EXIT
+  trap 'rm -f "$CORS_FILE"; gate_shift_report || true' EXIT
   node -e '
     const fs = require("fs");
     const current = (JSON.parse(fs.readFileSync(0, "utf8")).cors_config ?? []);
@@ -721,4 +741,6 @@ else
 fi
 
 # --- 11. The deploy report (M6-F2: minutes per step; F2 acceptance test 3 ends at DEPLOY_OK) -------------------------
+deploy_step "traffic shift records"
+gate_shift_report
 deploy_report "$TAG"

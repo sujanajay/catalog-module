@@ -4,8 +4,8 @@ import { registerOwnRevision } from "@catalog/core/catalog/reliability";
 let override: Db | undefined;
 
 /**
- * Lazily initialised DB handle (never touched at build time or module load). M6-F3-R1: the first use on Cloud Run also
- * registers this web revision once (deploy_overlap), in the background; a failure is logged once.
+ * Lazily initialised DB handle (never touched at build time or module load). The first use on Cloud Run also registers
+ * this web revision once, in the background; a failure is logged once.
  */
 export function db(): Db {
   if (override) return override;

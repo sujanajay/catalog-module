@@ -12,7 +12,7 @@ export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
 export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
 
 /**
- * The M1-F3-R1 defaults (migration 0014's seed rows, changed by 0028). Hold (M1 D40, owner 2026-11-06): a photo that
+ * The M1-F3-R1 defaults (migration 0014's seed rows, changed by 0029). Hold (M1 D40, owner 2026-11-06): a photo that
  * could not be cut out, and a defect a shopper would see that the repair loop could not remove. Deliver: a non-visible
  * problem after the repair loop, an image 1 problem, every photo of a channel with a problem, no verdict (judge down or
  * capped), an encoder fault, a failed enlargement. Drop: a corrupt source, a different item (product truth), a collage

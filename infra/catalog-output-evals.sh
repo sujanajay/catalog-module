@@ -17,11 +17,11 @@
 #                                                        # line of its job log ("Run id: evals-..."); sets already
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
-#   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D39: the matte agreement on the 19 real photos and 8 controls.
+#   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D40: the matte agreement on the 19 real photos and 8 controls.
 #                                                        # Always LIVE_SMOKE=1 for that one execution (spends credit); run
 #                                                        # with "run --live" for the golden set. Writes only under catalog-test/.
 #   bash infra/catalog-output-evals.sh recut --batch <id> --photos <identifier_n,...>
-#                                                        # M1 D41: cuts delivered photos out again, through the worker. This
+#                                                        # M1 D42: cuts delivered photos out again, through the worker. This
 #                                                        # replaces live images, so run it only when told to.
 # PowerShell equivalent (from the repo root):
 #   & "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe" infra/catalog-output-evals.sh run
