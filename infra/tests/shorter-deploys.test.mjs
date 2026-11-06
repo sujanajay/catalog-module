@@ -277,7 +277,7 @@ if gate_group "\${PARALLEL_SERVICES[@]}"; then echo GROUP-OK; else echo GROUP-FA
   assert.ok(r.out.includes('GROUP-FAILED'), r.out);
   assert.ok(!r.calls.some((c) => c.includes('update-traffic')), 'no tag and no shift on any service');
   assert.match(r.err, /ERROR: catalog-upscale-gpu: probe of catalog-upscale-gpu-new failed/);
-  assert.ok(r.err.includes('gcloud run services update-traffic catalog-upscale-gpu --to-revisions catalog-upscale-gpu-old=100'), 'its rollback line');
+  assert.ok(r.err.includes('bash infra/deploy.sh --rollback catalog-upscale-gpu catalog-upscale-gpu-old'), 'its rollback line');
   assert.match(r.err, /none of them moved traffic/);
   assert.ok(r.out.includes('==> catalog-matting: probe passed'), 'the others passed and still wait without traffic');
   assert.ok(!r.out.includes(': live ('));

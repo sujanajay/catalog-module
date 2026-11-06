@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../db/client";
 import { catalogTrafficShifts } from "../db/schema";
 import { createTestDb } from "../db/testing";
+import { recordTrafficShift } from "./reliability";
 import { billedLines, googleCostReaders, reconcileDay, runResourceFrom, samplesFrom, trafficHistory, waitingForTraffic, type BillableSample, type MonitoringSeries, type RunResource } from "./cost-reconcile";
 
 const DAY = "2026-11-10";
@@ -128,6 +129,33 @@ describe("a candidate revision overlapping a batch", () => {
     // 20 minutes on the live revision and 10 on the new one after its shift; its first 20 minutes are the deploy's.
     expect((await allocation()).idle).toBeCloseTo((30 * 60 - 600) * USD_PER_S, 6);
     expect((await dayLine()).billed).toBeCloseTo(50 * 60 * USD_PER_S, 6);
+  });
+
+  it("review of PR #188: a lost record of a replaced revision keeps its batch's idle, and says so", async () => {
+    // X served the batch and was replaced later that day, and its shift record was lost. FAILED is a real candidate.
+    const X = `${SERVICE}-00033-xxx`;
+    const result = await reconcileDay(db, DAY, { samples: [sample(FAILED, "09:00", 5), sample(X, "10:00", 30)], resources: [RESOURCE], provisional: true, now: new Date("2026-11-11T06:00:00Z") });
+    const a = await allocation();
+    expect(a.idle).toBeCloseTo(1200 * USD_PER_S, 6);
+    expect(a.idle).toBeCloseTo(1.275, 2);
+    expect(a.attributed).toBeCloseTo(600 * USD_PER_S, 6);
+    const { rows } = (await db.execute(sql`SELECT detail FROM catalog_cost_days WHERE day = ${DAY} AND component = ${SERVICE}`)) as unknown as { rows: { detail: Record<string, { noTrafficSeconds?: number }> }[] };
+    expect(rows[0]!.detail[SERVICE]!.noTrafficSeconds).toBeCloseTo(300, 6);
+    const alerts = result.alerts.filter((x) => x.code === "traffic_shift_missing");
+    expect(alerts.map((x) => [x.component, x.detail])).toEqual([[SERVICE, { revisions: [X] }]]);
+  });
+
+  it("a candidate beside the serving revision is never taken for a lost record, even with work in the same minutes", async () => {
+    const result = await reconcileDay(db, DAY, { samples: [sample(LIVE, "10:00", 30), sample(FAILED, "10:00", 30)], resources: [RESOURCE], provisional: true, now: new Date("2026-11-11T06:00:00Z") });
+    expect(result.alerts.filter((x) => x.code === "traffic_shift_missing")).toEqual([]);
+  });
+
+  it("a serving revision with no record raises the alert too; a re-run's repair ends it", async () => {
+    const live = { ...RESOURCE, liveRevisions: [CANDIDATE] };
+    const args = { samples: [sample(CANDIDATE, "10:00", 30)], resources: [live], provisional: true, now: new Date("2026-11-11T06:00:00Z") };
+    expect((await reconcileDay(db, DAY, args)).alerts.map((x) => x.code)).toContain("traffic_shift_missing");
+    await recordTrafficShift(db, { service: SERVICE, revision: CANDIDATE, at: new Date(`${DAY}T09:00:00Z`), ifMissing: true });
+    expect((await reconcileDay(db, DAY, args)).alerts.map((x) => x.code)).not.toContain("traffic_shift_missing");
   });
 
   it("the same day read per service, or before any shift was recorded, keeps the old rule", async () => {

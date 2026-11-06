@@ -85,6 +85,7 @@ if [ "${1:-}" = --rollback ]; then
   source infra/lib/services.sh
   # shellcheck source=lib/gate.sh
   source infra/lib/gate.sh
+  trap 'gate_shift_report || true' EXIT
   rollback_service "$2" "${3:-}"
   exit
 fi
@@ -451,7 +452,7 @@ if [ "$MEASURE_ONLY" != 1 ] && [ "${CATALOG_PREVIEW:-0}" != 1 ]; then
   gcloud_retry gcloud run jobs deploy catalog-traffic-shift --quiet --image="$AR/worker:$TAG" --command=node --args=dist/catalog-traffic-shift.js \
     --service-account="$WORKER_SA" --max-retries=2 --task-timeout=300 "${NET[@]}" --labels="$SHIFT_JOB_LABELS" \
     --set-secrets="$SECRETS" --set-env-vars="$ENV_VARS,DB_POOL_MAX=$JOB_DB_POOL_MAX" \
-    || echo "WARN: could not update the job catalog-traffic-shift; this deploy's traffic shifts may go unrecorded (gate_record_shift warns with the line to run)" >&2
+    || echo "WARN: could not update the job catalog-traffic-shift; this deploy's traffic shifts may go unrecorded (the end of the deploy lists them with the line to run)" >&2
 fi
 
 
@@ -478,6 +479,8 @@ fi
 source infra/lib/services.sh
 # shellcheck source=lib/gate.sh
 source infra/lib/gate.sh
+# However this run ends, say which traffic shifts have no record (R1 exit finding 3).
+trap 'gate_shift_report || true' EXIT
 MATTING_URL=""; MATTING_GPU_URL=""; MATTING_PROBE_URL=""; MATTING_GPU_PROBE_URL=""; UPSCALE_SERVICE_URL=""; UPSCALE_GPU_SERVICE_URL=""
 MATTING_REVISION=""
 SHIFTED=()
@@ -659,7 +662,7 @@ if node -e '
 else
   echo "==> CORS on $ASSETS_BUCKET: ADD catalog origins, preserving existing sites"
   CORS_FILE=$(mktemp)
-  trap 'rm -f "$CORS_FILE"' EXIT
+  trap 'rm -f "$CORS_FILE"; gate_shift_report || true' EXIT
   node -e '
     const fs = require("fs");
     const current = (JSON.parse(fs.readFileSync(0, "utf8")).cors_config ?? []);
@@ -733,4 +736,6 @@ else
 fi
 
 # --- 11. The deploy report (M6-F2: minutes per step; F2 acceptance test 3 ends at DEPLOY_OK) -------------------------
+deploy_step "traffic shift records"
+gate_shift_report
 deploy_report "$TAG"

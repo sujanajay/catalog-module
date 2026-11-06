@@ -181,7 +181,8 @@ export async function recordTouch(db: Db, touch: { action: TouchAction; batchId?
 /** The services whose traffic shifts count for `deploy_overlap` (infra/lib/services.sh SERVICES; never a preview one). */
 export const TRAFFIC_SHIFT_SERVICES: readonly string[] = ["catalog-web", "catalog-worker", "catalog-matting", "catalog-upscale", "catalog-upscale-gpu", "catalog-matting-gpu"];
 
-export interface TrafficShift { service: string; revision: string; at: Date }
+/** `ifMissing`: a repair (the gate found the revision already live), only for a revision with no record at all. */
+export interface TrafficShift { service: string; revision: string; at: Date; ifMissing?: boolean }
 
 /** The shift a catalog-traffic-shift execution was started with (SHIFT_SERVICE, SHIFT_REVISION, SHIFT_AT); throws on anything else. */
 export function parseTrafficShift(env: NodeJS.ProcessEnv): TrafficShift {
@@ -189,7 +190,7 @@ export function parseTrafficShift(env: NodeJS.ProcessEnv): TrafficShift {
   if (!TRAFFIC_SHIFT_SERVICES.includes(service)) throw new Error(`SHIFT_SERVICE must be one of ${TRAFFIC_SHIFT_SERVICES.join(", ")}.`);
   if (!revision.startsWith(`${service}-`)) throw new Error(`SHIFT_REVISION must be a revision of ${service}.`);
   if (Number.isNaN(+at)) throw new Error("SHIFT_AT must be a timestamp.");
-  return { service, revision, at };
+  return { service, revision, at, ...(env.SHIFT_IF_MISSING === "1" ? { ifMissing: true } : {}) };
 }
 
 /**
@@ -197,6 +198,10 @@ export function parseTrafficShift(env: NodeJS.ProcessEnv): TrafficShift {
  * whose run it fell in are marked here too, because the write can land after the batch's outcome row. Returns how many.
  */
 export async function recordTrafficShift(db: Db, shift: TrafficShift): Promise<number> {
+  if (shift.ifMissing) {
+    const [known] = await db.select({ revision: catalogTrafficShifts.revision }).from(catalogTrafficShifts).where(eq(catalogTrafficShifts.revision, shift.revision)).limit(1);
+    if (known) return 0;
+  }
   await db.insert(catalogTrafficShifts).values({ service: shift.service, revision: shift.revision, shiftedAt: shift.at }).onConflictDoNothing();
   const at = shift.at.toISOString();
   const marked = await db.execute(sql`UPDATE catalog_batch_outcomes AS o SET deploy_overlap = true FROM catalog_batches AS b

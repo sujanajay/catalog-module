@@ -235,10 +235,12 @@ export interface TrafficHistory {
   revisionFromMs: Map<string, number>;
   /** Serving now by the Cloud Run list. A shift whose record was lost still leaves this revision counted as serving. */
   live: Set<string>;
+  /** Revisions with no record that did a batch's work that day (findLostRecords): they count as serving. */
+  lost: Set<string>;
 }
 
 export function trafficHistory(shifts: readonly { service: string; revision: string; atMs: number }[], resources: readonly Pick<RunResource, "liveRevisions">[]): TrafficHistory {
-  const history: TrafficHistory = { serviceFromMs: new Map(), revisionFromMs: new Map(), live: new Set(resources.flatMap((r) => r.liveRevisions ?? [])) };
+  const history: TrafficHistory = { serviceFromMs: new Map(), revisionFromMs: new Map(), live: new Set(resources.flatMap((r) => r.liveRevisions ?? [])), lost: new Set() };
   const earliest = (map: Map<string, number>, key: string, ms: number) => map.set(key, Math.min(map.get(key) ?? ms, ms));
   for (const s of shifts) { earliest(history.serviceFromMs, s.service, s.atMs); earliest(history.revisionFromMs, s.revision, s.atMs); }
   return history;
@@ -254,7 +256,53 @@ export function waitingForTraffic(history: TrafficHistory | undefined, service: 
   const known = history.serviceFromMs.get(service);
   if (known === undefined || endMs <= known) return false;
   const first = history.revisionFromMs.get(revision);
-  return first !== undefined ? endMs <= first : !history.live.has(revision);
+  return first !== undefined ? endMs <= first : !history.live.has(revision) && !history.lost.has(revision);
+}
+
+/**
+ * The fail-safe of M6 decision C7: revisions with no shift record that must have served. A minute with ledger work on a
+ * service while no revision known to serve was billed (that minute or the next to it, as the two clocks differ) means the
+ * work ran on an unrecorded revision billed then, so its record was lost (or traffic was moved by hand). A true candidate
+ * runs beside the serving revision and never matches. Without this, a lost record would move that revision's real
+ * batch idle to "idle, no batch" as soon as another revision goes live. At worst it counts a candidate's probes as serving.
+ */
+export function findLostRecords(history: TrafficHistory, samples: readonly BillableSample[], work: ReadonlyMap<string, MinuteLedger>, fromMs: number, toMs: number): Set<string> {
+  const lost = new Set<string>();
+  const n = Math.ceil((toMs - fromMs) / IDLE_BUCKET_MS);
+  const minuteOf = (endMs: number) => Math.floor((endMs - 1 - fromMs) / IDLE_BUCKET_MS);
+  const serving = new Map<string, Uint8Array>();
+  for (const s of samples) {
+    if (s.kind !== "service") continue;
+    const row = serving.get(s.name) ?? serving.set(s.name, new Uint8Array(n)).get(s.name)!;
+    for (const p of s.points ?? []) {
+      const i = minuteOf(p.endMs);
+      if (i >= 0 && i < n && p.seconds > 0 && !waitingForTraffic(history, s.name, s.revision, p.endMs)) row[i] = 1;
+    }
+  }
+  for (const s of samples) {
+    if (s.kind !== "service" || !s.revision || history.revisionFromMs.has(s.revision)) continue;
+    const workUsd = work.get(s.name)?.workUsd, row = serving.get(s.name)!;
+    if (!workUsd) continue;
+    for (const p of s.points ?? []) {
+      const i = minuteOf(p.endMs);
+      if (i < 0 || i >= n || !waitingForTraffic(history, s.name, s.revision, p.endMs)) continue;
+      if (workUsd[i]! > 0 && !row[i] && !row[i - 1] && !row[i + 1]) { lost.add(s.revision); break; }
+    }
+  }
+  return lost;
+}
+
+/** The alerts for shift records that are missing: what findLostRecords found, and a serving revision with no record. */
+function missingRecordAlerts(day: string, history: TrafficHistory, samples: readonly BillableSample[]): CostAlert[] {
+  const byService = new Map<string, Set<string>>();
+  for (const s of samples) {
+    if (!s.revision || history.revisionFromMs.has(s.revision) || !history.serviceFromMs.has(s.name)) continue;
+    if (history.lost.has(s.revision) || history.live.has(s.revision)) (byService.get(s.name) ?? byService.set(s.name, new Set()).get(s.name)!).add(s.revision);
+  }
+  return [...byService].map(([service, revisions]) => ({
+    code: "traffic_shift_missing" as const, day, component: service, detail: { revisions: [...revisions] },
+    text: `${[...revisions].join(", ")} served traffic but has no traffic shift record, so its time is counted as serving and a batch around the shift can read deploy_overlap false. Re-run infra/deploy.sh before the service moves on, or record it by hand with the job catalog-traffic-shift.`,
+  }));
 }
 
 async function readTrafficHistory(db: Db, resources: readonly RunResource[]): Promise<TrafficHistory> {
@@ -266,7 +314,7 @@ async function readTrafficHistory(db: Db, resources: readonly RunResource[]): Pr
 // The day's lines
 // ---------------------------------------------------------------------------------------------------------------------
 
-export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "success_under_target" | "run_failed";
+export type CostAlertCode = "ledger_over" | "unlabelled" | "unpriced" | "traffic_shift_missing" | "success_under_target" | "run_failed";
 export interface CostAlert { code: CostAlertCode; day: string; component: string | null; text: string; detail?: Record<string, unknown> }
 
 export interface CostLine {
@@ -534,8 +582,11 @@ interface DayPlan { result: DayResult; provisional: boolean; allocations: Alloca
 /** Computes one UTC day (`YYYY-MM-DD`) without writing it. */
 async function planDay(db: Db, day: string, input: { samples: readonly BillableSample[]; resources: readonly RunResource[]; provisional: boolean }): Promise<DayPlan> {
   const from = new Date(`${day}T00:00:00Z`), to = new Date(+from + DAY_MS);
-  const { lines: billed, alerts, minutes, noTrafficUsd } = billedLines(day, input.samples, input.resources, await readTrafficHistory(db, input.resources));
   const { rows: ledger, minutes: work } = ledgerDay(await ledgerEvents(db, from, to), +from, +to, instanceUsdPerMs(input.resources));
+  const history = await readTrafficHistory(db, input.resources);
+  history.lost = findLostRecords(history, input.samples, work, +from, +to);
+  const { lines: billed, alerts, minutes, noTrafficUsd } = billedLines(day, input.samples, input.resources, history);
+  pushAll(alerts, missingRecordAlerts(day, history, input.samples));
   const lines = new Map(billed.map((l) => [l.component, l]));
   // Attributed per component (summed over its env lines: a component name is one env in practice).
   const attributed = new Map<string, { usd: number; estimated: boolean }>();

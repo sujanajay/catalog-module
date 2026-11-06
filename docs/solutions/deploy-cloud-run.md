@@ -83,7 +83,7 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   (`--to-revisions <candidate>=100`, never `--to-latest`, which could hand traffic to a revision
   created meanwhile that no probe saw), printing `==> <name>: live (<revision>)`. On a failed
   probe the traffic stays where it was, the probe output is printed with the line
-  `gcloud run services update-traffic <name> --to-revisions <previous>=100`, and deploy.sh stops;
+  `bash infra/deploy.sh --rollback <name> <previous>`, and deploy.sh stops;
   later services are not touched, and services this run already moved are listed with their
   `--rollback` commands.
 - Probes: matting services run `infra/check-matting.sh --probe` (spec 17 G3) sized per service in
@@ -107,8 +107,9 @@ deploy.sh. A lesson in a document is not a guard; these are the guards.
   "matting changed in this run" would be 0 on that re-run and SKIP the worker untested).
   `GATE_FORCE=1 bash infra/deploy.sh` deploys and probes every service anyway.
 - Traffic is pinned to a named revision, so a hand-made `gcloud run services update` on a gated
-  service creates a revision that takes no traffic. Ship changes through deploy.sh (or follow a
-  hand update with `update-traffic --to-revisions <new>=100` after checking it).
+  service creates a revision that takes no traffic. Ship changes through deploy.sh, or follow a
+  hand update with `bash infra/deploy.sh --rollback <name> <new>` after checking it. A bare
+  `update-traffic` moves traffic without a record (M6 decision C6).
 - Queue slots for the worker are set right after the worker gate passes, so a later web failure
   never leaves them on the old values.
 - The smoke never hangs on a broken cut-out service: `SMOKE_CUTOUT_READY_MS` (default 300000) is a

@@ -210,8 +210,8 @@ the details are in `docs/solutions/monitoring.md`.
   `gcloud run revisions list --service catalog-worker --region asia-south1`):
 
   ```powershell
-  gcloud run services update-traffic catalog-worker --to-revisions=<previous>=100 --region=asia-south1
-  gcloud run services update-traffic catalog-web --to-revisions=<previous>=100 --region=asia-south1
+  bash infra/deploy.sh --rollback catalog-worker <previous>
+  bash infra/deploy.sh --rollback catalog-web <previous>
   ```
 
   The new cost table (`catalog_cost_events`) can stay: older code does not use it. A service whose
@@ -219,7 +219,7 @@ the details are in `docs/solutions/monitoring.md`.
   deployed, send traffic to the newest revision again (same for `catalog-web`):
 
   ```powershell
-  gcloud run services update-traffic catalog-worker --to-latest --region=asia-south1
+  bash infra/deploy.sh --rollback catalog-worker <newest revision>
   ```
 
 ## Rollback

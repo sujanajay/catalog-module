@@ -203,6 +203,16 @@ describe("deploy_overlap reads traffic shifts (R1 exit finding 3)", () => {
     expect(() => parseTrafficShift({ ...env, SHIFT_REVISION: "catalog-web-00073-fih" })).toThrow(/SHIFT_REVISION/);
     expect(() => parseTrafficShift({ ...env, SHIFT_AT: "soon" })).toThrow(/SHIFT_AT/);
     expect(TRAFFIC_SHIFT_SERVICES).toHaveLength(6);
+    expect(parseTrafficShift({ ...env, SHIFT_AT: "2026-11-01T02:03:04.123456Z", SHIFT_IF_MISSING: "1" }).ifMissing).toBe(true);
+  });
+
+  it("a repair records a revision with no record and leaves one that has a record", async () => {
+    const shift = { service: "catalog-worker", revision: "catalog-worker-00002-new", ifMissing: true };
+    const recorded = async () => (await rows(sql`SELECT shifted_at FROM catalog_traffic_shifts WHERE revision = ${shift.revision}`)).length;
+    await recordTrafficShift(db, { ...shift, at: at(1) });
+    expect(await recorded()).toBe(1);
+    await recordTrafficShift(db, { ...shift, at: at(2) });
+    expect(await recorded()).toBe(1);
   });
 });
 

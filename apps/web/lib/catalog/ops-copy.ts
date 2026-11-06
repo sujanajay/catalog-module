@@ -269,6 +269,7 @@ export const COST_ALERT_WORDS: Record<string, string> = {
   ledger_over: "the cost record counts more than was billed",
   unlabelled: "a service or job is missing its labels",
   unpriced: "a service has no price yet",
+  traffic_shift_missing: "a traffic move has no record",
   success_under_target: "batch success under target",
   run_failed: "the daily cost check did not finish",
 };
