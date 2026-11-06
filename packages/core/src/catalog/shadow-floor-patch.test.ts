@@ -142,19 +142,25 @@ describe("floorPatchShare", () => {
   const levels = (n: number) => Math.round(255 - n * 255 / 240);
   const block = (n: number) => layer((x, y) => (x < 10 && y >= 70 && y < 80 ? levels(n) : 255));
 
-  it("counts floor tone in the lower half, beside the product box and its margin", () => {
-    expect(floorPatchShare(block(5), w, h, bg, product)).toBeCloseTo(0.01);
+  const side2 = 60 * 60;
+  it("counts floor tone below the product's middle and beside its box and margin, against the product's own size", () => {
+    expect(floorPatchShare(block(5), w, h, bg, product)).toBeCloseTo(100 / side2);
   });
-  it("leaves out the upper half", () => {
-    expect(floorPatchShare(layer((x, y) => (x < 10 && y < 10 ? levels(5) : 255)), w, h, bg, product)).toBe(0);
+  it("leaves out what is above the product's middle", () => {
+    expect(floorPatchShare(layer((x, y) => (x < 10 && y < 50 ? levels(5) : 255)), w, h, bg, product)).toBe(0);
   });
-  it("leaves out the product's columns and their 3% margin, so a real shadow under a hem does not count", () => {
-    expect(floorPatchShare(layer((x, y) => (y >= 50 && x >= 37 && x < 63 ? levels(5) : 255)), w, h, bg, product)).toBe(0);
-    expect(floorPatchShare(layer((x, y) => (y >= 50 && y < 60 && x === 36 ? levels(5) : 255)), w, h, bg, product)).toBeCloseTo(0.001);
+  it("leaves out the product's columns and their margin, so a real shadow under a hem does not count", () => {
+    expect(floorPatchShare(layer((x, y) => (y >= 50 && x >= 38 && x < 62 ? levels(5) : 255)), w, h, bg, product)).toBe(0);
+    expect(floorPatchShare(layer((x, y) => (y >= 50 && y < 60 && x === 37 ? levels(5) : 255)), w, h, bg, product)).toBeCloseTo(10 / side2);
   });
   it("leaves out tone under the low bound and a real shadow over the high bound", () => {
     expect(floorPatchShare(block(1), w, h, bg, product)).toBe(0);
     expect(floorPatchShare(block(40), w, h, bg, product)).toBe(0);
+  });
+  it("reads the same for the same photo at another scale on a canvas of another shape", () => {
+    const big = Buffer.alloc(300 * 200, 255);
+    for (let y = 140; y < 160; y++) for (let x = 0; x < 20; x++) big[y * 300 + x] = levels(5);
+    expect(floorPatchShare(big, 300, 200, bg, { x: 80, y: 40, w: 40, h: 120 })).toBeCloseTo(floorPatchShare(block(5), w, h, bg, product));
   });
 });
 
@@ -204,6 +210,13 @@ describe("the render leaves out a kept shadow that would leave a patch", () => {
     expect(output.compliance.measured!.floorPatch?.dropped).toBe(true);
     expect(output.compliance.measured!.shadow).toBe("none");
     expect(output.flags).toContain("no_shadow_source");
+  });
+
+  it("reads about the same share of a photo on channels with very different canvases, so its shadow does not differ by channel", async () => {
+    const { prepared, matte } = softBoot(120), shares: number[] = [];
+    for (const channel of ["noon", "trendyol", "styli", "amazon"] as const) shares.push((await renderSource({ prepared, matte, channel, shotNumber: 2, productType: "footwear" })).compliance.measured!.floorPatch!.share);
+    expect(Math.min(...shares)).toBeGreaterThan(0);
+    expect(Math.max(...shares) / Math.min(...shares)).toBeLessThan(1.4);
   });
 
   it("does not measure when the source shadow is already off", async () => {

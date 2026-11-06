@@ -367,7 +367,9 @@ it("D40: an agreed cut-out is judged whatever the sample rate", async () => {
   const judged = vi.mocked(seen.w.deps.judgeOutput).mock.calls.map(c => c[0].n);
   expect(judged).toContain(2);
   expect((await outputsOf(seen.s.batch.id))[1]!.flags).not.toContain("qa_sampled_out");
-  expect((await buildReport(db, seen.s.batch.id, { recheck: { ok: 0, total: 0, failures: [] }, exports: {} as never })).report.qa).toMatchObject({ agreedCutOuts: 1, floorPatchesDropped: 0 });
+  const first = (await outputsOf(seen.s.batch.id))[0]!, firstCompliance = first.compliance as { measured?: object };
+  await db.update(catalogOutputs).set({ compliance: { ...firstCompliance, measured: { ...firstCompliance.measured, floorPatch: { share: 0.02, dropped: true } } } as never }).where(eq(catalogOutputs.id, first.id));
+  expect((await buildReport(db, seen.s.batch.id, { recheck: { ok: 0, total: 0, failures: [] }, exports: {} as never })).report.qa).toMatchObject({ agreedCutOuts: 1, floorPatchesDropped: 1 });
 }, 180_000);
 
 it("D42: a later batch published the product: a re-cut of the older batch is refused every time and changes nothing; the last publisher's re-cut leaves the older batch's images alone", async () => {

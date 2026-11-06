@@ -218,31 +218,33 @@ function synthesisedDarkness(matte: Matte, box: BBox, plan: CanvasPlan, intensit
 /** A floor patch's tone: this many luma levels under the canvas colour. Under the low bound the eye and JPEG noise see nothing; above the high bound it is a real shadow, not floor tone. */
 export const FLOOR_PATCH_MIN_LEVELS = 1.5;
 export const FLOOR_PATCH_MAX_LEVELS = 25;
-/** Room beside the product box that a contact shadow may use, as a share of the canvas's smaller side. */
+/** Room beside the product box that a contact shadow may use, as a share of the product's longer side. */
 export const FLOOR_PATCH_MARGIN = 0.03;
 /**
- * The share of the canvas a kept shadow may tint with floor tone beside the product before it counts as a leftover patch.
- * Live Noon images of Vero Moda (2026-11-07, 533 kept shadows) split cleanly: 45 at 1.18 to 13.27%, then 0.28% and 0.05%, the rest at most 0.01%.
+ * How much floor tone a kept shadow may leave beside the product before it counts as a leftover patch, as a share of the
+ * square of the product's longer side (floorPatchShare).
  */
 export const FLOOR_PATCH_MAX_SHARE = 0.01;
 
 /**
- * The share of the canvas a drawn shadow layer (one grey byte per pixel, 255 no shadow, multiplied over `background`)
- * tints with floor tone in the lower half, beside the product: outside the columns of its box plus FLOOR_PATCH_MARGIN.
- * Under the product does not count: a skirt laid flat has a real soft shadow below its hem (Z7682102A02F73D315DA9Z shot 5,
- * 5715909709286 shot 1, 1.09% and 1.03% when that area counted). No judge sees a patch this faint, so the code measures it.
+ * Floor tone a drawn shadow layer (one grey byte per pixel, 255 no shadow, multiplied over `background`) leaves below the
+ * product's middle and beside it: outside the columns of its box plus FLOOR_PATCH_MARGIN. Under the product does not count:
+ * a skirt laid flat has a real soft shadow below its hem (Z7682102A02F73D315DA9Z shot 5, 5715909709286 shot 1).
+ * It is measured against the product's own size, not the canvas: a share of the canvas changed about 2.6 times between
+ * channels for one photo (0.17% on Styli, 0.45% on Trendyol, tracksuit-3 fixture), so a photo's shadow could stay on one
+ * channel and go on another. No judge sees a patch this faint, so the code measures it.
  */
 export function floorPatchShare(layer: Buffer, width: number, height: number, background: readonly [number, number, number], product: BBox): number {
   const bg = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2];
-  const margin = Math.round(FLOOR_PATCH_MARGIN * Math.min(width, height));
+  const side = Math.max(1, product.w, product.h), margin = Math.round(FLOOR_PATCH_MARGIN * side);
   const x0 = product.x - margin, x1 = product.x + product.w + margin;
   let tinted = 0;
-  for (let y = Math.floor(height / 2); y < height; y++) for (let x = 0; x < width; x++) {
+  for (let y = Math.max(0, Math.floor(product.y + product.h / 2)); y < height; y++) for (let x = 0; x < width; x++) {
     if (x >= x0 && x < x1) continue;
     const levels = bg * (255 - layer[y * width + x]!) / 255;
     if (levels >= FLOOR_PATCH_MIN_LEVELS && levels <= FLOOR_PATCH_MAX_LEVELS) tinted++;
   }
-  return tinted / (width * height);
+  return tinted / (side * side);
 }
 
 /** `keepSource` false skips the shadow kept from the source photo (07 4.6a `source_shadow_off`); the synthesis rule then decides as if none could be measured. */
