@@ -109,7 +109,7 @@ try {
   r = run();
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.deepEqual([lines(r, 'CREATE'), lines(r, 'UPDATE')], [[], []], r.stdout);
-  assert.equal(lines(r, 'SKIP').length, 6, r.stdout);
+  assert.equal(lines(r, 'SKIP').length, 7, r.stdout);
   assert.ok(!r.calls.some((x) => /jobs replace|jobs execute|add-iam-policy-binding|scheduler jobs (create|update)/.test(x)), 'a write on a re-run');
   console.log('PASS re-run is all SKIP');
   cases++;
