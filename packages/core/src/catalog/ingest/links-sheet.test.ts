@@ -125,6 +125,36 @@ describe("links-sheet.detectColumns", () => {
     ], "anta-oct.xlsx"));
     expect(r.items.map((i) => [i.identifier, i.n, i.sheetRow])).toEqual([["ABC-123", 1, 2], ["ABC-123", 2, 2], ["XYZ9", 1, 4]]);
     expect(r.warnings).toEqual(["2 identifiers appear more than once in anta-oct.xlsx; the first row of each is used."]);
+    // Each later row held a link the first did not: those photos are named, under their product.
+    expect(r.rejected).toEqual([
+      { name: "Row 3", identifier: "abc123", reason: "Row 3 repeats abc123, so its 1 new link was not used: only the first row of an identifier is read." },
+      { name: "Row 5", identifier: "XYZ 9", reason: "Row 5 repeats XYZ 9, so its 1 new link was not used: only the first row of an identifier is read." },
+    ]);
+  });
+
+  it("a repeated row whose photo is named in the query holds a new link, on the record (P1-B)", () => {
+    const rows = (...links: string[]) => read(table([["Option ID", "Image 1"], ...links.map((link) => ["ABC-123", link])]));
+    const byId = rows("https://h/img?id=1", "https://h/img?id=2", "https://h/img?id=3");
+    expect(byId.items).toHaveLength(1);
+    expect(byId.rejected.map((r) => r.name)).toEqual(["Row 3", "Row 4"]);
+    expect(rows("https://drive.google.com/uc?export=download&id=AAA", "https://drive.google.com/uc?export=download&id=BBB").rejected).toHaveLength(1);
+    expect(rows("https://h/a.jpg?X-Amz-Signature=1&X-Amz-Date=2", "https://h/a.jpg?X-Amz-Signature=3&X-Amz-Date=4").rejected).toEqual([]);
+    expect(rows("https://h/download?token=AAA", "https://h/download?token=BBB").rejected).toHaveLength(1);
+  });
+
+  it("a repeated row whose link differs only by its token holds no new link", () => {
+    const r = read(table([["Option ID", "Image 1"], ["ABC-123", `${img("ABC123", 1)}?token=a`], ["ABC-123", `${img("ABC123", 1)}?token=b`]]));
+    expect(r.rejected).toEqual([]);
+  });
+
+  it("loses nothing when a repeated row holds the same links (the sizes of one colour)", () => {
+    const r = read(table([
+      ["Option ID", "Image 1"],
+      ["ABC-123", img("ABC123", 1)],
+      ["ABC-123", img("ABC123", 1)],
+    ]));
+    expect(r.items).toHaveLength(1);
+    expect(r.rejected).toEqual([]);
   });
 
   it("rejects a row without an identifier with its row number", () => {

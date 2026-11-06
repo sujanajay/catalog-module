@@ -151,6 +151,28 @@ export function measuredRate(samples: readonly { at: string; made: number }[] | 
   return (last.made - first.made) / ((Date.parse(last.at) - Date.parse(first.at)) / 1000);
 }
 const fmt = (n: number) => n.toLocaleString("en");
+
+/** The counts of what a batch was given and made nothing of (written at grouping and finalize; the digest repeats them). */
+export interface LeftOutCounts { productsLeftOut?: number | undefined; filesLeftOut?: number | undefined; uploadsNotRead?: number | undefined }
+/**
+ * "91 products were left out, 1 upload could not be read and 2 files were not used", or null when nothing was: the one
+ * sentence every surface uses, so no surface can say all done while anything is out.
+ */
+export function leftOutWords(c: LeftOutCounts): string | null {
+  const k = c.productsLeftOut ?? 0, uploads = c.uploadsNotRead ?? 0, files = c.filesLeftOut ?? 0;
+  const parts = [
+    ...(k ? [`${num(k)} ${plural(k, "product was", "products were")} left out`] : []),
+    ...(uploads ? [`${num(uploads)} ${plural(uploads, "upload", "uploads")} could not be read`] : []),
+    ...(files ? [`${num(files)} ${plural(files, "file was", "files were")} not used`] : []),
+  ];
+  if (!parts.length) return null;
+  return parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+/** The banner's sentence for it; "" when nothing was left out. */
+export function leftOutText(c: LeftOutCounts): string {
+  const words = leftOutWords(c);
+  return words ? `${words.charAt(0).toUpperCase()}${words.slice(1)}; the digest says why.` : "";
+}
 /**
  * The Ready clause for Styli pairs not made because the photo is too small (spec 07 R8, batches before 2026-10-22,
  * when Styli still skipped photos for their size): the banner must
@@ -253,11 +275,12 @@ function derive(input: BatchStateInput): BatchState {
   }
   if (status === "done") {
     const capped = (c as BatchCounts & { qaCapped?: boolean }).qaCapped ? ` ${QA_CAP_BANNER}` : "";
-    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${capped}` };
+    const leftOut = leftOutText(c), leftOutNote = leftOut ? ` ${leftOut}` : "";
+    if (c.attentionProducts > 0) return { ...result, state: "attention", pill: `${c.attentionProducts} ${plural(c.attentionProducts, "product needs", "products need")} your attention`, listPill: `Needs attention (${c.attentionProducts} ${plural(c.attentionProducts, "product", "products")})`, text: `Everything else is done and in the sheet. Decide now or download the sheet as it is; each decision updates the sheet.${leftOutNote}${capped}` };
     const planned = c.outputs - c.skipped;
-    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: "Ready", listPill: "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${(input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
+    if (c.verified === planned && c.recheckOk !== null && c.recheckTotal !== null && c.recheckOk === c.recheckTotal) return { ...result, state: "ready", pill: leftOut ? "Ready, some left out" : "Ready", listPill: leftOut ? "Ready, some left out" : "Ready to download", text: `All ${planned} ${plural(planned, "image is", "images are")} live and passed every check. ${leftOut ? `${leftOut}${(input.styliSkipped ?? 0) > 0 ? ` ${styliSkipText(input.styliSkipped!)}` : ""}` : (input.styliSkipped ?? 0) > 0 ? styliSkipText(input.styliSkipped!) : "Nothing needs your attention."}` };
     const bad = Math.max(planned - c.verified, (c.recheckTotal ?? planned) - (c.recheckOk ?? 0));
-    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.` };
+    return { ...result, state: "recheck_failed", pill: `${bad} ${plural(bad, "link", "links")} did not pass the independent re-check`, listPill: `${bad} ${plural(bad, "link needs", "links need")} a check`, text: `The sheet is ready but ${bad} ${plural(bad, "link", "links")} did not pass the independent re-check. See Details before sharing it.${leftOutNote}` };
   }
   return result;
 }

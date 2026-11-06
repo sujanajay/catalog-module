@@ -136,7 +136,7 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       const cost=digestCost(await batchCostFigure(db,batchId),inrPerUsdFromEnv());
       // M1-S5 review P2-4: buildReport's rows are reused, so the outputs are read once per build; only improvements are new.
       const digest=digestFrom({batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
-        cost,
+        cost,leftOutProducts:ingest?.leftOutProducts ?? [],sharedPhotos:ingest?.sharedPhotos ?? [],sameFilesMerged:(ingest?.sameFiles ?? []).reduce((k,s)=>k+s.dropped.length,0),
         pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId)});
       return {...built,digest};
     };
