@@ -121,7 +121,9 @@ async function main() {
         const thumb = async (uri: string) => (await storage.downloadBuffer(uri)).buf.toString("base64");
         flagged.push(`<tr><td>${html(fixture.name)} ${html(output.channel)} img ${output.n}<br>${html(output.flags.join(", "))}<br>${html(output.reason ?? "")}</td><td><img width="300" src="data:image/jpeg;base64,${await thumb(source.rawUri)}"></td><td><img width="300" src="data:image/jpeg;base64,${await thumb(output.stagingUri)}"></td></tr>`);
       }
-      summary.push({ brand: fixture.name, images: fixture.shots.length, outputs: outputs.length, verdicts, dimensions, qaUsd: batch!.cost.qaUsd, qaCalls: batch!.cost.qaCalls, budgetUsd: budget });
+      const judges: Record<string, number> = {};
+      for (const output of outputs) judges[output.qaModel ?? "not judged"] = (judges[output.qaModel ?? "not judged"] ?? 0) + 1;
+      summary.push({ brand: fixture.name, images: fixture.shots.length, outputs: outputs.length, judges, verdicts, dimensions, qaUsd: batch!.cost.qaUsd, qaCalls: batch!.cost.qaCalls, budgetUsd: budget });
     }
     const result = { run, mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", summary };
     await writeFile(path.join(out, "summary.json"), JSON.stringify(result, null, 2));

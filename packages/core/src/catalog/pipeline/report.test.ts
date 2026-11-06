@@ -1,6 +1,6 @@
 import {expect,it,vi} from "vitest";
 import {cutInSourceNote,deliveredLinks,mergeNotes,readIngestReport,sortNotesByPhoto,splitRecheck,typeUnknownNote} from "./report";
-import {CATALOG_QA_DEFAULT_MODEL} from "../qa/classify";
+import {CATALOG_CLASSIFIER_MODEL,CATALOG_QA_DEFAULT_MODEL} from "../qa/classify";
 import {DEFAULT_POLICIES} from "../qa/policy";
 import {outputNote} from "./publish";
 it("keeps rejected images without DB rows in the final report",async()=>{
@@ -51,7 +51,7 @@ it("notes a product whose type could not be checked once, first, with no model i
   const note=typeUnknownNote([{flags:["type_unknown","cut_in_source"]},{flags:["type_unknown"]}]);
   expect(note).toBe("We could not tell what kind of product this is, so the general treatment was used.");
   expect(typeUnknownNote([{flags:["cut_in_source"]}])).toBe("");
-  const ids=[CATALOG_QA_DEFAULT_MODEL,...Object.values(DEFAULT_POLICIES).flatMap(p=>[p.qaModel,p.qaModelSecond,p.matteModel,p.matteModelSecond])].filter((id):id is string=>!!id);
+  const ids=[CATALOG_QA_DEFAULT_MODEL,CATALOG_CLASSIFIER_MODEL,...Object.values(DEFAULT_POLICIES).flatMap(p=>[p.qaModel,p.qaModelSecond,p.matteModel,p.matteModelSecond])].filter((id):id is string=>!!id);
   for(const id of ids) expect(note.toLowerCase()).not.toContain(id.toLowerCase());
   expect(note).not.toMatch(/gemini|claude|haiku|qwen|anthropic|google|openrouter|model/i);
   const flush="Photos 1 and 2: already cut at the frame edge in the original photo; the cut edge sits flush with the edge of the image";

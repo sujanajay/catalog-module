@@ -893,7 +893,7 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model==="test/second" ? second():limited();});
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
   w.deps.classifyProductType=classifyProductType;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
-  vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_QA_DEFAULT_MODEL","test/classifier");
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_CLASSIFIER_MODEL","test/classifier");
   try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
   const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
   const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));

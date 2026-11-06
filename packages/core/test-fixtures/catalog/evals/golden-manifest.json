@@ -4176,12 +4176,9 @@
     "many_shots"
    ],
    "expect": {
-    "attention": true,
-    "flags": [
-     "leftover_background"
-    ],
-    "detector": "code",
-    "reason": "A white top on the 229 backdrop: the model matte keeps a chunk of the gap between the arm and the waist (1.67% of the frame), no second matte model was available, and a pass-through would recolour 51% of the product, so the render holds the photo whole by rule (PR #75); goes back to published once a second matte or a recolour of the gap cuts it clean."
+    "attention": false,
+    "flags": [],
+    "detector": "code"
    }
   },
   {

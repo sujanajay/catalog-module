@@ -3,12 +3,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
-import { autoTags, buildGolden, deriveBytes, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, plantedShotNumber, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry } from "./golden";
+import { autoTags, buildGolden, deriveBytes, expectedSourceCount, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, plantedShotNumber, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry } from "./golden";
 
 async function photo(width: number, height: number, product: [number, number, number], bg: [number, number, number] = [255, 255, 255], box = { left: Math.round(width * 0.3), top: Math.round(height * 0.2), width: Math.round(width * 0.4), height: Math.round(height * 0.6) }) {
   const overlay = await sharp({ create: { width: box.width, height: box.height, channels: 3, background: { r: product[0], g: product[1], b: product[2] } } }).png().toBuffer();
   return sharp({ create: { width, height, channels: 3, background: { r: bg[0], g: bg[1], b: bg[2] } } }).composite([{ input: overlay, left: box.left, top: box.top }]).jpeg({ quality: 92 }).toBuffer();
 }
+
+describe("expectedSourceCount (M1 D43)", () => {
+  const file = (path: string, bytes: string) => ({ path, data: Buffer.from(bytes) });
+  it("counts one source per distinct bytes per product: ingest merges copies, so 144 files can make 143 sources", () => {
+    expect(expectedSourceCount([file("A_1.jpg", "x"), file("A_2.jpg", "x"), file("A_3.jpg", "y")])).toBe(2);
+  });
+  it("keeps the same bytes in two products as two sources, and identifiers with underscores apart", () => {
+    expect(expectedSourceCount([file("A_1.jpg", "x"), file("B_1.jpg", "x"), file("run-10_20_1.webp", "x"), file("run-10_21_1.webp", "x")])).toBe(4);
+  });
+});
 
 describe("golden manifest", () => {
   it("builds from folders with auto tags, derived hard cases and a planted wrong item, pins sha256 and round-trips", async () => {

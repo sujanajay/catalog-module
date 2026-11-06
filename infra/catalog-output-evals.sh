@@ -17,6 +17,9 @@
 #                                                        # line of its job log ("Run id: evals-..."); sets already
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
+#   bash infra/catalog-output-evals.sh exam              # M1 D43: the judge exam: the live judges on the pinned defects and clean images.
+#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.50). Exits non-zero under its
+#                                                        # bars. infra/deploy.sh runs it as its last step; proof runs it first.
 #   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D40: the matte agreement on the 19 real photos and 8 controls.
 #                                                        # Always LIVE_SMOKE=1 for that one execution (spends credit); run
 #                                                        # with "run --live" for the golden set. Writes only under catalog-test/.
@@ -115,9 +118,10 @@ execute_cli() {
 
 case "${1:-}" in
   deploy) deploy ;;
+  exam) shift; execute_cli --live exam "$@" ;;
   proof) shift; execute_cli --live proof "$@" ;;
   recut) shift; execute_cli recut "$@" ;;
   upload) shift; upload "$@" ;;
   run) shift; run "$@" ;;
-  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...] | proof [--limit n] | recut --batch <id> --photos <identifier_n,...>" >&2; exit 2 ;;
+  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...] | exam | proof [--limit n] | recut --batch <id> --photos <identifier_n,...>" >&2; exit 2 ;;
 esac

@@ -13,7 +13,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { catalogBatches, type VendorRouteRow } from "@catalog/core/db/schema";
-import { CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
+import { CATALOG_CLASSIFIER_MODEL, CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { CircuitBreakers } from "@catalog/core/vendor/circuit";
 import { endDrill, loadRouteRows, loadRoutes, RouteChangeError, setRoute, startDrill } from "@catalog/core/vendor/route-table";
@@ -112,7 +112,7 @@ async function preferredModels(db: Db, capability: Capability, batchId: string |
   if (!batch) throw new RouteChangeError(`No batch ${batchId}.`);
   const resolved = batch.options.policy ?? await resolvePolicy(db, batch.brandSlug, batch.productType === "auto" ? "*" : batch.productType);
   const policy = !batch.options.policy && resolved.source === "default" ? { ...resolved, qaModel: defaultModel } : resolved;
-  if (capability === "vision.read") return { models: [defaultModel, policy.qaModelSecond ?? ""].filter(Boolean), source: `batch ${batchId}'s classifier model` };
+  if (capability === "vision.read") return { models: [env.CATALOG_CLASSIFIER_MODEL?.trim() || CATALOG_CLASSIFIER_MODEL, policy.qaModelSecond ?? ""].filter(Boolean), source: `batch ${batchId}'s classifier model` };
   const useSecond = !!(batch.counts as { qaUseSecond?: boolean }).qaUseSecond && !!policy.qaModelSecond;
   const first = useSecond ? policy.qaModelSecond! : policy.qaModel, second = useSecond ? policy.qaModel : policy.qaModelSecond;
   return { models: [first, second ?? ""].filter(Boolean), source: `batch ${batchId}'s ${batch.options.policy ? "pinned" : "current"} policy judge${useSecond ? " (switched to its second)" : ""}` };

@@ -6,7 +6,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
+import { CATALOG_CLASSIFIER_MODEL, CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
 import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 
 const ROOT = path.resolve(__dirname, "../../..");
@@ -40,7 +40,7 @@ const CORE_COPY_FILES = [
 
 // Every candidate id the policy defines, plus provider and family names (spec 07 section 8).
 const POLICY_IDS = Object.values(DEFAULT_POLICIES).flatMap(p => [p.matteModel, p.matteModelSecond, p.qaModel, p.qaModelSecond]);
-const CANDIDATE_IDS = [...new Set([CATALOG_QA_DEFAULT_MODEL, ...POLICY_IDS].filter((id): id is string => !!id))];
+const CANDIDATE_IDS = [...new Set([CATALOG_QA_DEFAULT_MODEL, CATALOG_CLASSIFIER_MODEL, ...POLICY_IDS].filter((id): id is string => !!id))];
 const SUBSTRINGS = [
   "gemini", "claude", "qwen", "birefnet", "rmbg", "bria", "inspyre", "ben_custom", "esrgan", "swinir",
   "gpt-", "llama", "mistral", "openai/", "anthropic/", "google/", "meta-llama/", "openrouter",

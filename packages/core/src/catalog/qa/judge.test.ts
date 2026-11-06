@@ -168,7 +168,8 @@ describe("judge views amendment",()=>{
   expect(system).toMatch(/one of front, side, back, sole, top, inside, detail, on-model, flat, chart/);
   expect(system).toMatch(/4\. Score image 2 against image 1[\s\S]*product_intact:[\s\S]*A logo or label on its own is not the product/);
   expect(system).toMatch(/background_clean:[\s\S]*say where it is in image 2/);
-  expect(system).toContain(`"product_intact":100`);
+  expect(system).toContain(`"product_intact":0-100`);
+  expect(system).not.toMatch(/":100/);
   expect(system).not.toContain(String.fromCharCode(0x2014));
  });
  it("a single brief out of a 3-pack is the same product: no flag and no second opinion", async () => {
@@ -445,10 +446,15 @@ describe("classifier back-off on rate limits and the second model (gate 3h)", ()
  });
 });
 
+/** The seeds with a third judge that exists only in these tests: the chain logic holds for a table an admin has grown. */
+const THIRD = "test/third-judge";
+const WITH_THIRD = [...SEED_ROUTES, {...SEED_ROUTES.find(r => r.capability === "judge.render")!, id:`judge.render:openrouter:${THIRD}`, model:THIRD, rank:3}];
+
 describe("M7-F2 the judge and classifier call through the route table", () => {
  /** The seeds once the owner has recorded their no-training positions; `killRank` is switched off. */
- const routes = (killRank?: number, circuits?: CircuitBreakers) => createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.rank === killRank ? "off" as const : "serving" as const})), circuits);
- const [FIRST, SECOND, THIRD] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string, string];
+ const routes = (killRank?: number, circuits?: CircuitBreakers) => createRouter(WITH_THIRD.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.rank === killRank ? "off" as const : "serving" as const})), circuits);
+ const [FIRST, SECOND] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string];
+ const [READ_FIRST, READ_SECOND] = SEED_ROUTES.filter(r => r.capability === "vision.read").map(r => r.model) as [string, string];
  const fast = {sleep: async () => {}, random: () => .5, log: () => {}};
  const asked = (fetcher: ReturnType<typeof byModel>) => fetcher.mock.calls.map(([, init]) => requestModel(init));
  it("route 1 switched off: route 2 gives the verdict and route 1 is never asked; the result names the route", async () => {
@@ -479,16 +485,31 @@ describe("M7-F2 the judge and classifier call through the route table", () => {
   expect(none).toMatchObject({flags:["qa_unavailable"],route:null,model:FIRST});
  });
  it("the classifier reads with vision.read: route 1 switched off, route 2 gives the type and the result names it", async () => {
-  const fetcher = byModel({[SECOND]: {type:"footwear",confidence:.8}});
-  const result = await classifyProductType(await image(),{apiKey:"fake",model:FIRST,secondModel:SECOND,fetch:fetcher,router:routes(1),...fast});
-  expect(result).toMatchObject({type:"footwear",flags:[],model:SECOND,route:`vision.read:openrouter:${SECOND}`});
+  const fetcher = byModel({[READ_SECOND]: {type:"footwear",confidence:.8}});
+  const result = await classifyProductType(await image(),{apiKey:"fake",model:READ_FIRST,secondModel:READ_SECOND,fetch:fetcher,router:routes(1),...fast});
+  expect(result).toMatchObject({type:"footwear",flags:[],model:READ_SECOND,route:`vision.read:openrouter:${READ_SECOND}`});
+  expect(asked(fetcher)).toEqual([READ_SECOND]);
+ });
+ it("M1 D43: the seeded chain with route 1 off: route 2 alone decides, and a different item with nobody to confirm it does not count", async () => {
+  const seeded = createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.capability === "judge.render" && r.rank === 1 ? "off" as const : "serving" as const})));
+  const fetcher = byModel({[SECOND]: reply({wrong_item:true})});
+  const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:seeded,...fast});
   expect(asked(fetcher)).toEqual([SECOND]);
+  expect(result.model).toBe(SECOND);
+  expect(result.flags).not.toContain("different_product");
+ });
+ it("M1 D43: a policy that still names the retired judge is never asked: the seeded chain judges instead", async () => {
+  const fetcher = byModel({[FIRST]: reply()});
+  const seeded = createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state:"serving" as const})));
+  const result = await judgeOutput(await input({n:1,shotOne:undefined,model:READ_FIRST,secondModel:READ_SECOND}),{apiKey:"fake",fetch:fetcher,router:seeded,...fast});
+  expect(result).toMatchObject({verdict:"pass",model:FIRST});
+  expect(asked(fetcher)).toEqual([FIRST]);
  });
 });
 
 describe("M7-F2 dead primary, caller stops and model-gone routes (review findings 1, 2 and 5)", () => {
- const [FIRST, SECOND, THIRD] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string, string];
- const serving = (circuits: CircuitBreakers) => createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state:"serving" as const})), circuits);
+ const [FIRST, SECOND] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string];
+ const serving = (circuits: CircuitBreakers) => createRouter(WITH_THIRD.map(r => ({...r, noTrainingTerms:"test: position on file", state:"serving" as const})), circuits);
  const fast = {sleep: async () => {}, random: () => .5, log: () => {}};
  const down = () => new Response("upstream error",{status:503});
  it("route 1 serving but returning 503 (circuit still closed): route 2 judges, route 3 gives the second opinion and a wrong item is confirmed", async () => {

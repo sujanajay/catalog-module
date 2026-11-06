@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
-import { matteProofCommand, parsePhotoList, proofHolds, proofHtml, proofSummary, proofVerdict, PROOF_CONTROLS, PROOF_MARKED, PROOF_REAL, type ProofRow } from "./catalog-matte-proof";
+import { matteProofCommand, parsePhotoList, proofHolds, proofHtml, proofJudges, proofSummary, proofVerdict, PROOF_CONTROLS, PROOF_MARKED, PROOF_REAL, type ProofRow } from "./catalog-matte-proof";
 
-const base = { agreed: false, busy: false, passthrough: false, flags: [] as string[], judged: true };
+const base = { agreed: false, busy: false, passthrough: false, flags: [] as string[], judged: true, judgeProven: true };
 
 test("the proof covers the 19 false rejections and the controls the guard rightly caught", () => {
   expect(new Set(PROOF_REAL.map(([id, n]) => `${id}_${n}`)).size).toBe(19);
@@ -18,6 +18,19 @@ test("a real photo passes only as a clean cut-out the judge has seen", () => {
   expect(proofVerdict({ ...real, judged: false }).result).toBe("fail");
   expect(proofVerdict({ ...real, flags: ["product_removed"] })).toEqual({ result: "fail", note: "judge: product_removed" });
   expect(proofVerdict({ ...real, flags: ["qa_unavailable"] }).result).toBe("fail");
+});
+
+test("a real photo does not pass on the silence of a judge that has not passed its exam in this run (M1 D43)", () => {
+  const real = { ...base, group: "real" as const, agreed: true };
+  expect(proofVerdict({ ...real, judgeProven: false })).toEqual({ result: "fail", note: "the judge said nothing and has not passed its exam in this run" });
+  // A judge that named something is judged on what it named, exam or not.
+  expect(proofVerdict({ ...real, judgeProven: false, flags: ["halo"] }).note).toBe("judge: halo");
+});
+
+test("the proof names the model behind its verdicts (M1 D43)", () => {
+  const images = (judgeModel: string, count: number) => Array.from({ length: count }, () => ({ channel: "noon", path: "p", thumb: "", verdict: "pass", flags: [], scores: {}, judgeModel, calls: 1 }));
+  expect(proofJudges([{ images: images("a/one", 2) }, { images: [...images("a/one", 1), ...images("b/two", 1)] }])).toBe("JUDGED BY: a/one on 3 images, b/two on 1 images.");
+  expect(proofJudges([])).toBe("JUDGED BY: no judge.");
 });
 
 test("the marked photo passes when the mark is named, and a correct system does not fail the proof on it", () => {
@@ -53,7 +66,7 @@ test("one failure fails the proof, a look does not, and the verdict is the first
 });
 
 test("the page carries its images, leads with what failed, and escapes what it prints", () => {
-  const row = (photo: string, result: ProofRow["result"]): ProofRow => ({ photo, group: "real", steps: [], model: "m", agreed: true, busy: false, passthrough: false, images: [{ channel: "noon", path: "p", thumb: "QUJD", verdict: "pass", flags: [], scores: {} }], result, note: "<why>" });
+  const row = (photo: string, result: ProofRow["result"]): ProofRow => ({ photo, group: "real", steps: [], model: "m", agreed: true, busy: false, passthrough: false, images: [{ channel: "noon", path: "p", thumb: "QUJD", verdict: "pass", flags: [], scores: {}, judgeModel: "m", calls: 1 }], result, note: "<why>" });
   const html = proofHtml("run", [row("good", "pass"), row("bad", "fail")], ["PROOF FAIL"]);
   expect(html).toContain("data:image/jpeg;base64,QUJD");
   expect(html.indexOf("FAIL bad")).toBeLessThan(html.indexOf("PASS good"));
@@ -71,7 +84,7 @@ test("proof refuses to run without LIVE_SMOKE=1, before touching anything", asyn
 });
 
 test("M1 D40: the verdict counts the photos that would be held or left out, real photos and controls apart", () => {
-  const row = (group: ProofRow["group"], busy: boolean, flags: string[] = []) => ({ group, busy, images: [{ channel: "noon", path: "", thumb: "", verdict: "", flags, scores: null }] });
+  const row = (group: ProofRow["group"], busy: boolean, flags: string[] = []) => ({ group, busy, images: [{ channel: "noon", path: "", thumb: "", verdict: "", flags, scores: null, judgeModel: "m", calls: 1 }] });
   const holds = proofHolds([row("real", false), row("real", true), row("marked", false, ["text_or_watermark"]), row("real", false, ["qa_sampled_out"]), row("control", true), row("control", false), row("backstop", false, ["halo"])]);
   expect(holds.real).toEqual({ held: 2, of: 4 });
   expect(holds.controls).toEqual({ held: 1, of: 2 });

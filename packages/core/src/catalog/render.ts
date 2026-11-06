@@ -77,6 +77,8 @@ export const CUT_EDGE_OPAQUE_ALPHA = 250;
 export const CUT_EDGE_PAD_STDEV = 6;
 /** ... whose mean colour stays within this distance per channel of the outermost line (any colour, not only white). */
 export const CUT_EDGE_PAD_TOLERANCE = 10;
+/** How far beside the product, as a share of the frame line, the pad probe stays off its contact shadow. */
+export const CUT_EDGE_PROBE_MARGIN_FRACTION = 0.05;
 /** A pad the colour of the photo's own background is told apart only as the thin border: this fraction of the frame. */
 export const CUT_EDGE_BORDER_FRACTION = 0.03;
 export const CUT_EDGE_BORDER_MIN_PX = 4;
@@ -176,7 +178,7 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
     for (; depth <= max; depth++) { const line = lineStats(depth); if (line.stdev > CUT_EDGE_PAD_STDEV || line.mean.some((v, c) => Math.abs(v - outer.mean[c]!) > CUT_EDGE_PAD_TOLERANCE)) break; }
     depths[side] = { depth, colour: outer.mean, max };
   }
-  const result = {} as Record<Side, { depth: number; photoEdge: boolean }>;
+  const result = {} as Record<Side, { depth: number; photoEdge: boolean }>, tight = bbox(alpha, width, height) ?? { x: 0, y: 0, w: 0, h: 0 };
   for (const side of SIDES) {
     const { depth, colour, max } = depths[side], horizontal = side === "top" || side === "bottom";
     if (!colour) { result[side] = { depth, photoEdge: true }; continue; }
@@ -187,9 +189,20 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
     const qThin = Math.max(CUT_EDGE_BORDER_MIN_PX, Math.ceil(length * CUT_EDGE_BORDER_FRACTION));
     const from = a.depth <= qThin ? a.depth : 0, to = length - (b.depth <= qThin ? b.depth : 0);
     const probe = Math.min((horizontal ? height : width) - 1, depth + 2), background = [0, 0, 0];
-    let count = 0;
-    for (let i = from; i < to; i++) { const k = lineIndex(side, probe, i, width, height); if (alpha[k]! <= ALPHA_BBOX_THRESHOLD) { count++; for (let c = 0; c < 3; c++) background[c]! += rgb[k * 3 + c]!; } }
-    const differs = count < (to - from) * 0.1 || background.some((t, c) => Math.abs(t / count - colour[c]!) > CUT_EDGE_PAD_TOLERANCE);
+    // Beside the product when there is enough of it: under the product lies its contact shadow, which reads as another
+    // colour on a clean band (M1 D43, Z46B n5: a hem well inside the frame read as cut).
+    const clear = horizontal ? [tight.x, tight.x + tight.w] : [tight.y, tight.y + tight.h], margin = Math.ceil(length * CUT_EDGE_PROBE_MARGIN_FRACTION), beside = [0, 0, 0];
+    let count = 0, besideCount = 0;
+    for (let i = from; i < to; i++) {
+      const k = lineIndex(side, probe, i, width, height);
+      if (alpha[k]! > ALPHA_BBOX_THRESHOLD) continue;
+      count++;
+      const away = i < clear[0]! - margin || i >= clear[1]! + margin;
+      if (away) besideCount++;
+      for (let c = 0; c < 3; c++) { background[c]! += rgb[k * 3 + c]!; if (away) beside[c]! += rgb[k * 3 + c]!; }
+    }
+    const [probed, probedCount] = besideCount >= (to - from) * 0.1 ? [beside, besideCount] : [background, count];
+    const differs = count < (to - from) * 0.1 || probed.some((t, c) => Math.abs(t / probedCount - colour[c]!) > CUT_EDGE_PAD_TOLERANCE);
     // Or a thin perpendicular band's inner line shows the photo starting exactly here: the photo's corner.
     const corner = (horizontal ? [depths.left, depths.right] : [depths.top, depths.bottom]).some((q, k) => {
       if (q.depth < 1 || q.depth > qThin || !q.colour) return false;

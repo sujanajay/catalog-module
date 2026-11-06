@@ -333,17 +333,33 @@ try {
     const repo = path.join(dir, 'repo');
     fs.mkdirSync(path.join(repo, 'infra'), {recursive: true});
     fs.writeFileSync(path.join(repo, 'infra', 'monitoring.sh'), 'echo ran >> ran.txt; exit "${MON_EXIT:-0}"\n');
+    fs.writeFileSync(path.join(repo, 'infra', 'catalog-output-evals.sh'), 'echo "$1" >> exam.txt; exit "${EXAM_EXIT:-0}"\n');
     for (const [label, env, status, ran, warnText] of [
       ['deploy-monitoring-fails', {MON_EXIT: '1'}, 0, true, /WARN: infra\/monitoring\.sh failed/],
       ['deploy-monitoring-ok', {MON_EXIT: '0'}, 0, true, null],
       ['deploy-monitoring-preview', {CATALOG_PREVIEW: '1', MON_EXIT: '1'}, 0, false, null],
     ]) {
       fs.rmSync(path.join(repo, 'ran.txt'), {force: true});
-      const r = spawnSync(bash, ['-c', `set -euo pipefail\nTAG=t; deploy_step() { :; }; deploy_report() { :; }; gate_shift_report() { :; }\n${block}\necho after-monitoring`], {cwd: repo, env: {...process.env, ...env}, encoding: 'utf8'});
+      const r = spawnSync(bash, ['-c', `set -euo pipefail\nTAG=t; MEASURE_ONLY=0; ASSETS_BUCKET=gs://x; deploy_step() { :; }; deploy_report() { :; }; gate_shift_report() { :; }\n${block}\necho after-monitoring`], {cwd: repo, env: {...process.env, ...env}, encoding: 'utf8'});
       assert.equal(r.status, status, label + '\n' + r.stderr);
       assert.match(r.stdout, /after-monitoring/, label + ' continues');
       assert.equal(fs.existsSync(path.join(repo, 'ran.txt')), ran, label + ' ran monitoring.sh');
       if (warnText) assert.match(r.stderr, warnText, label);
+      console.log('PASS ' + label);
+      cases++;
+    }
+    // M1 D43: the judge exam runs after monitoring, and a failed exam stops the deploy before DEPLOY_OK.
+    for (const [label, env, status, ran] of [
+      ['deploy-exam-ok', {EXAM_EXIT: '0'}, 0, true],
+      ['deploy-exam-fails', {EXAM_EXIT: '1'}, 1, true],
+      ['deploy-exam-preview', {CATALOG_PREVIEW: '1', EXAM_EXIT: '1'}, 0, false],
+    ]) {
+      fs.rmSync(path.join(repo, 'exam.txt'), {force: true});
+      const r = spawnSync(bash, ['-c', `set -euo pipefail\nTAG=t; MEASURE_ONLY=0; ASSETS_BUCKET=gs://x; deploy_step() { :; }; deploy_report() { echo DEPLOY_OK; }; gate_shift_report() { :; }\n${block}`], {cwd: repo, env: {...process.env, ...env}, encoding: 'utf8'});
+      assert.equal(r.status, status, label + '\n' + r.stderr);
+      assert.equal(fs.existsSync(path.join(repo, 'exam.txt')), ran, label + ' ran the exam');
+      if (ran) assert.equal(fs.readFileSync(path.join(repo, 'exam.txt'), 'utf8').trim(), 'exam', label);
+      assert.equal(/DEPLOY_OK/.test(r.stdout), status === 0, label + ' DEPLOY_OK only after a passed exam');
       console.log('PASS ' + label);
       cases++;
     }

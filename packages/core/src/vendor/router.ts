@@ -1,5 +1,5 @@
 import { CircuitBreakers } from "./circuit";
-import { routeCallable, routeId, type Capability, type RouteAdapter, type RouteDef } from "./routes";
+import { isRetiredJudge, routeCallable, routeId, type Capability, type RouteAdapter, type RouteDef } from "./routes";
 
 /** A route the call will try: a table row, or the policy's own model when the table has no row for it. */
 export interface PlannedRoute { id: string; capability: Capability; rank: number; adapter: RouteAdapter; model: string; fromTable: boolean }
@@ -24,11 +24,11 @@ export function createRouter(routes: readonly RouteDef[], circuits = new Circuit
  * Without a router the plan is the preferred models alone (unit tests and the eval job, which have no table).
  */
 export function planRoutes(router: Router | undefined, capability: Capability, preferred: readonly (string | null | undefined)[]): PlannedRoute[] {
-  const rows = router?.routes.filter(r => r.capability === capability) ?? [];
+  const rows = router?.routes.filter(r => r.capability === capability && !isRetiredJudge(capability, r.model)) ?? [];
   const planned: PlannedRoute[] = [];
   const add = (route: PlannedRoute) => { if (!planned.some(p => p.id === route.id)) planned.push(route); };
   for (const model of preferred) {
-    if (!model) continue;
+    if (!model || isRetiredJudge(capability, model)) continue;
     const modelRows = rows.filter(r => r.model === model);
     if (!router) add({id: routeId(capability, "openrouter", model), capability, rank: 0, adapter: "openrouter", model, fromTable: false});
     for (const row of modelRows) if (routeCallable(row)) add({...pick(row), fromTable: true});
