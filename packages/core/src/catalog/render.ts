@@ -3,7 +3,7 @@ import { fileTypeFromBuffer } from "file-type";
 import { backgroundOf, channel, CUT_BAND_NOTE_START, DETAIL_SHOT_BBOX_FRACTION, JPEG_QUALITY_MIN, JPEG_QUALITY_START, JPEG_QUALITY_STEP, MAX_OUTPUT_BYTES, MAX_UPSCALE, MIN_SOURCE_LONG_SIDE_PX, type ChannelSpec, type Size } from "./channels";
 import type { ChannelRules } from "./channel-rules";
 import { ENLARGEMENT_FAILED_SENTENCE, type ChannelId, type OutputFlag, type ProductType } from "./types";
-import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, shadowLayer } from "./shadow";
+import { ALPHA_BBOX_THRESHOLD, analyseBackground, borderPixels, FLOOR_PATCH_MAX_SHARE, floorPatchShare, shadowLayer } from "./shadow";
 import { anchorBounds, checkOutput, type Measured } from "./compliance";
 import { enlargeCutout } from "./enhance";
 import { plainFailures } from "./qa/reasons";
@@ -32,7 +32,8 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
  */
 export type ShadowKind = "kept" | "synthesised" | "none";
 /** The compliance measurement plus what this render drew (07 4.6a): the shadow kind and the cut sides. Stored in `catalog_outputs.compliance.measured`. */
-export interface RenderMeasured extends Measured { shadow: ShadowKind; cut: CutEdges }
+export interface RenderMeasured extends Measured { shadow: ShadowKind; cut: CutEdges;
+  /** A kept shadow's floor tone as a share of the canvas (floorPatchShare), and whether the render left that shadow out for it. Absent when no kept shadow was drawn. */ floorPatch?: { share: number; dropped: boolean } }
 export interface RenderCompliance { ok: boolean; failures: string[]; measured?: RenderMeasured }
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: RenderCompliance; upscale?: { model: string; ms: number; reused?: true };
   /** The placed cut-out's alpha on the canvas (plan.w x plan.h, one byte per pixel), the mask the compliance check judged with: a re-check of the delivered JPEG (catalog-smoke --verify-manifest) passes it so the Styli guide is judged on the product, never on a kept shadow. Absent when nothing was drawn. */ foregroundMask?: Buffer }
@@ -657,7 +658,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
     : `${CUT_BAND_NOTE_START}${floating.join(" and ")}, but on ${spec.label} the product cannot reach that edge of the image without trimming more of it, so a band shows there.`);
   const rgbColor = hexColor(color), borderTolerance = rgbColor.every(v => v === 255) ? PASSTHROUGH_WHITE_TOLERANCE : PASSTHROUGH_BORDER_TOLERANCE;
   const passthrough = p.sourceMime === "image/jpeg" && !p.alphaSource && !anyCut(cut) && (input.fitScale ?? 1) >= 1 && p.width === plan.w && p.height === plan.h && box.x >= plan.safeBox.x && box.y >= plan.safeBox.y && box.x + box.w <= plan.safeBox.x + plan.safeBox.w && box.y + box.h <= plan.safeBox.y + plan.safeBox.h && borderPixels(p.width, p.height).every(i => rgbColor.every((v, c) => Math.abs(p.rgb[i * 3 + c]! - v) <= borderTolerance));
-  let image: Buffer, shadowKind: ShadowKind = "none";
+  let image: Buffer, shadowKind: ShadowKind = "none", floorPatch: RenderMeasured["floorPatch"];
   const foregroundMask = Buffer.alloc(plan.w * plan.h);
   if (passthrough) {
     result.flags.push("passthrough"); image = await sharp(p.rgb, { raw: { width: p.width, height: p.height, channels: 3 } }).png().toBuffer();
@@ -692,6 +693,13 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
       foregroundMask.fill(0);
       for (let y = 0; y < product.h; y++) cutoutAlpha.copy(foregroundMask, (product.y + y) * plan.w + product.x, y * product.w, (y + 1) * product.w);
       const drawn = await shadowLayer(p, matte, crop, plan, input.productType, color, foregroundMask, input.keepSourceShadow !== false);
+      floorPatch = undefined;
+      if (drawn.layer && !drawn.flags.includes("shadow_synthesised")) {
+        // A kept shadow that leaves floor tone on the canvas is left out here, like `source_shadow_off`: a clean image, automatically, with no flag for triage and no person.
+        const share = floorPatchShare(await sharp(drawn.layer).toColourspace("b-w").raw().toBuffer(), plan.w, plan.h, rgbColor, product), dropped = share >= FLOOR_PATCH_MAX_SHARE;
+        floorPatch = { share, dropped };
+        if (dropped) return { layer: null, flags: ["no_shadow_source" as const] };
+      }
       // Never a synthesised contact shadow on a photo cut in the source on any side (a bag held in a cropped hand, a
       // close-up filling the photo): nothing stands on a floor there, and the shadow below makes the centred product
       // look off-centre.
@@ -735,7 +743,7 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const identifier = input.identifier ?? "photo";
   result.foregroundMask = foregroundMask;
   const checked = await checkOutput({ jpeg, channel: spec.id, spec, ...(input.channelRules ? { rules: input.channelRules } : {}), shotNumber, plan, identifier, n: shotNumber, publicObjectPath: input.publicObjectPath ?? `${encodeURIComponent(identifier)}_${shotNumber}.jpg`, foregroundMask });
-  result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut } } };
+  result.compliance = { ok: checked.ok, failures: checked.failures, measured: { ...checked.measured, shadow: shadowKind, cut: { ...cut }, ...(floorPatch ? { floorPatch } : {}) } };
   // The note (the row's reason) names the rule in plain words; the "code: sentence" strings stay in compliance.failures (07 4.6a).
   if (!result.compliance.ok) { result.flags.push("failed_compliance");
     result.notes.push(`The image we made did not meet ${spec.label}'s rules: ${plainFailures(result.compliance.failures, spec.label)}.`); return result; }

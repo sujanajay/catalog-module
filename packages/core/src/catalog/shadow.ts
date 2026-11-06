@@ -34,22 +34,31 @@ export function analyseBackground(rgb: Buffer, width: number, height: number): P
   return { uniform: stdevs.every(v => v < BG_UNIFORM_STDEV), color, stdev: Math.max(...stdevs) };
 }
 
-/** Only dark components connected to the contact line can be a preserved shadow. */
+/**
+ * Only dark components connected to the contact line, inside the band around it, can be a preserved shadow; past the
+ * band they fade (continueBeyondBand). This holds for apparel too: searching the whole frame let a toned studio floor
+ * (a few levels under the border's colour) flood-connect from the contact line and stay on the canvas as a large faint
+ * patch that ended on the source frame (2026-11-07, Vero Moda: 47 of 533 kept shadows). Inside the band an apparel
+ * shadow is also read against the floor's own tone beside it (floorTone), or the tone stays as a soft slab around the feet.
+ */
 export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: ProductType): Buffer | null {
   if (!p.background.uniform || matte.source === "alpha_source") return null;
-  const apparel = type === "apparel_flat" || type === "apparel_model";
-  const x0 = apparel ? 0 : Math.max(0, Math.floor(box.x - box.w * SHADOW_BAND_SIDE));
-  const x1 = apparel ? p.width : Math.min(p.width, Math.ceil(box.x + box.w * (1 + SHADOW_BAND_SIDE)));
-  const y0 = apparel ? 0 : Math.max(0, Math.floor(box.y + box.h * (1 - SHADOW_BAND_ABOVE)));
-  const y1 = apparel ? p.height : Math.min(p.height, Math.ceil(box.y + box.h * (1 + SHADOW_BAND_BELOW)));
+  const x0 = Math.max(0, Math.floor(box.x - box.w * SHADOW_BAND_SIDE));
+  const x1 = Math.min(p.width, Math.ceil(box.x + box.w * (1 + SHADOW_BAND_SIDE)));
+  const y0 = Math.max(0, Math.floor(box.y + box.h * (1 - SHADOW_BAND_ABOVE)));
+  const y1 = Math.min(p.height, Math.ceil(box.y + box.h * (1 + SHADOW_BAND_BELOW)));
   const luma = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
   const bg = luma(...p.background.color);
   if (bg === 0) return null;
+  const reach = Math.max(2, Math.round(box.h * SHADOW_BAND_ABOVE));
+  const apparel = type === "apparel_flat" || type === "apparel_model";
+  const tone = apparel ? floorTone(p, matte, { x0, y0: y0 - reach, x1, y1: y1 + reach }, reach, bg, luma) : null;
+  const darkAt = (i: number, x: number, y: number) => Math.min(SHADOW_MAX_DARKNESS, Math.max(0, (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg - (tone ? tone(x, y) : 0)));
   const darkness = Buffer.alloc(p.width * p.height), seen = new Uint8Array(darkness.length), queue = new Int32Array(darkness.length);
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
     const i = y * p.width + x;
     if (matte.alpha[i] === 255) continue;
-    const d = Math.min(SHADOW_MAX_DARKNESS, Math.max(0, (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg));
+    const d = darkAt(i, x, y);
     // Sub-JPEG-level noise must not connect a vignette to a real contact shadow.
     if (d > 0.01) darkness[i] = Math.round(d * 255);
   }
@@ -61,7 +70,9 @@ export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: Pr
     const i = queue[head]!, x = i % p.width, y = Math.floor(i / p.width); sum += darkness[i]! / 255;
     for (const next of [x > x0 ? i - 1 : -1, x + 1 < x1 ? i + 1 : -1, y > y0 ? i - p.width : -1, y + 1 < y1 ? i + p.width : -1]) if (next >= 0 && darkness[next] && matte.alpha[next]! <= ALPHA_BBOX_THRESHOLD && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
   }
-  if (!tail || sum / tail <= SHADOW_MIN_DARKNESS) return null;
+  // On a toned floor the mean is taken above the floor's tone, so a real shadow reads fainter than on a plain floor; half the bar keeps it.
+  const onTonedFloor = !!tone && tone(box.x + (box.w >> 1), contactY) > FLOOR_TONED;
+  if (!tail || sum / tail <= (onTonedFloor ? SHADOW_MIN_DARKNESS / 2 : SHADOW_MIN_DARKNESS)) return null;
   // Qualify real background shadow first, without counting partially transparent product.
   // Then let that verified shadow continue underneath the partial edge. Original foreground
   // RGB is still composited over it unchanged. Never bridge into another background component.
@@ -70,8 +81,53 @@ export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: Pr
     for (const next of [x > x0 ? i - 1 : -1, x + 1 < x1 ? i + 1 : -1, y > y0 ? i - p.width : -1, y + 1 < y1 ? i + p.width : -1]) if (next >= 0 && darkness[next] && matte.alpha[next]! > ALPHA_BBOX_THRESHOLD && matte.alpha[next]! < 255 && !seen[next]) { seen[next] = 1; queue[tail++] = next; }
   }
   for (let i = 0; i < darkness.length; i++) if (!seen[i]) darkness[i] = 0;
-  if (!apparel) continueBeyondBand(p, matte, box, { x0, y0, x1, y1 }, darkness, seen, bg, luma);
+  continueBeyondBand(p, matte, reach, { x0, y0, x1, y1 }, darkness, seen, darkAt, apparel);
   return darkness;
+}
+
+/** Above this floor tone at the contact line (darkness, 0..1) the floor is toned: about 2.5 levels on a light backdrop, JPEG noise stays under it. */
+const FLOOR_TONED = 0.01;
+/** The width of the floor sample beside the band, as a share of the photo's width. */
+const FLOOR_SAMPLE_WIDTH = 0.02;
+/** Rows of the floor sample smoothed together, as a share of the photo's height, so a row's noise does not print as a line. */
+const FLOOR_SAMPLE_ROWS = 0.01;
+
+/**
+ * The tone of the floor itself under a band (darkness, 0..1), row by row: the median of the background beside the band,
+ * past the reach of a contact shadow, on each side, and a straight line between the two sides, since studio light makes
+ * one side darker. The canvas stands for the floor, so only what is darker than this is the product's shadow. A side
+ * with no background to read (the product fills it) takes the other side's tone; with neither, the tone is 0.
+ */
+function floorTone(p: Prepared, matte: Matte, band: { x0: number; y0: number; x1: number; y1: number }, reach: number, bg: number, luma: (r: number, g: number, b: number) => number): (x: number, y: number) => number {
+  const width = Math.max(4, Math.round(p.width * FLOOR_SAMPLE_WIDTH)), rows = Math.max(1, Math.round(p.height * FLOOR_SAMPLE_ROWS));
+  const y0 = Math.max(0, band.y0), y1 = Math.min(p.height, band.y1), count = Math.max(0, y1 - y0);
+  const median = (from: number, to: number): Float32Array => {
+    const out = new Float32Array(count).fill(Number.NaN), values: number[] = [];
+    if (to - from < 1) return out;
+    for (let y = y0; y < y1; y++) {
+      values.length = 0;
+      for (let x = from; x < to; x++) { const i = y * p.width + x; if (matte.alpha[i]! <= ALPHA_BBOX_THRESHOLD) values.push((bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg); }
+      if (values.length >= (to - from) / 2) out[y - y0] = values.sort((a, b) => a - b)[values.length >> 1]!;
+    }
+    return out;
+  };
+  const smooth = (line: Float32Array): Float32Array => line.map((_, at) => {
+    let sum = 0, n = 0;
+    for (let k = Math.max(0, at - rows); k <= Math.min(count - 1, at + rows); k++) if (!Number.isNaN(line[k]!)) { sum += line[k]!; n++; }
+    return n ? Math.max(0, sum / n) : Number.NaN;
+  });
+  const leftEnd = Math.max(0, band.x0 - reach), rightStart = Math.min(p.width, band.x1 + reach);
+  const left = smooth(median(Math.max(0, leftEnd - width), leftEnd)), right = smooth(median(rightStart, Math.min(p.width, rightStart + width)));
+  const leftX = leftEnd - width / 2, rightX = rightStart + width / 2;
+  return (x, y) => {
+    const at = y - y0;
+    if (at < 0 || at >= count) return 0;
+    const l = left[at]!, r = right[at]!;
+    if (Number.isNaN(l)) return Number.isNaN(r) ? 0 : r;
+    if (Number.isNaN(r)) return l;
+    const t = Math.min(1, Math.max(0, (x - leftX) / (rightX - leftX)));
+    return l + (r - l) * t;
+  };
 }
 
 /**
@@ -79,8 +135,7 @@ export function preservedDarkness(p: Prepared, matte: Matte, box: BBox, type: Pr
  * top of shoe shadows, so the connected shadow continues past the band and fades out smoothly over
  * the band's own height above the contact line.
  */
-function continueBeyondBand(p: Prepared, matte: Matte, box: BBox, band: { x0: number; y0: number; x1: number; y1: number }, darkness: Buffer, seen: Uint8Array, bg: number, luma: (r: number, g: number, b: number) => number): void {
-  const reach = Math.max(2, Math.round(box.h * SHADOW_BAND_ABOVE));
+function continueBeyondBand(p: Prepared, matte: Matte, reach: number, band: { x0: number; y0: number; x1: number; y1: number }, darkness: Buffer, seen: Uint8Array, darkAt: (i: number, x: number, y: number) => number, intoBand: boolean): void {
   const outside = (x: number, y: number) => Math.max(band.x0 - x, x - (band.x1 - 1), band.y0 - y, y - (band.y1 - 1), 0);
   const queue: number[] = [];
   for (let i = 0; i < darkness.length; i++) if (seen[i]) queue.push(i);
@@ -89,8 +144,9 @@ function continueBeyondBand(p: Prepared, matte: Matte, box: BBox, band: { x0: nu
     for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]] as const) {
       if (nx < 0 || ny < 0 || nx >= p.width || ny >= p.height) continue;
       const n = ny * p.width + nx, distance = outside(nx, ny);
-      if (seen[n] || distance === 0 || distance >= reach || matte.alpha[n] === 255) continue;
-      const d = Math.min(SHADOW_MAX_DARKNESS, Math.max(0, (bg - luma(p.rgb[n * 3]!, p.rgb[n * 3 + 1]!, p.rgb[n * 3 + 2]!)) / bg));
+      // `intoBand`: a part of the band the flood could not reach inside it (beside a foot, cut off by the foot) is filled when the shadow comes round to it; left empty, it shows as a clean rectangle in the shadow.
+      if (seen[n] || (distance === 0 && !intoBand) || distance >= reach || matte.alpha[n] === 255) continue;
+      const d = darkAt(n, nx, ny);
       if (d <= 0.01) continue;
       seen[n] = 1; queue.push(n);
       darkness[n] = Math.round(d * 255 * (1 - smoothstep(distance / reach)));
@@ -143,6 +199,36 @@ function synthesisedDarkness(matte: Matte, box: BBox, plan: CanvasPlan, intensit
     for (let X = 0; X < plan.w; X++) out[Y * plan.w + X] = row[X]! * v;
   }
   return out;
+}
+
+/** A floor patch's tone: this many luma levels under the canvas colour. Under the low bound the eye and JPEG noise see nothing; above the high bound it is a real shadow, not floor tone. */
+export const FLOOR_PATCH_MIN_LEVELS = 1.5;
+export const FLOOR_PATCH_MAX_LEVELS = 25;
+/** Room beside the product box that a contact shadow may use, as a share of the canvas's smaller side. */
+export const FLOOR_PATCH_MARGIN = 0.03;
+/**
+ * The share of the canvas a kept shadow may tint with floor tone beside the product before it counts as a leftover patch.
+ * Live Noon images of Vero Moda (2026-11-07, 533 kept shadows) split cleanly: 45 at 1.18 to 13.27%, then 0.28% and 0.05%, the rest at most 0.01%.
+ */
+export const FLOOR_PATCH_MAX_SHARE = 0.01;
+
+/**
+ * The share of the canvas a drawn shadow layer (one grey byte per pixel, 255 no shadow, multiplied over `background`)
+ * tints with floor tone in the lower half, beside the product: outside the columns of its box plus FLOOR_PATCH_MARGIN.
+ * Under the product does not count: a skirt laid flat has a real soft shadow below its hem (Z7682102A02F73D315DA9Z shot 5,
+ * 5715909709286 shot 1, 1.09% and 1.03% when that area counted). No judge sees a patch this faint, so the code measures it.
+ */
+export function floorPatchShare(layer: Buffer, width: number, height: number, background: readonly [number, number, number], product: BBox): number {
+  const bg = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2];
+  const margin = Math.round(FLOOR_PATCH_MARGIN * Math.min(width, height));
+  const x0 = product.x - margin, x1 = product.x + product.w + margin;
+  let tinted = 0;
+  for (let y = Math.floor(height / 2); y < height; y++) for (let x = 0; x < width; x++) {
+    if (x >= x0 && x < x1) continue;
+    const levels = bg * (255 - layer[y * width + x]!) / 255;
+    if (levels >= FLOOR_PATCH_MIN_LEVELS && levels <= FLOOR_PATCH_MAX_LEVELS) tinted++;
+  }
+  return tinted / (width * height);
 }
 
 /** `keepSource` false skips the shadow kept from the source photo (07 4.6a `source_shadow_off`); the synthesis rule then decides as if none could be measured. */
