@@ -512,6 +512,17 @@ deploy_step pre-flight; deploy_step build; deploy_step catalog-worker; deploy_re
     '    2m30s  catalog-worker', 'DEPLOY_OK abc1234 in 12m30s']);
 });
 
+test('the deploy report lists a gate that passed on an unexplained 502, above DEPLOY_OK', () => {
+  const r = sh('report-502', `echo 0 > "$STATE/clock"
+tick() { local n; n=$(cat "$STATE/clock"); echo "$n"; echo $((n + 150)) > "$STATE/clock"; }
+DEPLOY_CLOCK=tick
+source infra/lib/deploy-steps.sh
+deploy_step build; echo "catalog-upscale: unexplained 502s: 1 (at most 1 in one gate run)" >> "$DEPLOY_NOTES_FILE"; deploy_report abc1234`);
+  assert.equal(r.status, 0, r.err);
+  assert.deepEqual(lines(r.out).slice(-3), ["==> passed with an unexplained 502 (cause unknown; read the candidate's logs for that call)",
+    '    catalog-upscale: unexplained 502s: 1 (at most 1 in one gate run)', 'DEPLOY_OK abc1234 in 7m30s']);
+});
+
 test('deploy.sh: every step is timed and DEPLOY_OK is the last thing it prints', () => {
   const deploy = read('infra/deploy.sh');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, s); return i; };

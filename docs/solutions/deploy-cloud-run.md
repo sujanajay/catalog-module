@@ -179,6 +179,27 @@ row, call and determinism entry, and a round fails when Cloud Run turned away mo
 problem). Every non-200 failure and every FAILED determinism line now names its reason (for example
 "1 non-200: platform 503 after 2 retries" or "1 non-200: HTTP 503").
 
+A forced deploy on 2026-11-06 stopped at the CPU `catalog-upscale` gate on one x4 determinism call with "1 non-200: HTTP
+502" and 0 platform retries (catalog-check-upscale-pbm8w). The rule above did not apply twice over: the status was not in
+it, and the probe report shows the 502 came after 250 s.
+
+Known: the request log has that call as a 200. Its instance (53428619) logged the end of its 130.84 s of inference about
+14 s after the client's 502. Other calls in the round answered 200 after 355 s and 377 s, so 250 s is no fixed limit. The
+next attempt of the deploy passed unchanged. It is the only such 502 seen.
+
+Not known: the cause, the 502's body (the probe keeps none), and what a client receives when a container dies during a
+call. No crash has been observed here, and Cloud Run's troubleshooting page does not mention 502.
+
+So the probes do not treat a non-JSON 502 as harmless. It gets a separate allowance (`Unexplained502s`): 1 in a whole
+probe run, on /matte, /upscale and /health, at any elapsed time and in any round size, the cold start step included. That
+one is tried again (the cold start step only counts it). The next is not retried and fails the gate. The fast 429 and 503 rule above is unchanged, and a JSON 502 always fails. Each job run
+is one gate, so a deploy gets 1 per probed service. The allowed attempt stays in the row's timing, and its size gives up
+the outlier trim of the cap timeout check, so a retry does not improve either number. The gate prints "unexplained 502s:
+<n>" and a passing gate that used the allowance is listed in the deploy report above DEPLOY_OK. An intermittent crash that
+gives at most one such 502 in a run still passes: the allowance narrows that gap and does not close it. A throwaway
+service that dies mid-request would show what a client really receives. That has not been run. `probe_get` in
+infra/lib/services.sh (curl, web and worker) has its own rule and still treats a 502 as a real answer.
+
 ### Laptop network blips while a gate waits (2026-11-05)
 
 Two gates failed because the laptop lost DNS while `gcloud run jobs execute --wait` was waiting, although the job
