@@ -23,7 +23,7 @@ describe("isConnectionError", () => {
     expect(isConnectionError(coded(`read ${code}`, code))).toBe(true);
   });
 
-  it.each(["08000", "08001", "08003", "08006", "08P01", "57P01", "57P02", "57P03", "53300"])("a server SQLSTATE: %s", code => {
+  it.each(["08000", "08001", "08003", "08006", "08P01", "57P01", "57P02", "57P03", "53300", "57014"])("a server SQLSTATE: %s", code => {
     expect(isConnectionError(coded("server message", code))).toBe(true);
   });
 

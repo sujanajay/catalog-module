@@ -230,8 +230,12 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
       }
       const now = deps.now();
       // M1 D40: a photo a rule held for a person stays held, with no link; the product goes on without it.
-      for (const o of outputs.filter(o => o.status !== "failed" && !heldForPerson(o) && (undecided(o) || unjudged(o)))) {
-        const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason), updatedAt:now };
+      const dropping = outputs.filter(o => o.status !== "failed" && !heldForPerson(o) && (undecided(o) || unjudged(o)));
+      // Worked out before any row changes: another photo of the product stays or goes live on this channel.
+      const stays = outputs.filter(o => !dropping.includes(o) && o.decision !== "remove" && o.decision !== "replaced" && (o.status === "staged" || o.status === "verified" || o.decision === "use_as_is"));
+      const othersDelivered = (o: Output) => stays.some(x => x.channel === o.channel && x.n !== o.n) || live.some(l => l.channel === o.channel && l.n !== o.n && !outputs.some(x => x.channel === l.channel && x.n === l.n));
+      for (const o of dropping) {
+        const dropped = { status:"skipped" as const, flags:[...new Set([...o.flags,"auto_dropped" as const])], reason:autoDecideNote("drop", o.reason, othersDelivered(o)), updatedAt:now };
         await tx.update(catalogOutputs).set(dropped).where(eq(catalogOutputs.id,o.id));
         Object.assign(o, dropped);
       }
