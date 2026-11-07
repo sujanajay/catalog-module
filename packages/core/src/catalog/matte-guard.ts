@@ -1146,18 +1146,6 @@ export function matteAgreement(p: Pick<Prepared, "width" | "height" | "rgb">, ma
   return { matte: null, detail: notes.join("; ") || "one model only" };
 }
 
-/**
- * The veto on agreement. Inside a racket, a chair or any other gap a salient-object cut-out keeps what shows through, and two
- * families do it alike: on the tennis-court control ZEE79259BBFD83FFA1DB0Z shot 5 both kept court and net inside the rackets,
- * with every outline on a real edge, so no bar above sees it. Measuring that residue directly does not work (kept pixels with
- * the colour of the nearest hole: 0.36% of the court's cut, 1.58% of a real good cut, Z66750). What does separate them is the
- * scene itself: what every cut-out dropped from the border band reads as scenery (isBusyBackground) on the court (33.6% of the
- * band, edge density 0.51, 60 tones) and on the lifestyle candle, and on none of the 19 good cuts the guard wrongly doubted
- * (closest Z66750: 25%, 0.12, 21 tones). A photo shot in a scene is not agreed on, so it ends in the busy-background hold.
- * Limit: fitted on these photos, no held-out set; a wrong cut on a plain backdrop is still only for the judge to catch.
- */
-const BUSY_SCENE_DETAIL = "busy scene: what shows through the cut-out cannot be told from the product";
-
 /** White border, as a share of the long side, around the photo for the ladder's padded matte. */
 export const GUARD_PAD_FRACTION = 0.2;
 /** The model mattes the ladder may ask for: the policy's second model, the padded frame with the first and the second model, then a third opinion (thirdOpinionModel). */
@@ -1230,17 +1218,17 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
   }
   if (!input.handRule) {
     // M1 D40: before the guard's doubt ends in a pass-through or a hold, ask whether the models agree with each other. A
-    // frame-filling photo has no outline to agree on, so no third call is spent on it. Nor is one spent on a scene
-    // (busyScene): the cut-out would keep what shows through it.
-    const busyScene = (): MatteAgreement | null => isBusyBackground(p, passthroughMatte(p, tried, region), tried, region) ? { matte: null, detail: BUSY_SCENE_DETAIL } : null;
-    let agreement = busyScene() ?? matteAgreement(p, unpadded, region);
-    if (!agreement.matte && agreement.detail !== BUSY_SCENE_DETAIL && !region.frameFilling) {
+    // frame-filling photo has no outline to agree on, so no third call is spent on it. A photo shot in a scene is asked too: two
+    // families can agree on a cut that keeps what shows through a gap (court inside a racket, ZEE79259BBFD83FFA1DB0Z shot 5), no bar here
+    // sees that, and the judge, who always looks at an agreed cut-out, is what keeps such a cut from being published.
+    let agreement = matteAgreement(p, unpadded, region);
+    if (!agreement.matte && !region.frameFilling) {
       const third = await input.attempt("third");
       if (third) {
         unpadded.push(third);
         const result = check(third);
         if (result.ok) { record("second_matte", "passed", `third opinion ${third.model}: ${result.detail}`); return won(third); }
-        agreement = busyScene() ?? matteAgreement(p, unpadded, region);
+        agreement = matteAgreement(p, unpadded, region);
       }
     }
     record("matte_agreement", agreement.matte ? "passed" : "failed", agreement.detail);

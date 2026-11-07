@@ -437,16 +437,14 @@ describe("busy background (French Connection ZEE79259BBFD83FFA1DB0Z shot 5, eval
 
   // M1 D40, deliberate change. Every model keeps the two people and the guard still rejects them for the scenery, and on the
   // real photo that agreed cut is right: both families cut the two models off the court with 0% of the outline on no edge.
-  it("does not take an agreed cut-out from a scene: no third call, and the photo is held whole", async () => {
+  it("takes an agreed cut-out from a scene too, with no third call: the judge looks at it, not a pixel rule", async () => {
     expect(backgroundRegion(court).frameFilling).toBe(false);
     expect(checkMatteIntegrity(court, kept(), { handRule: false }).ok).toBe(false);
     const asked: string[] = [];
-    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => { asked.push(v); return kept(v); } });
-    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true });
-    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toEqual(["matte_check:failed", "second_matte:failed", "padded_matte:failed", "padded_matte:failed", "matte_agreement:failed", "matte_passthrough:failed"]);
-    expect(resolved.actions.find(a => a.step === "matte_agreement")!.detail).toMatch(/busy scene/);
+    const resolved = await resolveMatte({ prepared: court, first: kept(), handRule: false, attempt: async v => { asked.push(v); return kept(v === "second" ? "bria-rmbg" : v); } });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
+    expect(resolved.actions.map(a => `${a.step}:${a.result}`)).toContain("matte_agreement:passed");
     expect(asked).not.toContain("third");
-    expect(resolved.matte.alpha.every(v => v === 255)).toBe(true);
   });
 
   it("rejects every matte (the scenery is product by the source alone), and holds the photo whole when the models do not agree", async () => {

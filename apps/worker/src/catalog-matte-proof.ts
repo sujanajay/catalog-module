@@ -43,7 +43,7 @@ export const PROOF_CONTROLS: readonly { path: string; why: string }[] = [
   { path: "french_connection/ZEE79259BBFD83FFA1DB0Z_5.webp", why: "tennis court, the families agree on a cut with court inside the rackets" },
 ];
 /**
- * Does the judge catch a wrong cut two families agree on? The busy-scene veto keeps this cut from production, so the judge is asked
+ * Does the judge catch a wrong cut two families agree on? Only the judge keeps this cut from production, so the judge is asked
  * about it on purpose: it is the only check behind a shared wrong cut on a plain backdrop, which no pixel measure stops.
  */
 export const PROOF_BACKSTOP = "french_connection/ZEE79259BBFD83FFA1DB0Z_5.webp";
@@ -171,7 +171,7 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
     const asked: Matte[] = [first, ...(other ? [await deps.matteFor(p, deps.matting, other)] : [])];
     const cut = matteAgreement(p, asked, backgroundRegion(p));
     const shown = cut.matte ? await judgeAndKeep(`${photo}.agreed-cut`, source, p, cut.matte, true) : { images: [], flags: [] as string[] };
-    const check: ProofRow = { photo: `${photo}.agreed-cut`, group: "backstop", why: "the judge on a cut the veto stops", steps: [cut.detail], model: cut.matte?.model ?? "", agreed: !!cut.matte, busy: false, passthrough: false, images: shown.images, result: "fail", note: "" };
+    const check: ProofRow = { photo: `${photo}.agreed-cut`, group: "backstop", why: "the judge on a wrong cut two families agree on", steps: [cut.detail], model: cut.matte?.model ?? "", agreed: !!cut.matte, busy: false, passthrough: false, images: shown.images, result: "fail", note: "" };
     Object.assign(check, proofVerdict({ group: "backstop", agreed: check.agreed, busy: false, passthrough: false, flags: shown.flags, judged: shown.images.length > 0, judgeProven: exam.pass }));
     rows.push(check);
     console.info(JSON.stringify({ photo: check.photo, group: check.group, flags: shown.flags, result: check.result, note: check.note }));
