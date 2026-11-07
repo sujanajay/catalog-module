@@ -228,7 +228,8 @@ export const FLOOR_PATCH_MAX_LEVELS = 25;
 export const FLOOR_PATCH_MARGIN = 0.03;
 /**
  * How much floor tone a kept shadow may leave beside the product before it counts as a leftover patch, as a share of the
- * square of the product's longer side (floorPatchShare).
+ * square of the product's longer side (floorPatchShare). Old-band layers of live Vero Moda Noon images (2026-11-07, 533 kept
+ * shadows) split cleanly on it: 45 at 1.31% or more, then 0.29% and 0.05%.
  */
 export const FLOOR_PATCH_MAX_SHARE = 0.01;
 
@@ -236,9 +237,9 @@ export const FLOOR_PATCH_MAX_SHARE = 0.01;
  * Floor tone a drawn shadow layer (one grey byte per pixel, 255 no shadow, multiplied over `background`) leaves below the
  * product's middle and beside it: outside the columns of its box plus FLOOR_PATCH_MARGIN. Under the product does not count:
  * a skirt laid flat has a real soft shadow below its hem (Z7682102A02F73D315DA9Z shot 5, 5715909709286 shot 1).
- * It is measured against the product's own size, not the canvas: a share of the canvas changed about 2.6 times between
- * channels for one photo (0.17% on Styli, 0.45% on Trendyol, tracksuit-3 fixture), so a photo's shadow could stay on one
- * channel and go on another. No judge sees a patch this faint, so the code measures it.
+ * It is measured against the product's own size, not the canvas: across a batch's channels a share of the canvas changed
+ * a median 3.0 times per photo and this measure 1.1 times (75 real photos, worst 3.4 and 1.3), so a photo's shadow does
+ * not stay on one channel and go on another unless it sits right on the line. No judge sees a patch this faint, so the code measures it.
  */
 export function floorPatchShare(layer: Buffer, width: number, height: number, background: readonly [number, number, number], product: BBox): number {
   const bg = 0.2126 * background[0] + 0.7152 * background[1] + 0.0722 * background[2];
