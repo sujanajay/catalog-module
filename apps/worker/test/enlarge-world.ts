@@ -2,6 +2,7 @@
 // and health probe driven by a mode, a clock the tests move (claims, the sweep, the back-off), a batch with its pinned
 // route, a generation-aware in-memory public bucket (publish and finalize run for real), and a queue driver that
 // delivers every task to its real handler (a 503 goes back to the end of the queue, as Cloud Tasks retries it).
+import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { vi } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -146,7 +147,8 @@ function publishable(w: FakeWorld) {
   let generation = 100;
   const storage = w.deps.storage;
   const upload = storage.uploadBuffer;
-  const crc = (buf: Buffer) => `${buf.length}-${buf.subarray(0, 64).toString("base64")}`;
+  // Over every byte, as the real crc32c: two flat full-frame JPEGs differ only past their headers, with the same length.
+  const crc = (buf: Buffer) => createHash("sha256").update(buf).digest("base64");
   storage.uploadBuffer = (async (path: string, buf: Buffer, mime: string, opts?: { metadata?: Record<string, string> }) => { const uri = await upload(path, buf, mime, opts); gens.set(uri, ++generation); return uri; }) as typeof storage.uploadBuffer;
   storage.headObject = (async (uri: string) => {
     const buf = w.objects.get(uri), meta = w.metadata.get(uri);
