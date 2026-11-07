@@ -404,7 +404,12 @@ Rules for all sources:
   verify GET retries on 429, 5xx and network errors up to 3 times with backoff (1 s, 2 s, 4 s; builder
   constants); an output whose public object already verifies is never re-written.
   (5) Scoped deletes with `deletePublicObject` (`assertWithinProduct` first, `ifGenerationMatch`) of this
-  product's shots no longer present, on the batch's channels only. (6) Event `created | overwritten |
+  product's shots no longer present, on the batch's channels only. A batch may also take down an older image at a place where it
+  found a mark the judge confirmed or a different item two judges agree on (M1 D45), only with `intake.rejected_photo_take_down` on in its
+  settings snapshot (default off), only when that output has the same source sha256 as the live row, and never on a render verdict,
+  a collage or a chart, on a row from a crash, cap, outage or repair stage, on image 1, on the last live link of a channel, on a row with a
+  person's decision, or when wrong-item covers most of the product's photos. Older images with a render verdict stay live and are listed
+  for the owner (Z5B6DA08F5D107DE1FBC8Z n3, 10355466 n2, Z1354B820E69749C37335Z n2, 5715723583574 n3). (6) Event `created | overwritten |
   shots_removed | unchanged | reordered | channel_added`; `change` updated; finalize enqueued. Retry treats
   an object that already has the staged `crc32c` as copied and an already-gone delete target as done.
 - `render_key = sha256(source sha256 | channel | CHANNEL_RULES_VERSION | policy id + updated_at | n)`.
