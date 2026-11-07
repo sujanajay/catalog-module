@@ -45,7 +45,7 @@ export const defectClass = (defect: string | undefined): DefectClass | null => (
  * on `minCaught`; a judge that flags everything fails on `maxFalseFlags`, which is what keeps people away from a real batch. A judge
  * blind to a whole class of defect fails on `minPerClass`, whatever its total.
  */
-export const JUDGE_EXAM_BARS: JudgeExamBars = { minCaught: 12, maxFalseFlags: 12, maxUnanswered: 3, minPerClass: { mark: 3, leftover: 3, wrong_item: 3 } };
+export const JUDGE_EXAM_BARS: JudgeExamBars = { minCaught: 15, maxFalseFlags: 12, maxUnanswered: 3, minPerClass: { mark: 3, leftover: 4, wrong_item: 5 } };
 /** A stop, far above the expected cost. Hitting it means the exam could not finish. */
 export const JUDGE_EXAM_MAX_USD = 6;
 

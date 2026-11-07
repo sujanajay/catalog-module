@@ -42,12 +42,12 @@ human edge flags, judge edge disagreements and ms per image on CPU and L4. A gat
 
 ## The judge exam (M1 D43)
 
-`bash infra/catalog-output-evals.sh exam` runs the live judge (`LIVE_SMOKE=1`) on a fixed set: 18 known defects and 155 known-good
+`bash infra/catalog-output-evals.sh exam` runs the live judge (`LIVE_SMOKE=1`) on a fixed set: 25 known defects (7 of them wrong items, shown against shot one) and 155 known-good
 outputs, pinned by sha256 in `packages/core/test-fixtures/catalog/evals/judge-exam-set.json`, the images under
 `catalog-test/evals/judge-exam/v1/`. Each judge a verdict can come from sits it: the first with its second opinion, and the fallback
 with the first switched off. It writes `report.json` and `verdict.txt` under `catalog-test/evals/<run>/judge-exam/` and exits 1 when a
 bar in `JUDGE_EXAM_BARS` fails. `proof` runs it first, and `infra/deploy.sh` runs it after a production deploy, where a failure fails
-the deploy report (no DEPLOY_OK). It does not roll back or block new batches by itself. It costs about USD 1.1 and takes about 10 minutes. It
+the deploy report (no DEPLOY_OK). It does not roll back or block new batches by itself. It costs about USD 1.3 and takes about 10 minutes. Exit 0 and "JUDGE EXAM PASSED" is a pass, also on a re-run of the exam alone; exit 1 is a judge below a bar; exit 3 is an exam that could not run, which is no judge result. The images have no customTime, so the bucket's lifecycle rule cannot expire them; keep it that way, or every deploy's exam fails. It
 only reads the pinned images and writes under `catalog-test/`, but it shares the model provider's rate limit with a running batch.
 
 A rule for every proof, eval and exit report: name the judge model that produced each result. "The judge passed it" without the model
