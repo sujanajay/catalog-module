@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { createTestDb } from "../db/testing";
-import { catalogBatches,catalogBatchProducts,catalogProducts,catalogSourceImages,catalogOutputs } from "../db/schema";
+import { catalogBatches,catalogBatchProducts,catalogProducts,catalogSourceImages,catalogOutputs,DEFAULT_BATCH_OPTIONS } from "../db/schema";
 import { listAttention } from "./attention";
 let db:Awaited<ReturnType<typeof createTestDb>>["db"],close:()=>Promise<void>;
 beforeAll(async()=>{({db,close}=await createTestDb());});afterAll(async()=>close());
@@ -32,6 +32,21 @@ it("gives one what-to-do instruction per photo and never adds guidance for infor
  expect(photo!.whatToDo).toBe("If the file was named wrongly, remove it; the rest of the product is unaffected.");
  expect(photo!.why).toBe("This photo does not match photo 1 of the same identifier. A shadow was added because the original photo had no shadow that could be kept.");
  expect(photo!.whatToDo).not.toContain("Nothing to do");
+});
+it("an auto-decide batch leads a photo with the problem that held it, not its failed enlargement; without the rules the enlargement leads",async()=>{
+ const card=async(name:string,auto:boolean)=>{
+  const [batch]=await db.insert(catalogBatches).values({brandSlug:"fc",brandName:"French Connection",name,isTest:true,channels:["noon"],createdBy:"a@opptra.com",...(auto?{options:{...DEFAULT_BATCH_OPTIONS,autoDecide:{rules:[]}}}:{})}).returning();
+  const [p]=await db.insert(catalogProducts).values({brandSlug:"fc",identifier:name,productKey:name,pathKey:name,isTest:true}).returning();
+  const [source]=await db.insert(catalogSourceImages).values({batchId:batch!.id,productId:p!.id,n:1,sha256:name,rawUri:"gs://private/one.jpg",originalName:"one.jpg",mime:"image/jpeg",width:1200,height:1600}).returning();
+  await db.insert(catalogOutputs).values({batchId:batch!.id,productId:p!.id,sourceImageId:source!.id,n:1,channel:"noon",canvasW:1080,canvasH:1480,scale:1,placedX:0,placedY:0,renderKey:name,objectPath:`catalog-test/${name}`,publicUrl:`https://public/${name}`,status:"needs_attention",flags:["enlargement_failed","halo"]});
+  return (await listAttention(db,batch!.id,async uri=>uri))[0]!;
+ };
+ const auto=await card("catalog-test-attention-held-auto",true);
+ expect(auto.problemLine).toBe("Photo 1 has a rough edge.");
+ expect(auto.photos[0]!.why).toMatch(/^The edge of the product looks rough.*could not be enlarged/s);
+ expect(auto.photos[0]!.flags).toEqual(expect.arrayContaining(["enlargement_failed","halo"]));
+ const person=await card("catalog-test-attention-held-person",false);
+ expect(person.photos[0]!.why).toMatch(/^(?!The edge of the product).*enlarge/s);
 });
 it("cites the worst photo and its main problem first, with at most three problem sentences per photo",async()=>{
  const [batch]=await db.insert(catalogBatches).values({brandSlug:"fc",brandName:"French Connection",name:"catalog-test-attention-severity",isTest:true,channels:["noon"],createdBy:"a@opptra.com"}).returning();
