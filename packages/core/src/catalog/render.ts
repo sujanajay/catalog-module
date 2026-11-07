@@ -78,6 +78,8 @@ export const CUT_EDGE_OPAQUE_ALPHA = 250;
 export const CUT_EDGE_PAD_STDEV = 6;
 /** ... whose mean colour stays within this distance per channel of the outermost line (any colour, not only white). */
 export const CUT_EDGE_PAD_TOLERANCE = 10;
+/** A band deeper than CUT_EDGE_PAD_MAX_FRACTION is the product itself when the matte is opaque on this share of its outermost line, across the product's extent. */
+export const CUT_EDGE_PRODUCT_LINE_SHARE = 0.9;
 /** How far beside the product, as a share of the frame line, the pad probe stays off its contact shadow. */
 export const CUT_EDGE_PROBE_MARGIN_FRACTION = 0.05;
 /** A pad the colour of the photo's own background is told apart only as the thin border: this fraction of the frame. */
@@ -128,14 +130,22 @@ export const PASSTHROUGH_BORDER_TOLERANCE = 6;
 export const PASSTHROUGH_WHITE_TOLERANCE = 1;
 /** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
 export const PASSTHROUGH_MODEL = "passthrough";
+/** The model name of the whole-frame matte (matte-guard.ts wholeFrameMatte): a close-up kept as it is, every side treated as cut in the source and none trimmed. */
+export const WHOLE_FRAME_MODEL = "whole-frame";
 /**
- * Sides a cut-fill trim may never take, by rule. A pass-through or whole-photo matte keeps the photo's own frame, so
+ * Whether a fill may also trim sides the source did not cut: a product cut on both ends of one axis then fills that axis even with
+ * nothing cut on the other, the overflow coming off the uncut sides by at most CUT_FILL_MAX_TRIM (never the top of a model photo, never
+ * through a logo, text or a buckle). Off until the owner answers whether cropping is allowed (qa/reasons.ts says "We never crop").
+ */
+export const TRIM_UNCUT_SIDES = false;
+/**
+ * Sides a cut-fill trim may never take, by rule. A pass-through, whole-photo or whole-frame matte keeps the photo's own frame, so
  * nothing in it tells a product edge from a background edge and no side is trimmed (`noTrim`; the product is fitted
- * with the band note). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
+ * with the band note, and a whole frame that would show a band is not delivered: wholeFrameBandFailure). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
  * trimmed (`protectTop`); the overflow comes off the bottom instead, or the product is fitted.
  */
-export function trimRules(productType: ProductType | null | undefined, matte: Pick<Matte, "model">): { noTrim: boolean; protectTop: boolean } {
-  return { noTrim: matte.model === PASSTHROUGH_MODEL, protectTop: productType === "apparel_model" };
+export function trimRules(productType: ProductType | null | undefined, matte: Pick<Matte, "model">): { noTrim: boolean; protectTop: boolean; wholeFrame: boolean } {
+  return { noTrim: matte.model === PASSTHROUGH_MODEL || matte.model === WHOLE_FRAME_MODEL, protectTop: productType === "apparel_model", wholeFrame: matte.model === WHOLE_FRAME_MODEL };
 }
 export interface ShotGeometryOptions {
   /** The source pixels (RGB, 3 bytes per pixel): finds the pad band around the real photo. Without them only the thin border counts. */
@@ -149,6 +159,10 @@ export interface ShotGeometryOptions {
   noTrim?: boolean | undefined;
   /** The top cut side may not be trimmed (trimRules: a model photo's head). */
   protectTop?: boolean | undefined;
+  /** The matte is a whole-frame close-up (trimRules): every side counts as cut, so a frame of the canvas's shape sits flush on every side. Never trimmed (`noTrim`). */
+  wholeFrame?: boolean | undefined;
+  /** See TRIM_UNCUT_SIDES: a model photo's top is protected even where it is not cut. */
+  trimUncut?: boolean | undefined;
 }
 
 /** Pixel index of position `i` along the frame line at depth `d` from `side`. */
@@ -161,7 +175,9 @@ function lineIndex(side: Side, d: number, i: number, width: number, height: numb
  * colour of the outermost line (CUT_EDGE_PAD_TOLERANCE), any colour. `photoEdge` is true when the
  * band ends on a photo whose own background (where the matte is transparent, between the other
  * sides' bands) is another colour, or on a line the product fills, or when the outermost line is
- * not uniform at all: the band's inner edge is then the real photo's frame edge.
+ * not uniform at all: the band's inner edge is then the real photo's frame edge. A band past the depth limit is no
+ * pad, unless the matte keeps its outermost line in a colour other than what the matte dropped on the frame edge: that
+ * is plain fabric running off the frame, and the product itself starts on the frame edge.
  */
 export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: number): Record<Side, { depth: number; photoEdge: boolean }> {
   const depths = {} as Record<Side, { depth: number; colour: number[] | null; max: number; reach: number }>;
@@ -184,10 +200,24 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
     depths[side] = { depth, colour: outer.mean, max, reach };
   }
   const result = {} as Record<Side, { depth: number; photoEdge: boolean }>, tight = bbox(alpha, width, height) ?? { x: 0, y: 0, w: 0, h: 0 };
+  // The photo's own background: what the matte dropped on the frame edge.
+  const dropped = [0, 0, 0];
+  let droppedCount = 0;
+  for (const side of SIDES) for (let i = 0, length = side === "top" || side === "bottom" ? width : height; i < length; i++) {
+    const k = lineIndex(side, 0, i, width, height);
+    if (alpha[k]! <= ALPHA_BBOX_THRESHOLD) { droppedCount++; for (let c = 0; c < 3; c++) dropped[c]! += rgb[k * 3 + c]!; }
+  }
+  const productAtEdge = (side: Side, colour: number[]): boolean => {
+    const horizontal = side === "top" || side === "bottom", from = horizontal ? tight.x : tight.y, to = horizontal ? tight.x + tight.w : tight.y + tight.h;
+    let opaque = 0;
+    for (let i = from; i < to; i++) if (alpha[lineIndex(side, 0, i, width, height)]! >= CUT_EDGE_OPAQUE_ALPHA) opaque++;
+    if (to <= from || opaque < (to - from) * CUT_EDGE_PRODUCT_LINE_SHARE) return false;
+    return !droppedCount || colour.some((v, c) => Math.abs(v - dropped[c]! / droppedCount) > CUT_EDGE_PAD_TOLERANCE);
+  };
   for (const side of SIDES) {
     const { depth, colour, max } = depths[side], horizontal = side === "top" || side === "bottom";
     if (!colour) { result[side] = { depth, photoEdge: true }; continue; }
-    if (depth > max) { result[side] = { depth, photoEdge: false }; continue; }
+    if (depth > max) { result[side] = productAtEdge(side, colour) ? { depth: 0, photoEdge: true } : { depth, photoEdge: false }; continue; }
     // Two lines in, past the JPEG blend of the pad edge, between the other sides' bands: the photo's own background.
     const [a, b] = horizontal ? [depths.left, depths.right] : [depths.top, depths.bottom], length = horizontal ? width : height;
     // Only thin perpendicular bands are skipped: a deeper one may end on the product itself, not on the photo.
@@ -289,7 +319,8 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
     const share = pad.photoEdge ? 0 : CUT_EDGE_MIN_SHARE * (to - from);
     if (longest >= minStraight && edge >= silhouette * ratio && edge >= share) { cut[side] = true; lines[side] = solids.sort((a, b) => a - b)[solids.length >> 1]!; }
   };
-  for (const side of SIDES) detect(side, false);
+  if (opts.wholeFrame) for (const side of SIDES) cut[side] = true;
+  else for (const side of SIDES) detect(side, false);
   // A product cut at a frame edge shows the photo is a crop: a deep band of the photo's own background colour on a
   // perpendicular side is then the brand's padding around that crop (a model cut at the waist and thighs inside a
   // white band, also cut at the left edge). Only a cut found by the rule above counts, never one found this way.
@@ -300,7 +331,7 @@ export function shotGeometry(alpha: Buffer, width: number, height: number, opts:
   const shot: ShotGeometry = { box: box.w > 0 && box.h > 0 ? box : tight, source: { w: width, h: height }, cut };
   // Only a product cut on both ends of an axis is ever trimmed (cutFillScale): measure where a trim must stop.
   if ((cut.top && cut.bottom) || (cut.left && cut.right)) {
-    const ruled: Side[] = opts.noTrim ? SIDES.filter(side => cut[side]) : opts.protectTop && cut.top ? ["top"] : [];
+    const ruled: Side[] = opts.noTrim ? SIDES.filter(side => cut[side]) : opts.protectTop && (cut.top || (opts.trimUncut ?? TRIM_UNCUT_SIDES)) ? ["top"] : [];
     if (opts.rgb || ruled.length) {
       const room = opts.rgb ? trimRoom(opts.rgb, alpha, width, shot.box) : { top: shot.box.h, bottom: shot.box.h, left: shot.box.w, right: shot.box.w };
       for (const side of ruled) room[side] = 0;
@@ -466,6 +497,26 @@ export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges,
   return { x, y, w, h };
 }
 
+/** How far (canvas px) a cut side may sit from its canvas edge and still read as flush: the rounding of a fitted scale. */
+export const FLUSH_TOLERANCE_PX = 1;
+/** The cut sides a plan leaves more than FLUSH_TOLERANCE_PX from their canvas edge. */
+export function floatingSides(plan: Pick<CanvasPlan, "w" | "h" | "productBox" | "cut">): Side[] {
+  const product = plan.productBox, cut = plan.cut ?? NO_CUT;
+  if (!product) return [];
+  return SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > FLUSH_TOLERANCE_PX);
+}
+const ALL_CUT: CutEdges = Object.freeze({ top: true, bottom: true, left: true, right: true });
+const NO_ROOM: TrimRoom = Object.freeze({ top: 0, bottom: 0, left: 0, right: 0 });
+/**
+ * Whether a whole frame of this size, untrimmed, fills the channel's canvas within FLUSH_TOLERANCE_PX: the same plan renderSource makes of it.
+ * Where it does not, the channel gets no whole-frame image (wholeFrameBandFailure): that channel keeps the photo held.
+ */
+export function wholeFrameFills(spec: ChannelSpec, source: Size, opts: { canvas?: Size | undefined; fitScale?: number | undefined } = {}): boolean {
+  return !floatingSides(planCanvas(spec, { x: 0, y: 0, w: source.w, h: source.h }, source, { cut: ALL_CUT, trimRoom: NO_ROOM, canvas: opts.canvas, fitScale: opts.fitScale })).length;
+}
+/** The compliance failure of a whole-frame render that would float: a band beside a frame that was never cut is the worst look of a close-up, so it is never made. */
+export const wholeFrameBandFailure = (sides: readonly Side[], label: string): string => `whole_frame_band: the whole photo leaves a band at the ${sides.join(" and ")} on ${label}`;
+
 /** The canvas minus the channel's margins; a side cut in the source gets margin 0 so the cut sits flush with the canvas edge. */
 export function safeBoxFor(spec: ChannelSpec, canvas: Size, wide: boolean, cut: CutEdges = NO_CUT): BBox {
   const m = spec.margins, horizontal = !m.sidesOnlyWhenWide || wide;
@@ -491,6 +542,15 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
   return { w, h };
 }
 
+/** The cut sides of a plan that may trim uncut sides (TRIM_UNCUT_SIDES): all four where a fit leaves the both-ends-cut axis floating and the fill stays within its limits; otherwise `cut`. */
+export function widenedCut(spec: ChannelSpec, box: BBox, wide: boolean, cut: CutEdges, room?: TrimRoom): CutEdges {
+  const safe = safeBoxFor(spec, spec.targetCanvas, wide, cut), sw = safe.w / box.w, sh = safe.h / box.h;
+  const floats = (cut.left && cut.right && !cut.top && !cut.bottom && sw > sh) || (cut.top && cut.bottom && !cut.left && !cut.right && sh > sw);
+  if (!floats) return cut;
+  const all = { top: true, bottom: true, left: true, right: true }, full = safeBoxFor(spec, spec.targetCanvas, wide, all);
+  return cutFillScale(full, box, all, room) > Math.min(full.w / box.w, full.h / box.h) ? all : cut;
+}
+
 /**
  * `opts.canvas` (planProduct) raises an adaptive canvas to the product's one canvas on this channel;
  * `opts.cut` places each cut side flush with the canvas edge (margin 0 there, other margins kept), and a
@@ -498,8 +558,10 @@ function proportionalCanvas(spec: ChannelSpec, fraction: number, roundUp: boolea
  * `opts.trimRoom` allows (shotGeometry's trimRoom);
  * `opts.fitScale` (below 1) shrinks the product by that factor inside the same canvas.
  */
-export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined; trimRoom?: TrimRoom | undefined }): CanvasPlan {
-  const cut = opts.cut ?? NO_CUT, wide = box.w > box.h, room = opts.trimRoom;
+export function planCanvas(spec: ChannelSpec, box: BBox, source: Size, opts: { uniformScale?: number | undefined; canvas?: Size | undefined; cut?: CutEdges | undefined; fitScale?: number | undefined; trimRoom?: TrimRoom | undefined; trimUncut?: boolean | undefined }): CanvasPlan {
+  const wide = box.w > box.h, room = opts.trimRoom;
+  // TRIM_UNCUT_SIDES: where the cut sides would float on the target canvas and the fill stays within CUT_FILL_MAX_TRIM, every side counts as cut.
+  const cut = (opts.trimUncut ?? TRIM_UNCUT_SIDES) ? widenedCut(spec, box, wide, opts.cut ?? NO_CUT, room) : opts.cut ?? NO_CUT;
   const fit = (size: Size) => cutFillScale(safeBoxFor(spec, size, wide, cut), box, cut, room);
   const min = effectiveMinimum(spec), target = spec.targetCanvas;
   const lowResolution = fit(min) > MAX_UPSCALE;
@@ -568,12 +630,13 @@ export interface EnlargementNeed { factor: UpscaleFactor; maxScale: number; chan
  * superset of the render's decision as enlargementFactors, which reads it.
  */
 /** `rules`: the channel values the render will use (M3-S1); absent is the channels.ts fixture. */
-export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">): EnlargementNeed[][] {
+/** `canvasOf`: the canvas an output of this channel already has (a repair re-makes it on that canvas), instead of the product's planned one. */
+export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">, canvasOf?: (id: ChannelId) => Size | undefined): EnlargementNeed[][] {
   const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
   const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
   const found = plain.filter((g): g is ShotGeometry => g !== null);
   const specOf = (id: ChannelId) => rules?.spec(id) ?? channel(id);
-  const canvases = channels.map((id) => ({ id, spec: specOf(id), canvas: found.length ? planProduct(specOf(id), found).canvas : undefined }));
+  const canvases = channels.map((id) => ({ id, spec: specOf(id), canvas: canvasOf?.(id) ?? (found.length ? planProduct(specOf(id), found).canvas : undefined) }));
   return shots.map((s, i) => {
     const needs = new Map<UpscaleFactor, EnlargementNeed>();
     for (const { id, spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
@@ -648,8 +711,9 @@ export async function visibleAnchorShift(cutout: Buffer, product: BBox, safe: BB
 export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   const { prepared: p, matte, shotNumber } = input, spec = input.channelRules?.spec(input.channel) ?? channel(input.channel);
   if (matte.width !== p.width || matte.height !== p.height) throw new Error("Matte and source dimensions must match");
-  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut, ...trimRules(input.productType, matte) }), box = geometry?.box ?? null, cut = geometry?.cut ?? NO_CUT;
-  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut, fitScale: input.fitScale, trimRoom: geometry?.trimRoom });
+  const geometry = shotGeometry(matte.alpha, p.width, p.height, { rgb: p.rgb, judgedCut: input.judgedCut, ...trimRules(input.productType, matte) }), box = geometry?.box ?? null;
+  const plan = planCanvas(spec, box ?? { x: 0, y: 0, w: p.width, h: p.height }, { w: p.width, h: p.height }, { uniformScale: input.uniformScale, canvas: input.canvas, cut: geometry?.cut ?? NO_CUT, fitScale: input.fitScale, trimRoom: geometry?.trimRoom });
+  const cut = plan.cut ?? NO_CUT;
   const result: RenderOutput = { jpeg: null, status: "failed", plan, quality: JPEG_QUALITY_START, bytes: 0, flags: [...p.flags], notes: [], attention: null, compliance: { ok: false, failures: [] } };
   if (!box) { result.notes.push("No product was found in this photo."); return result; }
   if (matte.source === "floodfill") result.flags.push("fallback_matte");
@@ -670,7 +734,14 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundOf(spec, shotNumber), product = plan.productBox!;
   // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
-  const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
+  const floating = floatingSides(plan);
+  // A whole frame that does not fill this canvas is refused here, before any enlargement is asked for and whichever path renders it, so it can never be published floating.
+  if (matte.model === WHOLE_FRAME_MODEL && floating.length) {
+    result.compliance = { ok: false, failures: [wholeFrameBandFailure(floating, spec.label)] };
+    result.flags.push("failed_compliance");
+    result.notes.push(`The image we made did not meet ${spec.label}'s rules: ${plainFailures(result.compliance.failures, spec.label)}.`);
+    return result;
+  }
   // Only a logo, text or a buckle blocks a trim in the note's words; a side protected by rule (trimRules) gets the plain note.
   const blocked = (plan.trimBlocked ?? []).filter(side => !geometry?.trimProtected?.includes(side));
   if (floating.length) result.notes.push(blocked.length

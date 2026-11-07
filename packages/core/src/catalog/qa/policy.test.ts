@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb } from "../../db/testing";
 import type { Db } from "../../db/client";
 import { catalogBatches, modelPolicy } from "../../db/schema";
 import { recordCost } from "../../spend";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolvePolicy, ensureDefaultPolicies, strictestChannel, sampledForQa, defaultPolicyFor, shadowSynthesisAllowed, DEFAULT_POLICIES } from "./policy";
 import { DEPLOYED_MATTE_MODELS } from "../matte";
@@ -17,6 +17,50 @@ describe("catalog policies and caps",()=>{
   expect(await db.select().from(modelPolicy)).toHaveLength(5);
   await db.update(modelPolicy).set({source:"bakeoff",matteModel:"measured"}).where(eq(modelPolicy.category,"footwear"));
   await ensureDefaultPolicies(db,{models:[],default:"birefnet-general"});expect((await resolvePolicy(db,"anta","footwear")).matteModel).toBe("measured");
+ });
+ it("no migration writes a cut-out model the services do not serve into a policy row",()=>{
+  const folder=fileURLToPath(new URL("../../../drizzle/",import.meta.url));
+  const statements=readdirSync(folder).filter(name=>name.endsWith(".sql")).flatMap(name=>readFileSync(folder+name,"utf8").split("--> statement-breakpoint").map(text=>text.replace(/^\s*--.*$/gm,"")));
+  // What a statement writes comes before its WHERE; a WHERE may name a retired model, to replace it.
+  const written=statements.filter(text=>/^\s*(UPDATE|INSERT INTO)\s+"model_policy"/.test(text)).flatMap(text=>[...text.split(/\bWHERE\b/)[0]!.matchAll(/'((?:birefnet|bria|rmbg|u2net|isnet|ben2|inspyrenet)[a-z0-9.-]*)'/g)].map(m=>m[1]));
+  expect(written.length).toBeGreaterThan(0);
+  for(const id of written) expect(DEPLOYED_MATTE_MODELS).toContain(id);
+ });
+ describe("migration 0031",()=>{
+  const statements=readFileSync(fileURLToPath(new URL("../../../drizzle/0031_policy_served_second_models.sql",import.meta.url)),"utf8").split("--> statement-breakpoint");
+  const migrate=async()=>{for(const statement of statements) await db.execute(sql.raw(statement));};
+  type Row={brandSlug:string;category:"apparel_model"|"bag_accessory"|"other"|"apparel_flat";first?:string;second:string};
+  const put=async(rows:Row[])=>{for(const r of rows) await db.insert(modelPolicy).values({brandSlug:r.brandSlug,category:r.category,matteModel:r.first ?? "bria-rmbg",matteModelSecond:r.second,qaModel:"q",threshold:80,floor:65,source:"default"}).onConflictDoUpdate({target:[modelPolicy.brandSlug,modelPolicy.category],set:{matteModel:r.first ?? "bria-rmbg",matteModelSecond:r.second}});};
+  const second=async(brand:string,category:string)=>(await db.select().from(modelPolicy)).find(r=>r.brandSlug===brand && r.category===category)!.matteModelSecond;
+  it("moves the three global rows that name a retired model, and can run twice",async()=>{
+   await put([{brandSlug:"*",category:"apparel_model",second:"birefnet-dynamic-matting"},{brandSlug:"*",category:"bag_accessory",second:"birefnet-hr-matting"},{brandSlug:"*",category:"other",second:"birefnet-dynamic-matting"}]);
+   const before=await db.select().from(modelPolicy);
+   await migrate();await migrate();
+   expect(await second("*","apparel_model")).toBe("birefnet-general-lite");
+   expect(await second("*","bag_accessory")).toBe("birefnet-general");
+   expect(await second("*","other")).toBe("birefnet-general");
+   // The first choice, the source and the judge of a moved row stay as they were.
+   for(const r of await db.select().from(modelPolicy)) { const old=before.find(b=>b.id===r.id)!; expect([r.matteModel,r.source,r.qaModel]).toEqual([old.matteModel,old.source,old.qaModel]); }
+  });
+  it("leaves a global row with a served second model, and a brand row even with a retired name",async()=>{
+   await put([{brandSlug:"*",category:"apparel_model",second:"birefnet-hrsod"},{brandSlug:"*",category:"bag_accessory",second:"birefnet-hrsod"},{brandSlug:"*",category:"other",second:"birefnet-hrsod"},{brandSlug:"*",category:"apparel_flat",second:"birefnet-dynamic-matting"},
+    {brandSlug:"m0031",category:"apparel_model",second:"birefnet-dynamic-matting"},{brandSlug:"m0031",category:"bag_accessory",second:"birefnet-hr-matting"},{brandSlug:"m0031",category:"other",second:"birefnet-dynamic-matting"}]);
+   await migrate();
+   for(const category of ["apparel_model","bag_accessory","other"]) expect(await second("*",category)).toBe("birefnet-hrsod");
+   expect(await second("*","apparel_flat")).toBe("birefnet-dynamic-matting");
+   expect(await second("m0031","apparel_model")).toBe("birefnet-dynamic-matting");
+   expect(await second("m0031","bag_accessory")).toBe("birefnet-hr-matting");
+   expect(await second("m0031","other")).toBe("birefnet-dynamic-matting");
+   await db.update(modelPolicy).set({matteModelSecond:"birefnet-general"}).where(eq(modelPolicy.category,"apparel_flat"));
+   await db.delete(modelPolicy).where(eq(modelPolicy.brandSlug,"m0031"));
+  });
+  it("never makes the second model the same as the first",async()=>{
+   await put([{brandSlug:"*",category:"apparel_model",first:"birefnet-general-lite",second:"birefnet-dynamic-matting"},{brandSlug:"*",category:"bag_accessory",first:"birefnet-general",second:"birefnet-hr-matting"},{brandSlug:"*",category:"other",first:"birefnet-general",second:"birefnet-dynamic-matting"}]);
+   await migrate();
+   expect(await second("*","apparel_model")).toBe("birefnet-general");
+   expect(await second("*","bag_accessory")).toBe("birefnet-general-lite");
+   expect(await second("*","other")).toBe("birefnet-general-lite");
+  });
  });
  it("resolves exact brand/category before brand wildcard, global category and global wildcard",async()=>{
   await db.insert(modelPolicy).values([{brandSlug:"anta",category:"*",matteModel:"brand",qaModel:"q",threshold:80,floor:65,source:"manual"},{brandSlug:"anta",category:"footwear",matteModel:"exact",qaModel:"q",threshold:80,floor:65,source:"manual"},{brandSlug:"*",category:"*",matteModel:"global",qaModel:"q",threshold:80,floor:65,source:"manual"}]);

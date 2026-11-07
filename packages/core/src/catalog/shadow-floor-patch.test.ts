@@ -253,7 +253,7 @@ describe("the render leaves out a kept shadow that would leave a patch", () => {
 
 describe("existing outputs are made again", () => {
   it("a live image under the previous rules version no longer counts as unchanged", () => {
-    expect(CHANNEL_RULES_VERSION).toBe("11");
+    expect(CHANNEL_RULES_VERSION).toBe("12");
     const input = { sourceSha256: "a".repeat(64), channel: "noon" as const, n: 1, policyKey: "default|m" };
     const live = renderKeys({ ...input, rulesVersion: "10+c2" }, null), now = renderKeys({ ...input, rulesVersion: `${CHANNEL_RULES_VERSION}+c2` }, null);
     expect(now.some(key => live.includes(key))).toBe(false);

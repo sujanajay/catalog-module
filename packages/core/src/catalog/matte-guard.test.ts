@@ -778,12 +778,24 @@ describe("white garment on a near-white wall (Vero Moda Z40E29CD878FAA726501DZ s
     expect(guide.product[200 * W + 200]).toBe(1);
   });
 
-  it("holds the photo whole when a pass-through would recolour the product (loss over the bound)", async () => {
-    expect(passthroughProductLoss(p, [withChunk(), withChunk("second")])).toBeGreaterThan(PASSTHROUGH_PRODUCT_LOSS_MAX);
+  // R1 exit proof, cause 2, deliberate change: this wedge of wall used to end the white top in a hold. It comes out of the cut-out now, and the judge looks at what is left.
+  it("takes a wedge of wall every model kept out of the cut-out, and the white top stays", async () => {
     const resolved = await resolveMatte({ prepared: p, first: withChunk(), handRule: false, attempt: async v => withChunk(v) });
-    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true, soleStripRecovered: 0 });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false, soleStripRecovered: 0 });
     // M1 D40: every model shares this wedge of wall, and the outline around it has nothing in the photo under it.
     expect(resolved.actions.find(a => a.step === "matte_agreement")).toMatchObject({ result: "failed", detail: expect.stringMatching(/on no edge/) });
+    expect(resolved.actions.at(-1)).toMatchObject({ step: "matte_chunk_removed", result: "passed" });
+    expect(at(resolved.matte, 280, 475)).toBe(0);
+    expect(at(resolved.matte, 200, 200)).toBe(255);
+  });
+
+  it("holds the photo whole when a pass-through would recolour the product (loss over the bound) and no cut-out can be cleaned", async () => {
+    // The same cut-outs, but they lost the trousers as well: not a kept chunk alone, so nothing is taken out.
+    const lost = (model?: string) => { const m = withChunk(model), alpha = Buffer.from(m.alpha); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (trousers(x, y)) alpha[y * W + x] = 0; return { ...m, alpha }; };
+    expect(passthroughProductLoss(p, [lost(), lost("second")])).toBeGreaterThan(PASSTHROUGH_PRODUCT_LOSS_MAX);
+    const resolved = await resolveMatte({ prepared: p, first: lost(), handRule: false, attempt: async v => lost(v) });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: true, soleStripRecovered: 0 });
+    expect(resolved.actions.some(a => a.step === "matte_chunk_removed")).toBe(false);
     const last = resolved.actions.at(-1)!;
     expect(last).toMatchObject({ step: "matte_passthrough", result: "failed", trigger: ["product_removed", "leftover_background"] });
     expect(last.detail).toMatch(/^background matches the product/);
@@ -791,11 +803,12 @@ describe("white garment on a near-white wall (Vero Moda Z40E29CD878FAA726501DZ s
     expect(at(resolved.matte, 200, 200)).toBe(255);
   });
 
-  it("still passes a dark product with the same chunk through (no loss)", async () => {
+  it("a dark product with the same chunk: the chunk comes out of the cut-out, which the judge always sees, before any pass-through", async () => {
     const darkPhoto = image((x, y) => top(x, y) || trousers(x, y) ? dark(x, y) : [229, 229, 229]);
     expect(passthroughProductLoss(darkPhoto, [withChunk()])).toBe(0);
     const resolved = await resolveMatte({ prepared: darkPhoto, first: withChunk(), handRule: false, attempt: async v => withChunk(v) });
-    expect(resolved).toMatchObject({ passthrough: true, busyBackground: false });
+    expect(resolved).toMatchObject({ passthrough: false, busyBackground: false });
+    expect(resolved.actions.at(-1)).toMatchObject({ step: "matte_chunk_removed", result: "passed" });
     expect(at(resolved.matte, 280, 475)).toBe(0);
   });
 });

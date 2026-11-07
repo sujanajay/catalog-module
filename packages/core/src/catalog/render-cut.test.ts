@@ -393,7 +393,7 @@ describe("a cut-fill trim never takes a head, and never trims a pass-through (Fr
   });
   it("never trims a pass-through or whole-photo matte: it is fitted with the band note", async () => {
     const source = tall(), matte: Matte = { ...source.matte, model: PASSTHROUGH_MODEL };
-    expect(trimRules("footwear", matte)).toEqual({ noTrim: true, protectTop: false });
+    expect(trimRules("footwear", matte)).toEqual({ noTrim: true, protectTop: false, wholeFrame: false });
     const geometry = shotGeometry(matte.alpha, 800, 1200, { rgb: source.prepared.rgb, ...trimRules("footwear", matte) })!;
     expect(geometry.trimRoom).toEqual({ top: 0, bottom: 0, left: 0, right: 0 });
     for (const productType of ["apparel_model", "footwear"] as const) {

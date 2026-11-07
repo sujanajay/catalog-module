@@ -82,11 +82,17 @@ export function heldForPerson(o: { status: string; decision?: string | null; com
   return o.status === "needs_attention" && !o.decision && autoDecideRecordOf(o.compliance)?.action === "hold";
 }
 
-/** The operator sentence of an auto decision: the problem first (when known), then what was done. Model-free. */
-export function autoDecideNote(action: AutoDecideAction, why: string | null): string {
+/** A hold on a photo with no other photo of the product delivered on its channel. */
+export const HOLD_SENTENCE_ALONE = "It has no link yet. Replace it, use it as it is, or remove it.";
+
+/**
+ * The operator sentence of an auto decision: the problem first (when known), then what was done. Model-free.
+ * `othersDelivered` false: the product has no other photo delivered here, so a hold or a drop does not claim one.
+ */
+export function autoDecideNote(action: AutoDecideAction, why: string | null, othersDelivered = true): string {
   const lead = why ? `${why.trim()}${/[.!?]$/.test(why.trim()) ? "" : "."} ` : "";
-  if (action === "hold") return `${lead}${HOLD_SENTENCE}`;
+  if (action === "hold") return `${lead}${othersDelivered ? HOLD_SENTENCE : HOLD_SENTENCE_ALONE}`;
   return action === "deliver"
     ? `${lead}${PROVISIONAL_SENTENCE}`
-    : `${lead}Left out automatically; this photo gets no link here and the product's other photos are delivered.`;
+    : `${lead}Left out automatically; this photo gets no link here${othersDelivered ? " and the product's other photos are delivered" : ""}.`;
 }

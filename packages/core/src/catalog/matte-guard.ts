@@ -13,7 +13,7 @@
 import { components, delta, dilate, erode, thresholdMask, type Mask } from "./evals/image";
 import { estimateForeground, SHADOW_ZONE_CHROMA_MAX } from "./evals/cutout";
 import { borderBand } from "./shadow";
-import { PASSTHROUGH_MODEL, type Matte, type Prepared } from "./render";
+import { PASSTHROUGH_MODEL, WHOLE_FRAME_MODEL, type Matte, type Prepared } from "./render";
 import type { OutputFlag } from "./types";
 import type { AutoAction } from "./auto-resolve";
 
@@ -314,7 +314,7 @@ export function heldInHand(p: Pick<Prepared, "width" | "height" | "rgb">, alpha:
 }
 
 /** The candidate kept background chunks of a matte (see KEPT_BACKGROUND_DELTA): their labels, sizes and which qualify by touch and depth. */
-function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer) {
+function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, anyDepth = false) {
   const { width: w, height: h, rgb } = p, color = borderBackground(p).color, chunk = new Uint8Array(w * h), dropped = new Uint8Array(w * h);
   let kept = 0, y0 = h, y1 = -1;
   for (let i = 0; i < chunk.length; i++) {
@@ -326,7 +326,7 @@ function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: 
   const near = dilate(dropped, w, h, KEPT_BACKGROUND_TOUCH_PX), { labels, sizes } = components(chunk, w, h);
   const touches = new Uint8Array(sizes.length), top = new Int32Array(sizes.length).fill(h), counts = new Uint8Array(sizes.length);
   for (let i = 0; i < chunk.length; i++) { const l = labels[i]!; if (!l) continue; if (near[i]) touches[l] = 1; const y = (i - (i % w)) / w; if (y < top[l]!) top[l] = y; }
-  for (let l = 1; l < sizes.length; l++) counts[l] = touches[l] && (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH ? 1 : 0;
+  for (let l = 1; l < sizes.length; l++) counts[l] = touches[l] && (anyDepth || (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH) ? 1 : 0;
   return { labels, sizes, counts, kept };
 }
 
@@ -345,14 +345,50 @@ export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, al
 }
 
 /** The kept background chunks large enough to reject the matte (KEPT_BACKGROUND_FRAME_SHARE and KEPT_BACKGROUND_KEPT_SHARE), as a mask. */
-export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
+export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion, opts: { anyDepth?: boolean } = {}): Mask {
   const { width: w, height: h } = p, out = new Uint8Array(w * h);
   if (region.frameFilling) return out;
-  const { labels, sizes, counts, kept } = backgroundChunks(p, alpha);
+  const { labels, sizes, counts, kept } = backgroundChunks(p, alpha, opts.anyDepth);
   if (!kept) return out;
   for (let l = 1; l < sizes.length; l++) if (counts[l] && sizes[l]! > w * h * KEPT_BACKGROUND_FRAME_SHARE && sizes[l]! > kept * KEPT_BACKGROUND_KEPT_SHARE) counts[l] = 2;
   for (let i = 0; i < out.length; i++) if (counts[labels[i]!] === 2) out[i] = 1;
   return out;
+}
+
+/**
+ * The most of what a matte keeps that one removal may take out. Measured on the stored mattes (share of the kept area): the good removals reach 73.2%, because a
+ * cut-out that kept its whole backdrop is mostly backdrop (719XF60 9.9, 72YFM_YELLOW 4.8, 72YNI 20.7, 729L610 21.7, 72YEF40 31.0, 789H610 9.7, Z05C7 n2 59.7, n3 57.8,
+ * Z0D5EC n2 73.2); 569F610 loses 82.8, 529A710_D1 86.1. This alone cannot tell a white top from its wall (Z40E29CD878FAA726501DZ shot 1: 15.5), hence the pieces below.
+ */
+export const KEPT_BACKGROUND_REMOVAL_MAX_SHARE = 0.75;
+/**
+ * Pieces (over KEPT_BACKGROUND_REMOVAL_PIECE_SHARE of the frame) a product may be left in by a removal. A backdrop comes away whole and leaves the product in one piece, or two
+ * where it ran between them: every good removal above leaves 1 or 2. Pale fabric matched only in its flat parts falls apart around the folds: Z40E29CD878FAA726501DZ shot 1
+ * leaves 6, 529E410 9, 529E110 12, 529K410 13, 569E920 9, 529A710_D1 6, 569F610 3. Limit: fitted on these photos, no held-out set; the judge still looks at every removal.
+ */
+export const KEPT_BACKGROUND_REMOVAL_MAX_PIECES = 2;
+export const KEPT_BACKGROUND_REMOVAL_PIECE_SHARE = 0.0005;
+
+/**
+ * The matte with its kept background chunks (keptBackgroundMask) taken out; null when it has none, or when taking them out would eat the product (more than
+ * KEPT_BACKGROUND_REMOVAL_MAX_SHARE of what it keeps, or the rest in more than KEPT_BACKGROUND_REMOVAL_MAX_PIECES pieces), which is what a white garment on a near-white
+ * wall looks like. `anyDepth` also takes a chunk in the upper half (a backdrop patch at the neck): the guard does not look there, because a pale collar touches the dropped
+ * area as well, so only the judge's `leftover_background` asks for it, and the judge looks at the result.
+ */
+export function withoutKeptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Matte, region: BackgroundRegion, opts: { anyDepth?: boolean } = {}): Matte | null {
+  const mask = keptBackgroundMask(p, matte.alpha, region, opts);
+  if (!mask.some(v => v)) return null;
+  const { width: w, height: h } = p, alpha = Buffer.from(matte.alpha), left = new Uint8Array(w * h);
+  let kept = 0, removed = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (matte.alpha[i]! > 128) kept++;
+    if (mask[i]) { if (matte.alpha[i]! > 128) removed++; alpha[i] = 0; } else if (matte.alpha[i]! > 128) left[i] = 1;
+  }
+  if (removed > kept * KEPT_BACKGROUND_REMOVAL_MAX_SHARE) return null;
+  const { sizes } = components(left, w, h);
+  let pieces = 0;
+  for (let l = 1; l < sizes.length; l++) if (sizes[l]! > w * h * KEPT_BACKGROUND_REMOVAL_PIECE_SHARE) pieces++;
+  return pieces > KEPT_BACKGROUND_REMOVAL_MAX_PIECES ? null : { ...matte, alpha };
 }
 
 export interface MatteIntegrity {
@@ -646,6 +682,70 @@ export function wholePhotoMatte(p: Pick<Prepared, "width" | "height" | "rgb">, r
   for (let y = y0; y <= y1; y++) alpha.fill(255, y * w + x0, y * w + x1 + 1);
   return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
 }
+
+/**
+ * The whole frame as it is, for a close-up the judge read as one (wholeFrameRoute): every pixel opaque, nothing recoloured. No strips are trimmed: plain
+ * fabric reads as a strip of the border colour (529E410_D2: 35% of the frame). Its model name makes every side count as cut and none trimmed (render.ts trimRules),
+ * so it sits flush only on a canvas of its own shape; on any other the render refuses it (wholeFrameBandFailure), and a stored copy stays so.
+ */
+export function wholeFrameMatte(p: Pick<Prepared, "width" | "height">): Matte {
+  const { width: w, height: h } = p;
+  return { alpha: Buffer.alloc(w * h, 255), width: w, height: h, model: WHOLE_FRAME_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
+}
+
+/** The judge's view that may keep the whole frame: it names what image 1 shows, and a model or a whole product is another view. */
+export const WHOLE_FRAME_VIEW = "detail";
+/** Over this share of the frame in skin colours, a person is in the picture. */
+export const WHOLE_FRAME_SKIN_MAX_SHARE = 0.03;
+/** A side of the frame shows a backdrop when this share of its outer 1% is within WHOLE_FRAME_SIDE_DELTA per channel of the side's own median ... */
+export const WHOLE_FRAME_SIDE_FLAT_SHARE = 0.97;
+export const WHOLE_FRAME_SIDE_DELTA = 3;
+/** ... and that median stands this far from the frame's median: flat in another colour than what fills the frame. */
+export const WHOLE_FRAME_SIDE_COLOUR_DELTA = 10;
+/**
+ * A side of the frame shows a white backdrop when more than this share of its outer 1% is neutral near-white (all channels at least WHOLE_FRAME_WHITE_MIN, within
+ * WHOLE_FRAME_WHITE_SPREAD of each other). The flat-side rule above misses a white band over most of the frame (the median is then white), a collar touching the top on part
+ * of the line, and a whole garment on white. Measured on the stored raws: the close-ups that fill the frame hold at most 1% on any side (529A710, 529E410, 529K240, 729H910,
+ * 729M610, 73ZNQ40, 76YAP10), 769F610 4%; whole garments and backdrops 50 to 100% (569H801, 72YFM_YELLOW, 72YNI, SJZBK70).
+ */
+export const WHOLE_FRAME_WHITE_SIDE_MAX_SHARE = 0.1;
+export const WHOLE_FRAME_WHITE_MIN = 240;
+export const WHOLE_FRAME_WHITE_SPREAD = 6;
+
+export interface WholeFrameRoute { allowed: boolean; /** Short technical note for the logs; never shown to operators. */ detail: string }
+/**
+ * Whether a photo the judge flagged `product_removed` may keep its whole frame. The judge's view decides (`detail`); the pixels only veto what the
+ * route must never publish, whatever the view says: a person in the picture, a flat strip of backdrop beside the product (a white band above a
+ * collar), or white backdrop on a side (a collar touching the top, a whole garment on white). The render then goes back through the judge, which is the real check; a photo it flags stays held.
+ * What only the judge guards: a vignette, a band of another colour over most of the frame, a white shirt whose sides are not near-white, a crop of a person under the skin limit (a neck, dark skin), a scene with no flat side.
+ */
+export function wholeFrameRoute(p: Pick<Prepared, "width" | "height" | "rgb">, view: string | null | undefined): WholeFrameRoute {
+  if (view !== WHOLE_FRAME_VIEW) return { allowed: false, detail: `view ${view ?? "unknown"}` };
+  const { width: w, height: h, rgb } = p, frame = w * h, color = borderBackground(p).color, bins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  let skin = 0;
+  for (let i = 0; i < frame; i++) {
+    for (let c = 0; c < 3; c++) bins[c]![rgb[i * 3 + c]!]!++;
+    if (delta(rgb, i, color) > SKIN_MIN_BACKGROUND_DELTA && isSkin(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!)) skin++;
+  }
+  if (skin / frame > WHOLE_FRAME_SKIN_MAX_SHARE) return { allowed: false, detail: `skin ${(skin / frame * 100).toFixed(1)}% of the frame` };
+  const median = medianColour(bins, frame), depth = Math.max(2, Math.round(Math.max(w, h) * 0.01));
+  const sides: [string, (k: number, d: number) => number, number][] = [["top", (k, d) => d * w + k, w], ["bottom", (k, d) => (h - 1 - d) * w + k, w], ["left", (k, d) => k * w + d, h], ["right", (k, d) => k * w + w - 1 - d, h]];
+  for (const [name, at, length] of sides) {
+    const sideBins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) { const i = at(k, d); for (let c = 0; c < 3; c++) sideBins[c]![rgb[i * 3 + c]!]!++; }
+    const own = medianColour(sideBins, length * depth);
+    let near = 0, white = 0;
+    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) {
+      const i = at(k, d), r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!;
+      if (delta(rgb, i, own) <= WHOLE_FRAME_SIDE_DELTA) near++;
+      if (Math.min(r, g, b) >= WHOLE_FRAME_WHITE_MIN && Math.max(r, g, b) - Math.min(r, g, b) <= WHOLE_FRAME_WHITE_SPREAD) white++;
+    }
+    if (white / (length * depth) > WHOLE_FRAME_WHITE_SIDE_MAX_SHARE) return { allowed: false, detail: `white backdrop on the ${name} side` };
+    if (near / (length * depth) >= WHOLE_FRAME_SIDE_FLAT_SHARE && own.some((v, c) => Math.abs(v - median[c]!) > WHOLE_FRAME_SIDE_COLOUR_DELTA)) return { allowed: false, detail: `a flat ${name} side in another colour` };
+  }
+  return { allowed: true, detail: `view ${view}` };
+}
+const medianColour = (bins: Uint32Array[], total: number): [number, number, number] => bins.map(counts => { let seen = 0; for (let v = 0; v < 256; v++) { seen += counts[v]!; if (seen * 2 >= total) return v; } return 255; }) as [number, number, number];
 
 /** Separable sigma-1 Gaussian on a 0/1 mask (edge pixels replicated), as floodFillMatte does, but only inward: the background around the product stays fully clear, so no source background bleeds onto the canvas. */
 function softenEdge(mask: Mask, w: number, h: number): Buffer {
@@ -1133,7 +1233,8 @@ export interface MatteResolution {
  * matte when it passes checkMatteIntegrity; else (a) the policy's second model, (b) the photo framed
  * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) on apparel (no `handRule`), a cut-out
  * two models of different families agree on, asking a third model when the policy's two are of one family or disagree
- * (matteAgreement), (d) the pass-through matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
+ * (matteAgreement), (d) a cut-out the guard rejected only for a kept background chunk, with the chunk taken out (withoutKeptBackground),
+ * re-checked once and always judged, (e) the pass-through matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
  * replaces a plain backdrop only: on a busy background (busyBorderShare), or a backdrop of the product's own
  * colour (passthroughProductLoss), the photo is kept whole and held (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
@@ -1182,6 +1283,14 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     }
     record("matte_agreement", agreement.matte ? "passed" : "failed", agreement.detail);
     if (agreement.matte) return won(agreement.matte);
+  }
+  for (const candidate of tried) {
+    const clean = checkMatteIntegrity(p, candidate, { handRule: input.handRule, region }).detail.startsWith("kept background") ? withoutKeptBackground(p, candidate, region) : null;
+    if (!clean) continue;
+    const result = checkMatteIntegrity(p, clean, { handRule: input.handRule, region });
+    if (!result.ok) continue;
+    record("matte_chunk_removed", "passed", `${candidate.model}: ${result.detail}`);
+    return won(clean);
   }
   const guide = passthroughGuide(p, region, tried), loss = passthroughProductLoss(p, tried, region, guide);
   if (loss > PASSTHROUGH_PRODUCT_LOSS_MAX) {
