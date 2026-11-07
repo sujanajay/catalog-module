@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { planRoutes } from "@catalog/core/vendor/router";
 import { SEED_ROUTES } from "@catalog/core/vendor/routes";
-import { examBlocked, examFlags, examPlan, routerWithout } from "./catalog-judge-exam";
+import { examBlocked, examExitCode, examFlags, examPlan, routerWithout } from "./catalog-judge-exam";
 
 const judges = SEED_ROUTES.filter(r => r.capability === "judge.render");
 const [first, second] = judges.map(r => r.model) as [string, string];
+
+describe("the judge exam's exit code (M1 D43)", () => {
+  it("0 on a pass, 1 only on a judge proven below a bar, 3 on no result", () => {
+    expect(examExitCode({ pass: true, failedJudges: [] })).toBe(0);
+    expect(examExitCode({ pass: false, failedJudges: [first] })).toBe(1);
+    expect(examExitCode({ pass: false, failedJudges: [] })).toBe(3);
+  });
+});
 
 describe("the judge exam's plan (M1 D43)", () => {
   it("examines every judge a verdict can come from: the first with its second opinion, the next with the first switched off", () => {

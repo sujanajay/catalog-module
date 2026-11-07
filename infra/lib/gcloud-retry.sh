@@ -110,7 +110,7 @@ gcloud_job_logs() {
   local job=$1 execution=$2 region=$3 logs
   logs=$(GCLOUD_RETRY_ATTEMPTS=2 gcloud_retry gcloud logging read \
     "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"$job\" AND labels.\"run.googleapis.com/execution_name\"=\"$execution\"" \
-    --order=asc --limit=400 --freshness=2d --format='value(textPayload)' 2>/dev/null) || logs=""
+    --order=asc --limit="${GCLOUD_JOB_LOG_LIMIT:-400}" --freshness=2d --format='value(textPayload)' 2>/dev/null) || logs=""
   logs=${logs//$'\r'/}
   if [ -n "$logs" ]; then
     echo "--- $execution log ---"; printf '%s\n' "$logs"; echo "--- end of $execution log ---"
@@ -191,6 +191,8 @@ gcloud_job_run() {
   done
   trap - TERM INT
   rm -f "$err"
+  # GCLOUD_JOB_STATE_FILE (optional): the final state for a caller that reads this function through a pipe.
+  [ -z "${GCLOUD_JOB_STATE_FILE:-}" ] || printf '%s\n' "$state" > "$GCLOUD_JOB_STATE_FILE" || true
   case "$state" in
     succeeded|failed:*) gcloud_job_logs "$job" "$execution" "$region" ;;
   esac

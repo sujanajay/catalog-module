@@ -30,6 +30,28 @@ describe("the judge exam score", () => {
     const score = scoreJudgeExam("m", images, [answer("d1", ["qa_unavailable"]), answer("d2", ["text_or_watermark"], "other"), answer("d3", ["text_or_watermark"]), answer("g1", []), answer("g2", []), answer("g3", [])], bars);
     expect(score).toMatchObject({ caught: 1, unanswered: 2, pass: false, models: { m: 5, other: 1 } });
   });
+  it("no answers over the bar with nothing proven: no result, and never a pass", () => {
+    const score = scoreJudgeExam("m", images, [], bars);
+    expect(score).toMatchObject({ pass: false, undecided: true });
+    expect(judgeExamLine("first judge", score, null, bars)).toMatch(/^JUDGE EXAM NO RESULT first judge m /);
+  });
+  it("no answers within the bar never excuse a miss", () => {
+    const score = scoreJudgeExam("m", images, [answer("d1", []), answer("d2", []), answer("g1", []), answer("g2", []), answer("g3", [])], bars);
+    expect(score).toMatchObject({ pass: false, undecided: false, unanswered: 1 });
+  });
+  it("an outage does not hide a proven failure: too many false flags already", () => {
+    const score = scoreJudgeExam("m", images, [answer("g1", ["text_or_watermark"]), answer("g2", ["text_or_watermark"])], bars);
+    expect(score).toMatchObject({ pass: false, undecided: false, unanswered: 4 });
+  });
+  it("an outage does not hide a proven failure: even with every unanswered defect caught it stays below the catch bar", () => {
+    const score = scoreJudgeExam("m", images, [answer("d1", []), answer("d2", []), answer("g1", []), answer("g2", []), answer("d3", ["qa_unavailable"])], { ...bars, minCaught: 2 });
+    expect(score).toMatchObject({ caught: 0, unanswered: 2, undecided: false, pass: false });
+  });
+  it("an outage does not hide a class the judge is proven blind to", () => {
+    const set = [image("m1", "defect"), image("m2", "defect"), image("l1", "defect", "court and hedge"), image("l2", "defect", "court and hedge")];
+    const score = scoreJudgeExam("m", set, [answer("m1", []), answer("m2", [])], { minCaught: 0, maxFalseFlags: 1, maxUnanswered: 1, minPerClass: { mark: 1 } });
+    expect(score).toMatchObject({ undecided: false, pass: false });
+  });
   it("an image with no answer at all counts as no answer", () => {
     expect(scoreJudgeExam("m", images, [], bars).unanswered).toBe(6);
   });

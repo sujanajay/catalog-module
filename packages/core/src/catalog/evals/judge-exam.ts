@@ -21,6 +21,8 @@ export type JudgeExamClassBars = Partial<Record<DefectClass, number>>;
 export interface JudgeExamBars { minCaught: number; maxFalseFlags: number; maxUnanswered: number; minPerClass: JudgeExamClassBars }
 export interface JudgeExamScore {
   judge: string; caught: number; defects: number; falseFlags: number; good: number; unanswered: number; costUsd: number; pass: boolean;
+  /** Too many images had no answer and the answered ones prove no failure: no result on this judge, not a failed one (a vendor outage or rate limit during the run). Never a pass. */
+  undecided: boolean;
   missed: string[]; falselyFlagged: string[]; noAnswer: string[]; models: Record<string, number>; failures: string[];
   /** Per class: caught and how many the set holds. */
   classes: Partial<Record<DefectClass, { caught: number; of: number }>>;
@@ -55,11 +57,12 @@ export function scoreJudgeExam(judge: string, images: readonly JudgeExamImage[],
   const answered = (a: JudgeExamAnswer | undefined): a is JudgeExamAnswer => !!a && a.model === judge && !a.flags.includes("qa_unavailable");
   const raised = (a: JudgeExamAnswer) => problemFlags(a.flags.filter(f => f !== "qa_unavailable") as OutputFlag[]) as readonly string[];
   const missed: string[] = [], falselyFlagged: string[] = [], noAnswer: string[] = [], classes: JudgeExamScore["classes"] = {};
-  let caught = 0, defects = 0, good = 0;
+  let caught = 0, defects = 0, good = 0, openDefects = 0;
+  const openByClass: Partial<Record<DefectClass, number>> = {};
   for (const image of images) {
     const answer = byId.get(image.id), kind = image.expect === "defect" ? DEFECTS[image.defect ?? ""] : undefined;
     if (image.expect === "defect") { defects++; if (kind) (classes[kind.class] ??= { caught: 0, of: 0 }).of++; } else good++;
-    if (!answered(answer)) { noAnswer.push(image.id); if (image.expect === "defect") missed.push(image.id); continue; }
+    if (!answered(answer)) { noAnswer.push(image.id); if (image.expect === "defect") { missed.push(image.id); openDefects++; if (kind) openByClass[kind.class] = (openByClass[kind.class] ?? 0) + 1; } continue; }
     if (image.expect === "defect") {
       if (raised(answer).some(f => kind?.flags.includes(f))) { caught++; if (kind) classes[kind.class]!.caught++; } else missed.push(image.id);
     } else if (raised(answer).length) falselyFlagged.push(image.id);
@@ -72,13 +75,16 @@ export function scoreJudgeExam(judge: string, images: readonly JudgeExamImage[],
     ...(noAnswer.length > bars.maxUnanswered ? [`no answer on ${noAnswer.length} images, the bar is at most ${bars.maxUnanswered}`] : []),
     ...Object.entries(bars.minPerClass).flatMap(([name, min]) => { const c = classes[name as DefectClass]; return (c?.caught ?? 0) < min! ? [`caught ${c?.caught ?? 0} of ${c?.of ?? 0} ${name} defects, the bar is at least ${min}`] : []; }),
   ];
-  return { judge, caught, defects, falseFlags: falselyFlagged.length, good, unanswered: noAnswer.length, costUsd: answers.reduce((sum, a) => sum + a.costUsd, 0), pass: failures.length === 0, missed, falselyFlagged, noAnswer, models, failures, classes };
+  // Even if every unanswered image had gone the judge's way, would it still fail? Then the failure is proven, whatever the outage.
+  const proven = falselyFlagged.length > bars.maxFalseFlags || caught + openDefects < bars.minCaught
+    || Object.entries(bars.minPerClass).some(([name, min]) => (classes[name as DefectClass]?.caught ?? 0) + (openByClass[name as DefectClass] ?? 0) < min!);
+  return { judge, caught, defects, falseFlags: falselyFlagged.length, good, unanswered: noAnswer.length, costUsd: answers.reduce((sum, a) => sum + a.costUsd, 0), pass: failures.length === 0, undecided: noAnswer.length > bars.maxUnanswered && !proven, missed, falselyFlagged, noAnswer, models, failures, classes };
 }
 
 /** One line a person can read, naming the judge, for the job's log and verdict.txt. */
 export function judgeExamLine(name: string, score: JudgeExamScore, second: string | null, bars: JudgeExamBars = JUDGE_EXAM_BARS): string {
   const classes = Object.entries(score.classes).map(([k, c]) => `${k} ${c.caught}/${c.of}${bars.minPerClass[k as DefectClass] ? ` (bar ${bars.minPerClass[k as DefectClass]})` : ""}`).join(", ");
-  return `JUDGE EXAM ${score.pass ? "PASS" : "FAIL"} ${name} ${score.judge}${second ? ` (second opinion ${second})` : " (no second opinion)"}: caught ${score.caught} of ${score.defects} (bar ${bars.minCaught}), falsely flagged ${score.falseFlags} of ${score.good} (bar ${bars.maxFalseFlags}), no answer ${score.unanswered} (bar ${bars.maxUnanswered}), $${score.costUsd.toFixed(2)}. By class: ${classes}.`;
+  return `JUDGE EXAM ${score.pass ? "PASS" : score.undecided ? "NO RESULT" : "FAIL"} ${name} ${score.judge}${second ? ` (second opinion ${second})` : " (no second opinion)"}: caught ${score.caught} of ${score.defects} (bar ${bars.minCaught}), falsely flagged ${score.falseFlags} of ${score.good} (bar ${bars.maxFalseFlags}), no answer ${score.unanswered} (bar ${bars.maxUnanswered}), $${score.costUsd.toFixed(2)}. By class: ${classes}.`;
 }
 
 /** Reads the committed set and refuses a malformed one. */

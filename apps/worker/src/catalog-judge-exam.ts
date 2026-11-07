@@ -2,7 +2,7 @@
 // live judge, so it refuses to run without LIVE_SMOKE=1. It reads only the pinned images under catalog-test/, writes its report only
 // under catalog-test/evals/<run>/judge-exam/, and in the database only one cost ledger row per judging, with no batch. A failed bar or an
 // exam that could not run exits 1, which fails the deploy report (infra/deploy.sh) and the proof. The two print different lines, read by
-// infra/catalog-output-evals.sh: "JUDGE EXAM FAIL:" is a judge result, "JUDGE EXAM COULD NOT RUN:" is not. Model ids appear in the report and the console only.
+// infra/catalog-output-evals.sh reads the job's exit code from the execution: 1 is a judge result, 3 is none (examExitCode). Model ids appear in the report and the console only.
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "@catalog/core/db/client";
 import { JUDGE_EXAM_BARS, JUDGE_EXAM_MAX_USD, judgeExamLine, parseJudgeExamSet, scoreJudgeExam, type JudgeExamAnswer, type JudgeExamImage, type JudgeExamScore, type JudgeExamSet } from "@catalog/core/catalog/evals/judge-exam";
@@ -23,7 +23,12 @@ import examSet from "../../../packages/core/test-fixtures/catalog/evals/judge-ex
 const CONCURRENCY = 6;
 
 export interface JudgeExamPass { name: string; judge: string; second: string | null; score: JudgeExamScore; answers: JudgeExamAnswer[] }
-export interface JudgeExamResult { run: string; version: string; pass: boolean; lines: string[]; passes: JudgeExamPass[]; reportUri: string; couldNotRun?: string }
+export interface JudgeExamResult { run: string; version: string; pass: boolean; lines: string[]; passes: JudgeExamPass[]; reportUri: string; failedJudges: string[]; couldNotRun?: string }
+
+/** The job's exit code, which is what the script reads: 0 passed, 1 a judge is proven below a bar, 3 no result. */
+export function examExitCode(result: Pick<JudgeExamResult, "pass" | "failedJudges">): 0 | 1 | 3 {
+  return result.pass ? 0 : result.failedJudges.length ? 1 : 3;
+}
 
 /** The route table a judge is examined on: the serving table, with the judges above it switched off, on fresh circuits. */
 export function routerWithout(routes: readonly RouteDef[], off: readonly string[]): Router {
@@ -97,26 +102,34 @@ export async function runJudgeExam(db: Db, deps: CatalogDeps, options: { run: st
   } catch (error) {
     stopped = error instanceof Error ? error.message : String(error);
   }
-  const needed = examPlan(routes, first).length;
-  const pass = !stopped && passes.length === needed && passes.every(p => p.score.pass);
+  const undecided = passes.filter(p => p.score.undecided), failedJudges = [...new Set(passes.filter(p => !p.score.pass && !p.score.undecided).map(p => p.judge))];
+  stopped ??= undecided.length ? `${undecided.map(p => `${p.judge} gave no answer on ${p.score.unanswered} images, over the bar of ${JUDGE_EXAM_BARS.maxUnanswered}`).join("; ")}, so its catches and false flags cannot be judged (a vendor outage or rate limit?).` : undefined;
+  stopped ??= !failedJudges.length && passes.length !== examPlan(routes, first).length ? "Not every pass ran." : undefined;
+  const pass = !stopped && !failedJudges.length;
   const lines = [
     ...passes.map(p => judgeExamLine(p.name, p.score, p.second)),
-    ...passes.flatMap(p => [...p.score.failures.map(f => `FAIL ${p.judge}: ${f}`), `MISSED by ${p.judge}: ${p.score.missed.join(", ") || "none"}`, `FALSELY FLAGGED by ${p.judge}: ${p.score.falselyFlagged.join(", ") || "none"}`]),
-    stopped ? `JUDGE EXAM COULD NOT RUN: ${stopped} Set ${set.version}, run ${options.run}. This is not a judge result.` : `JUDGE EXAM ${pass ? "PASS" : "FAIL"}: set ${set.version}, run ${options.run}.`,
+    ...passes.flatMap(p => [...(p.score.undecided ? [] : p.score.failures.map(f => `FAIL ${p.judge}: ${f}`)), `MISSED by ${p.judge}: ${p.score.missed.join(", ") || "none"}`, `FALSELY FLAGGED by ${p.judge}: ${p.score.falselyFlagged.join(", ") || "none"}`]),
+    ...(stopped ? [`JUDGE EXAM COULD NOT RUN: ${stopped} Set ${set.version}, run ${options.run}. This is not a judge result.`] : []),
+    ...(failedJudges.length ? [`JUDGE EXAM FAIL: ${failedJudges.join(", ")} below a bar; set ${set.version}, run ${options.run}.`] : pass ? [`JUDGE EXAM PASS: set ${set.version}, run ${options.run}.`] : []),
   ];
   const write = async (name: string, body: string, mime: string) => { const object = `${prefix}/${name}`; assertTestPrefix(object); await gcs.uploadBuffer(object, Buffer.from(body), mime); return `gs://${bucket}/${object}`; };
   const reportUri = await write("report.json", JSON.stringify({ run: options.run, version: set.version, bars: JUDGE_EXAM_BARS, pass, couldNotRun: stopped ?? null, passes }, null, 1), "application/json");
   await write("verdict.txt", `${lines.join("\n")}\n`, "text/plain");
   for (const line of lines) console.info(line);
   console.info(`Judge exam report: ${reportUri}`);
-  return { run: options.run, version: set.version, pass, lines, passes, reportUri, ...(stopped ? { couldNotRun: stopped } : {}) };
+  return { run: options.run, version: set.version, pass, lines, passes, reportUri, failedJudges, ...(stopped ? { couldNotRun: stopped } : {}) };
 }
 
-/** exam: the live judge on the pinned set. Exit 1 on a failed bar or an exam that could not run, which fails the deploy report. */
+/** exam: the live judge on the pinned set. Exit 1 on a judge proven below a bar, exit 3 on no result; both fail the deploy report. */
 export async function judgeExamCommand(db: Db): Promise<void> {
   if (!liveQaEnabled()) { console.error("exam calls the live judge: run it through bash infra/catalog-output-evals.sh exam (LIVE_SMOKE=1)"); process.exitCode = 2; return; }
   const run = `exam-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
   console.info(`Run id: ${run}`);
-  const result = await runJudgeExam(db, workerCatalogDeps(db), { run });
-  if (!result.pass) process.exitCode = 1;
+  try {
+    const code = examExitCode(await runJudgeExam(db, workerCatalogDeps(db), { run }));
+    if (code) process.exitCode = code;
+  } catch (error) {
+    console.error(`JUDGE EXAM COULD NOT RUN: ${error instanceof Error ? error.message : String(error)} Run ${run}. This is not a judge result.`);
+    process.exitCode = 3;
+  }
 }

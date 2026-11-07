@@ -18,7 +18,7 @@
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
 #   bash infra/catalog-output-evals.sh exam              # M1 D43: the judge exam: the live judges on the pinned defects and clean images.
-#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.50). Exit 0: passed. Exit 1: a judge
+#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.3). Exit 0: passed. Exit 1: a judge
 #                                                        # failed a bar. Exit 3: it could not run, which is no judge result. Non-zero under its
 #                                                        # bars. infra/deploy.sh runs it as its last step; proof runs it first.
 #   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D40: the matte agreement on the 19 real photos and 8 controls.
@@ -122,7 +122,7 @@ execute_cli() {
 
 # The judge exam, through the wrapper that judges from the execution's final state. Its exit code says which of three things happened.
 exam() {
-  local listed joined rc=0 out
+  local listed joined out state verdict
   if ! listed=$(gcloud_retry gcloud run jobs list --region="$REGION" --filter="metadata.name=$JOB" --format='value(metadata.name)'); then
     echo "JUDGE EXAM COULD NOT RUN: could not read the job list; this is not a judge result." >&2; return 3
   fi
@@ -131,16 +131,21 @@ exam() {
   GCLOUD_JOB_EXECUTE_FLAGS=("--args=$joined" --update-env-vars=LIVE_SMOKE=1)
   out=$(mktemp) || { echo "JUDGE EXAM COULD NOT RUN: no temp file on this laptop (is the disk full?); this is not a judge result." >&2; return 3; }
   echo "==> $JOB: EXECUTE exam (LIVE_SMOKE=1, live judge calls)"
-  MSYS2_ARG_CONV_EXCL='--args=' gcloud_job_run "$JOB" "$REGION" 0 | tee "$out" || rc=$?
+  # The result is the execution's own state: the job exits 1 on a judge below a bar and 3 on no result. The log is only detail: it can lag or be cut.
+  MSYS2_ARG_CONV_EXCL='--args=' GCLOUD_JOB_STATE_FILE="$out.state" GCLOUD_JOB_LOG_LIMIT=3000 gcloud_job_run "$JOB" "$REGION" 0 | tee "$out" || true
   unset GCLOUD_JOB_EXECUTE_FLAGS
-  if [ "$rc" = 0 ]; then
-    rm -f "$out"
-    echo "JUDGE EXAM PASSED: the judges met every bar. This counts as a pass for the deploy whose exam failed; no redeploy is needed."
-    return 0
-  fi
-  if grep -q 'JUDGE EXAM FAIL:' "$out"; then rm -f "$out"; return 1; fi
-  rm -f "$out"
-  echo "JUDGE EXAM COULD NOT RUN: the execution gave no judge result (a network drop, a job failure or a log not readable yet). This is not a judge result." >&2
+  state=$(cat "$out.state" 2>/dev/null) || state=""
+  verdict=$(grep -m1 'JUDGE EXAM FAIL:' "$out" 2>/dev/null) || verdict=""
+  rm -f "$out" "$out.state"
+  case "$state" in
+    succeeded)
+      echo "JUDGE EXAM PASSED: the judges met every bar."
+      return 0 ;;
+    *"exit code: 1 "*)
+      echo "JUDGE EXAM FAILED: ${verdict:-the job exited 1, a judge below a bar. Its log is not readable yet, so it cannot be named here: read the log as printed above.}" >&2
+      return 1 ;;
+  esac
+  echo "JUDGE EXAM COULD NOT RUN: the execution gave no judge result (${state:-its state could not be read; see the errors above}). This is not a judge result." >&2
   return 3
 }
 

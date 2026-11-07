@@ -362,6 +362,8 @@ try {
       if (ran) assert.equal(fs.readFileSync(path.join(repo, 'exam.txt'), 'utf8').trim(), 'exam', label);
       assert.equal(/DEPLOY_OK/.test(r.stdout), status === 0, label + ' DEPLOY_OK only after a passed exam');
       if (label === 'deploy-exam-fails') assert.match(r.stderr, /a judge failed its exam/, label);
+      assert.doesNotMatch(r.stderr, /gs:\/\/gs:\/\//, label);
+      if (status === 1) assert.match(r.stderr, /once at most/, label);
       if (label === 'deploy-exam-could-not-run') assert.match(r.stderr, /could not run.*not a judge result/, label);
       if (status === 1) { assert.match(r.stderr, /nothing was rolled back/, label); assert.match(r.stderr, /catalog-output-evals\.sh exam/, label); }
       console.log('PASS ' + label);

@@ -564,6 +564,7 @@ async function checkFolderCommand(flags: Record<string, string | string[] | true
   if (!report.summary.passedAll) process.exitCode = 1;
 }
 
+let crashExit = 1;
 async function main() {
   const { words, flags } = parseArgs(process.argv.slice(2));
   const command = words.join(" ");
@@ -572,6 +573,8 @@ async function main() {
   if (command === "upload") return uploadCommand(flags);
   if (command === "check-folder") return checkFolderCommand(flags);
   if (command !== "run" && command !== "proof" && command !== "recut" && command !== "exam") { print(USAGE); process.exitCode = 2; return; }
+  // A crash in the exam is no judge result: exit 1 there means a judge is below a bar (M1 D43).
+  if (command === "exam") crashExit = 3;
   const db = getDb(), startedAt = Date.now();
   let outcome: "ok" | "failed" = "failed";
   try { await (command === "exam" ? judgeExamCommand : command === "proof" ? matteProofCommand : command === "recut" ? recutCommand : runCommand)(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
@@ -580,5 +583,5 @@ async function main() {
     await closeDb();
   }
 }
-main().catch(error => { console.error(error instanceof Error ? error.stack ?? error.message : String(error)); process.exitCode = 1; });
+main().catch(error => { console.error(error instanceof Error ? error.stack ?? error.message : String(error)); process.exitCode = process.exitCode || crashExit; });
 export { sha256 };

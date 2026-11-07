@@ -755,16 +755,16 @@ else
   bash infra/catalog-output-evals.sh exam || exam_rc=$?
   if [ "$exam_rc" != 0 ]; then
     if [ "$exam_rc" = 1 ]; then
-      echo "ERROR: a judge failed its exam: it missed known defects or flagged too many clean images." >&2
+      echo "ERROR: a judge failed its exam: it missed known defects or flagged too many clean images. The JUDGE EXAM FAILED line above names it." >&2
     else
       echo "ERROR: the judge exam could not run (exit $exam_rc). This is not a judge result: the judges may be fine." >&2
     fi
     cat >&2 <<EXAM_NEXT
 This deploy is live: all traffic is on the new code, nothing was rolled back, and nothing blocks new batches by itself. Only the deploy report failed: no DEPLOY_OK.
 Next steps:
-  1. Read the result: gcloud storage cat gs://$ASSETS_BUCKET/catalog-test/evals/<the Run id printed above>/judge-exam/verdict.txt
+  1. Read the result: gcloud storage cat $ASSETS_BUCKET/catalog-test/evals/<the Run id printed above>/judge-exam/verdict.txt
   2. Hold new batches, proofs and real runs until step 3 passes. This is by hand.
-  3. If it could not run, or after a fix: bash infra/catalog-output-evals.sh exam. A line "JUDGE EXAM PASSED" clears this deploy; no redeploy is needed.
+  3. If it could not run, or after a fix: bash infra/catalog-output-evals.sh exam. A line "JUDGE EXAM PASSED" clears this deploy; no redeploy is needed. Re-run a judge failure once at most, never until it passes: a second failure is a real failure.
   4. If a judge really failed and this deploy changed the prompt or a model: bash infra/deploy.sh --rollback catalog-worker
 EXAM_NEXT
     exit 1
