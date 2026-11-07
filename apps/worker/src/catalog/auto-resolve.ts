@@ -3,12 +3,14 @@ import { and, eq } from "drizzle-orm";
 import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } from "@catalog/core/db/schema";
 import { batchPrefix, publicObjectPath, publicUrl, stagingPath } from "@catalog/core/catalog/naming";
 import { imageAsset, recordOutputVersion } from "@catalog/core/graph/write-path";
-import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
+import { channel as channelSpec } from "@catalog/core/catalog/channels";
+import { shotGeometry, wholeFrameFills, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
 import { heldForPerson } from "@catalog/core/catalog/auto-decide";
 import { catalogSlotPatch, pickPromotion } from "@catalog/core/catalog/promote";
-import { actionsOn, autoActionsOf, diagnoseOutput, ENLARGEMENT_WAIT_DETAIL, failuresOf, LadderStopped, MATTE_STEPS, MAX_ENLARGEMENT_WAITS, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, autoActionsOf, diagnoseOutput, ENLARGEMENT_WAIT_DETAIL, failuresOf, LadderStopped, MATTE_STEPS, MAX_ENLARGEMENT_WAITS, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, WHOLE_FRAME_BAND_DETAIL, wholeFrameRefusedOn, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed, strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX, wholeFrameMatte, wholeFrameRoute, WHOLE_FRAME_VIEW, withoutKeptBackground, backgroundRegion } from "@catalog/core/catalog/matte-guard";
+import { problemFlags } from "@catalog/core/catalog/qa/triage";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import { batchEnlargement, primeReadiness, reconcileEnlargements, wantedRows, wantedRowsOfPixels } from "./enlarge";
@@ -94,7 +96,10 @@ interface OutputState { o: Output; variant: RenderVariant; render: RenderOutput 
  * failure on that channel only: a computed move onto the Styli guide, a re-encode, the drawn shadow off,
  * a computed smaller fit, a plain re-render. A matte change (the second cut-out, the whole frame) is the
  * photo's and re-renders every channel, each with its own repairs so far, and re-checks each. When the
- * judge flagged the photo it looks again after each round, at most MAX_REJUDGES_PER_PHOTO times. An output
+ * judge flagged the photo it looks again after each round, at most MAX_REJUDGES_PER_PHOTO times. The whole
+ * frame is the exception, because nothing is left between it and a shopper: it goes only to the channels it fills
+ * untrimmed (the others keep the photo held and say why), the judge looks at each of those channels, and any
+ * problem it names on any of them fails the step for the photo (it is the same frame). An output
  * that passes is written; one that does not keeps its first image. Every step is appended to
  * `compliance.auto_actions` with the channel it changed. Returns the output ids it fixed. A step that needs an enlargement
  * the batch did not make queues it and the repair stops with `waiting`, to run again once it settled.
@@ -148,12 +153,15 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const states = new Map<string, OutputState>();
   for (const o of input.outputs) states.set(o.id,{o,variant:variantOf(o.compliance),render:null,failures:failuresOf(o.compliance),measured:measuredOf(o.compliance),tried:triedSteps(o),attempts:0,target:input.failing.some(f=>f.id===o.id)});
   const targets = () => [...states.values()].filter(st=>st.target);
+  const fillsCanvas = (st: OutputState): boolean => wholeFrameFills(route.channelRules?.spec(st.o.channel) ?? channelSpec(st.o.channel),{w:p.width,h:p.height},{canvas:contextFor(st.o).canvas,fitScale:st.variant.fitScale});
   const actions: AutoAction[] = [];
   const record = (step: AutoActionKind, result: AutoAction["result"], channels: ChannelId[], detail: string): AutoAction => { const a: AutoAction = {step,trigger:[...trigger],result,channels,rejudged:false,detail}; actions.push(a); return a; };
   const judgeTrigger = !!input.rejudge && trigger.some(f=>f !== "failed_compliance");
   // The flags the planner answers: the trigger, then whatever the judge still sees after a round.
   let currentTrigger: OutputFlag[] = [...trigger];
   let verdict = null as RejudgeVerdict | null, judgedChannel = null as ChannelId | null, rejudges = 0, changedSinceJudge = true, stopped = false;
+  // Each whole-frame image and the look the judge gave that very image: only an image the judge passed is written.
+  const wholeLooks = new Map<string, {render: RenderOutput; verdict: RejudgeVerdict}>();
   // Spec 18 lifecycle F8b, F52: a variant that needs an enlargement the batch did not make (not ready) queues it and the repair
   // waits (`waiting`: the chunk parks as a render's does, under the rows' own limits; no matte persisted, the photo undecided). The steps so far stay
   // on the record, so their judge calls are not made again. Without a batch route, past MAX_ENLARGEMENT_WAITS, or with nothing to
@@ -164,7 +172,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     try { return await render(o,v); }
     catch (error) {
       if (!(error instanceof EnlargementNotReadyError)) throw error;
-      const queued = waitsSoFar < MAX_ENLARGEMENT_WAITS ? await queueEnlargementOf(deps,input,p,await matteOf(v),contextFor) : "none";
+      const queued = waitsSoFar < MAX_ENLARGEMENT_WAITS ? await queueEnlargementOf(deps,input,p,await matteOf(v),contextFor,v.matte === "whole" ? [...states.values()].filter(fillsCanvas).map(st=>st.o.channel):undefined) : "none";
       if (queued === "queued") { record(step,"skipped",channels,ENLARGEMENT_WAIT_DETAIL); waiting = stopped = true; return null; }
       if (queued === "ready") { try { return await render(o,v); } catch (again) { if (!(again instanceof EnlargementNotReadyError)) throw again; } }
       record(step,"skipped",channels,"enlargement not ready"); notReady = stopped = true; return null;
@@ -174,9 +182,9 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const failing = (st: OutputState) => st.render ? !ok(st.render) : st.failures.length > 0 || st.o.flags.includes("failed_compliance");
   const judgePending = () => judgeTrigger && !(verdict?.passed);
   // The planner answers the judge's flags and, while the output breaks a channel rule, that rule's codes too.
-  // After the second cut-out has had its turn.
-  const wholeFrameOpen = (st: OutputState): boolean => currentTrigger.includes("product_removed") && (!secondPossible || st.tried.includes("second_matte")) && (wholeAllowed ??= wholeFrameRoute(p,view).allowed);
-  const diag = (st: OutputState): Repair[] => diagnoseOutput({channel:st.o.channel,trigger:[...new Set<OutputFlag>([...currentTrigger,...(failing(st) ? ["failed_compliance" as const]:[])])],failures:failing(st) ? (st.render ? st.render.compliance.failures:st.failures):[],measured:st.measured,current:st.variant,tried:st.tried,secondMatte:secondPossible,wholeFrame:wholeFrameOpen(st),keptPatch:currentTrigger.includes("leftover_background") && first.source === "model" && view !== WHOLE_FRAME_VIEW && !!patchedFor()});
+  // The second cut-out has its turn first: the ladder's order (MATTE_STEPS).
+  const wholeFrameOpen = (): boolean => !!input.rejudge && currentTrigger.includes("product_removed") && (wholeAllowed ??= wholeFrameRoute(p,view).allowed);
+  const diag = (st: OutputState): Repair[] => diagnoseOutput({channel:st.o.channel,trigger:[...new Set<OutputFlag>([...currentTrigger,...(failing(st) ? ["failed_compliance" as const]:[])])],failures:failing(st) ? (st.render ? st.render.compliance.failures:st.failures):[],measured:st.measured,current:st.variant,tried:st.tried,secondMatte:secondPossible,wholeFrame:wholeFrameOpen(),keptPatch:currentTrigger.includes("leftover_background") && first.source === "model" && view !== WHOLE_FRAME_VIEW && !!patchedFor()});
   const adopt = (st: OutputState, v: RenderVariant, r: RenderOutput) => { st.variant = v; st.render = r; st.measured = r.compliance.measured ?? st.measured; };
   const renderStep = async (st: OutputState, repair: Repair): Promise<void> => {
     st.attempts++; st.tried.push(repair.step);
@@ -200,11 +208,23 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     if (!judgeTrigger || !changedSinceJudge || rejudges >= MAX_REJUDGES_PER_PHOTO) return;
     const passing = targets().filter(st=>ok(st.render));
     if (!passing.length) return;
-    const channel = strictestChannel(passing.map(st=>st.o.channel)), judged = passing.find(st=>st.o.channel === channel)!;
+    const strictest = strictestChannel(passing.map(st=>st.o.channel));
+    // A whole frame: every channel's own image the judge has not seen yet, the strictest first. Otherwise the strictest channel stands for the photo.
+    const wholeRound = passing.some(st=>st.variant.matte === "whole");
+    const looks = wholeRound ? [...states.values()].filter(st=>st.variant.matte === "whole" && ok(st.render) && wholeLooks.get(st.o.id)?.render !== st.render).sort((a,b)=>+(b.o.channel === strictest)-+(a.o.channel === strictest)) : [passing.find(st=>st.o.channel === strictest)!];
     const last = actions.at(-1);
-    try { verdict = await input.rejudge!(judged.o,judged.render!.jpeg!); }
-    catch (error) { if (!(error instanceof LadderStopped)) throw error; record("re_render","failed",[channel],error.message); stopped = true; return; }
-    rejudges++; judgedChannel = channel; changedSinceJudge = false;
+    for (const judged of looks) {
+      try { verdict = await input.rejudge!(judged.o,judged.render!.jpeg!); }
+      catch (error) { if (!(error instanceof LadderStopped)) throw error; record("re_render","failed",[judged.o.channel],error.message); stopped = true; return; }
+      judgedChannel = judged.o.channel;
+      if (!wholeRound) continue;
+      // Nothing else stands behind a whole frame: any problem the judge names fails it, a mark the cut-out had hidden or a collage as much as our own defects.
+      if (problemFlags(verdict.flags).length) verdict = {...verdict,passed:false};
+      wholeLooks.set(judged.o.id,{render:judged.render!,verdict});
+      if (!verdict.passed) break;
+    }
+    if (!verdict) return;
+    rejudges++; changedSinceJudge = false;
     // The round's last step carries the verdict: a step the judge rejects is a failed step, as the record reads it.
     if (last) { last.rejudged = true; if (!verdict.passed) last.result = "failed"; last.detail = `${last.detail ?? ""}; judge: ${verdict.passed ? "passed":verdict.flags.join(",") || "no verdict"}`.replace(/^; /,""); }
     if (!verdict.passed) currentTrigger = ownDefects(verdict.flags).length ? ownDefects(verdict.flags):currentTrigger;
@@ -223,15 +243,20 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
       if (isBusyBackground(p,passthroughFor(),tried)) { record("matte_passthrough","skipped",all.map(st=>st.o.channel),"busy background"); return true; }
       if (passthroughProductLoss(p,tried) > PASSTHROUGH_PRODUCT_LOSS_MAX) { record("matte_passthrough","skipped",all.map(st=>st.o.channel),"background matches the product"); return true; }
     }
+    const going = repair.step === "matte_whole_frame" ? all.filter(fillsCanvas) : all, refused = all.filter(st=>!going.includes(st));
+    for (const st of refused) { st.target = false; st.render = null; st.variant = {...st.variant,matte:"first"}; }
+    const newlyRefused = refused.filter(st=>!wholeFrameRefusedOn(st.o.compliance,st.o.channel)).map(st=>st.o.channel);
+    if (newlyRefused.length) record("matte_whole_frame","skipped",newlyRefused,WHOLE_FRAME_BAND_DETAIL);
+    if (!going.length) return true;
     const results: string[] = [];
-    for (const st of all) {
+    for (const st of going) {
       const v: RenderVariant = {...st.variant,matte:repair.variant.matte};
-      const r = await tryRender(st.o,v,repair.step,all.map(x=>x.o.channel));
+      const r = await tryRender(st.o,v,repair.step,going.map(x=>x.o.channel));
       if (!r) return true;
       adopt(st,v,r);
       results.push(`${st.o.channel}: ${ok(r) ? "ok":codes(r)}`);
     }
-    record(repair.step,all.every(st=>ok(st.render)) ? "passed":"failed",all.map(st=>st.o.channel),`${repair.why}; ${results.join(", ")}`);
+    record(repair.step,going.every(st=>ok(st.render)) ? "passed":"failed",going.map(st=>st.o.channel),`${repair.why}; ${results.join(", ")}`);
     changedSinceJudge = true;
     return true;
   };
@@ -247,7 +272,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   }
   if (waiting) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set(),waiting:true}; }
   if (notReady) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
-  const written = [...states.values()].filter(st=>st.render && ok(st.render) && !judgePending());
+  const written = [...states.values()].filter(st=>st.render && ok(st.render) && !judgePending() && (st.variant.matte !== "whole" || (wholeLooks.get(st.o.id)?.render === st.render && wholeLooks.get(st.o.id)!.verdict.passed)));
   if (!written.length) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
   // A channel the matte change broke and no repair mended keeps its first image; the record says so.
   const kept = [...states.values()].filter(st=>st.render && st.variant.matte !== "first" && !written.includes(st));
@@ -264,8 +289,8 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   }
   const fixed = new Set<string>();
   for (const st of written) {
-    const o = st.o, done = verdict;
-    const qaScores = o.qaScores && done ? {...o.qaScores,...(done.scores ? {edge_quality:done.scores.edge_quality ?? o.qaScores.edge_quality,background_clean:done.scores.background_clean ?? o.qaScores.background_clean,product_intact:done.scores.product_intact ?? o.qaScores.product_intact}:{}),rejudge:{step:[...actions].reverse().find(a=>a.rejudged)?.step ?? null,channel:judgedChannel,flags:done.flags}}:o.qaScores;
+    const o = st.o, done = wholeLooks.get(o.id)?.verdict ?? verdict;
+    const qaScores = o.qaScores && done ? {...o.qaScores,...(done.scores ? {edge_quality:done.scores.edge_quality ?? o.qaScores.edge_quality,background_clean:done.scores.background_clean ?? o.qaScores.background_clean,product_intact:done.scores.product_intact ?? o.qaScores.product_intact}:{}),rejudge:{step:[...actions].reverse().find(a=>a.rejudged)?.step ?? null,channel:wholeLooks.has(o.id) ? o.channel:judgedChannel,flags:done.flags}}:o.qaScores;
     if (await writeRender(deps,input,o,st.render!,actions,{sourceFlags,qaScores,variant:st.variant})) fixed.add(o.id);
   }
   await recordActions(deps,input,input.outputs.filter(o=>!written.some(st=>st.o.id === o.id)),actions);
@@ -277,8 +302,9 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
  * and this matte alone; the rows the photo has stay wanted): "queued" when a row is on its way (the repair waits), "ready" when the row was
  * made already or is terminal and the readiness is primed (the render holds a terminal one), "none" without a batch route or with nothing to make.
  */
-async function queueEnlargementOf(deps: CatalogDeps, input: ResolvePhotoInput, p: Prepared, matte: Matte, contextFor: (o: Output) => Partial<RenderInput>): Promise<"queued" | "ready" | "none"> {
-  const {batch,product,source,underClaim} = input, be = batchEnlargement(deps,batch);
+async function queueEnlargementOf(deps: CatalogDeps, input: ResolvePhotoInput, p: Prepared, matte: Matte, contextFor: (o: Output) => Partial<RenderInput>, channels?: ChannelId[]): Promise<"queued" | "ready" | "none"> {
+  // `channels`: only these will be rendered with this matte (a whole frame, the channels it fills): no enlargement is paid for the others.
+  const {product,source,underClaim} = input, batch = channels ? {...input.batch,channels}:input.batch, be = batchEnlargement(deps,batch);
   if (!be) return "none";
   const canvases = new Map(input.outputs.map(o=>[o.channel,contextFor(o).canvas])), canvasOf = (id: ChannelId) => canvases.get(id);
   const shots = [{source,p,alpha:matte.alpha,matteModel:matte.model}], wanted = new Set([source.id]);

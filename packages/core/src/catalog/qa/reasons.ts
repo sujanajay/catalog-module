@@ -13,6 +13,7 @@ export function plainFailure(code: string, channel = "this marketplace"): string
     styli_anchor: "the product does not sit on the Styli bottom guide",
     noon_wide: "a wide shot needs 5% side margins on Noon",
     background: `the background around the product is not the exact colour ${channel} requires`,
+    whole_frame_band: `the whole photo does not fill the ${channel} image, and we never crop`,
     background_light: `the background colour set for ${channel} is darker than the light grey (or white image 1) the rules require`,
   };
   return rules[code] ?? `the file format or size is not what ${channel} accepts`;
@@ -21,6 +22,8 @@ export function plainFailure(code: string, channel = "this marketplace"): string
 export function plainFailures(failures: readonly string[], channel?: string): string {
   return [...new Set(failures.map(f => plainFailure(f.split(":")[0]!, channel)))].join("; ");
 }
+/** A hold or drop on a channel the whole-frame route left out (wholeFrameRefusedOn). */
+export const wholeFrameBandSentence = (channel: string): string => `The whole photo would leave a band on ${channel} and we never crop, so it is not delivered there.`;
 /** What each repair step did, in operator words, for the tried sentence. Steps with no operator meaning are left out. */
 export const STEP_WORDS: Record<string, string> = {
   shadow_off: "the added shadow removed", source_shadow_off: "the photo's own shadow removed", refit: "a smaller fit", reshift: "moved onto the guide",

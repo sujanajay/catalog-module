@@ -130,7 +130,7 @@ export const PASSTHROUGH_BORDER_TOLERANCE = 6;
 export const PASSTHROUGH_WHITE_TOLERANCE = 1;
 /** The model name of the pass-through and whole-photo mattes (matte-guard.ts). */
 export const PASSTHROUGH_MODEL = "passthrough";
-/** The model name of the whole-frame matte (matte-guard.ts wholeFrameMatte): a close-up kept as it is, every side treated as cut in the source. */
+/** The model name of the whole-frame matte (matte-guard.ts wholeFrameMatte): a close-up kept as it is, every side treated as cut in the source and none trimmed. */
 export const WHOLE_FRAME_MODEL = "whole-frame";
 /**
  * Whether a fill may also trim sides the source did not cut: a product cut on both ends of one axis then fills that axis even with
@@ -139,13 +139,13 @@ export const WHOLE_FRAME_MODEL = "whole-frame";
  */
 export const TRIM_UNCUT_SIDES = false;
 /**
- * Sides a cut-fill trim may never take, by rule. A pass-through or whole-photo matte keeps the photo's own frame, so
+ * Sides a cut-fill trim may never take, by rule. A pass-through, whole-photo or whole-frame matte keeps the photo's own frame, so
  * nothing in it tells a product edge from a background edge and no side is trimmed (`noTrim`; the product is fitted
- * with the band note). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
+ * with the band note, and a whole frame that would show a band is not delivered: wholeFrameBandFailure). On a model photo (`apparel_model`) the top cut side holds the head or the face, so it is never
  * trimmed (`protectTop`); the overflow comes off the bottom instead, or the product is fitted.
  */
 export function trimRules(productType: ProductType | null | undefined, matte: Pick<Matte, "model">): { noTrim: boolean; protectTop: boolean; wholeFrame: boolean } {
-  return { noTrim: matte.model === PASSTHROUGH_MODEL, protectTop: productType === "apparel_model", wholeFrame: matte.model === WHOLE_FRAME_MODEL };
+  return { noTrim: matte.model === PASSTHROUGH_MODEL || matte.model === WHOLE_FRAME_MODEL, protectTop: productType === "apparel_model", wholeFrame: matte.model === WHOLE_FRAME_MODEL };
 }
 export interface ShotGeometryOptions {
   /** The source pixels (RGB, 3 bytes per pixel): finds the pad band around the real photo. Without them only the thin border counts. */
@@ -159,7 +159,7 @@ export interface ShotGeometryOptions {
   noTrim?: boolean | undefined;
   /** The top cut side may not be trimmed (trimRules: a model photo's head). */
   protectTop?: boolean | undefined;
-  /** The matte is a whole-frame close-up (trimRules): every side counts as cut, so the frame fills the canvas with the existing fill. */
+  /** The matte is a whole-frame close-up (trimRules): every side counts as cut, so a frame of the canvas's shape sits flush on every side. Never trimmed (`noTrim`). */
   wholeFrame?: boolean | undefined;
   /** See TRIM_UNCUT_SIDES: a model photo's top is protected even where it is not cut. */
   trimUncut?: boolean | undefined;
@@ -497,6 +497,26 @@ export function cutFillCrop(box: BBox, scale: number, safe: Size, cut: CutEdges,
   return { x, y, w, h };
 }
 
+/** How far (canvas px) a cut side may sit from its canvas edge and still read as flush: the rounding of a fitted scale. */
+export const FLUSH_TOLERANCE_PX = 1;
+/** The cut sides a plan leaves more than FLUSH_TOLERANCE_PX from their canvas edge. */
+export function floatingSides(plan: Pick<CanvasPlan, "w" | "h" | "productBox" | "cut">): Side[] {
+  const product = plan.productBox, cut = plan.cut ?? NO_CUT;
+  if (!product) return [];
+  return SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > FLUSH_TOLERANCE_PX);
+}
+const ALL_CUT: CutEdges = Object.freeze({ top: true, bottom: true, left: true, right: true });
+const NO_ROOM: TrimRoom = Object.freeze({ top: 0, bottom: 0, left: 0, right: 0 });
+/**
+ * Whether a whole frame of this size, untrimmed, fills the channel's canvas within FLUSH_TOLERANCE_PX: the same plan renderSource makes of it.
+ * Where it does not, the channel gets no whole-frame image (wholeFrameBandFailure): that channel keeps the photo held.
+ */
+export function wholeFrameFills(spec: ChannelSpec, source: Size, opts: { canvas?: Size | undefined; fitScale?: number | undefined } = {}): boolean {
+  return !floatingSides(planCanvas(spec, { x: 0, y: 0, w: source.w, h: source.h }, source, { cut: ALL_CUT, trimRoom: NO_ROOM, canvas: opts.canvas, fitScale: opts.fitScale })).length;
+}
+/** The compliance failure of a whole-frame render that would float: a band beside a frame that was never cut is the worst look of a close-up, so it is never made. */
+export const wholeFrameBandFailure = (sides: readonly Side[], label: string): string => `whole_frame_band: the whole photo leaves a band at the ${sides.join(" and ")} on ${label}`;
+
 /** The canvas minus the channel's margins; a side cut in the source gets margin 0 so the cut sits flush with the canvas edge. */
 export function safeBoxFor(spec: ChannelSpec, canvas: Size, wide: boolean, cut: CutEdges = NO_CUT): BBox {
   const m = spec.margins, horizontal = !m.sidesOnlyWhenWide || wide;
@@ -714,7 +734,14 @@ export async function renderSource(input: RenderInput): Promise<RenderOutput> {
   if (spec.uniformScaleDefault && !plan.detailShot && input.uniformScale !== undefined && input.uniformScale > plan.scale) result.notes.push("Could not keep the same size as the other angles without cutting; fitted instead");
   const color = backgroundOf(spec, shotNumber), product = plan.productBox!;
   // The sheet says a cut edge sits flush with the edge of the image; name every cut side where it does not.
-  const floating = SIDES.filter(side => cut[side] && (side === "top" ? product.y : side === "bottom" ? plan.h - product.y - product.h : side === "left" ? product.x : plan.w - product.x - product.w) > 1);
+  const floating = floatingSides(plan);
+  // A whole frame that does not fill this canvas is refused here, before any enlargement is asked for and whichever path renders it, so it can never be published floating.
+  if (matte.model === WHOLE_FRAME_MODEL && floating.length) {
+    result.compliance = { ok: false, failures: [wholeFrameBandFailure(floating, spec.label)] };
+    result.flags.push("failed_compliance");
+    result.notes.push(`The image we made did not meet ${spec.label}'s rules: ${plainFailures(result.compliance.failures, spec.label)}.`);
+    return result;
+  }
   // Only a logo, text or a buckle blocks a trim in the note's words; a side protected by rule (trimRules) gets the plain note.
   const blocked = (plan.trimBlocked ?? []).filter(side => !geometry?.trimProtected?.includes(side));
   if (floating.length) result.notes.push(blocked.length

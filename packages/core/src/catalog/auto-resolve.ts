@@ -40,7 +40,7 @@ export function judgeSawSourceCut(flags: readonly string[], qaScores?: Record<st
  * - `re_render`: one plain re-render with the same inputs (a transient encoder fault).
  * - `matte_patch_removed`: a backdrop patch the judge saw left in the cut-out taken out of it (withoutKeptBackground, matte-guard.ts; per photo).
  * - `second_matte`: the policy's second cut-out model (per photo).
- * - `matte_whole_frame`: a frame-filling close-up kept exactly as it is (wholeFrameRoute, matte-guard.ts; per photo, only for `product_removed`, after the second cut-out).
+ * - `matte_whole_frame`: a frame-filling close-up kept exactly as it is, never trimmed (wholeFrameRoute, matte-guard.ts; per photo, only for `product_removed`, after the second cut-out), on the channels it fills.
  * - `matte_passthrough`: the whole frame kept (matte-guard.ts; per photo, only for `product_removed`).
  */
 export const RENDER_STEPS = ["reshift", "reencode", "shadow_off", "source_shadow_off", "refit", "re_render"] as const;
@@ -81,7 +81,7 @@ export interface Diagnosis {
   keptPatch?: boolean;
   /** A second cut-out model may exist for this photo (the worker still checks the service). */
   secondMatte: boolean;
-  /** The whole frame may be kept as it is (wholeFrameRoute): the judge read a close-up, and nothing in the pixels argues against it. */
+  /** The whole frame may be kept as it is (wholeFrameRoute): the judge read a close-up, and nothing in the pixels argues against it. No pass-through is offered then. */
   wholeFrame?: boolean;
 }
 
@@ -132,7 +132,8 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
   if (d.trigger.includes("leftover_background") && d.keptPatch) add("matte_patch_removed", "photo", { matte: "patched" }, "the backdrop patch taken out");
   if (d.secondMatte && (d.current.matte === "first" || d.current.matte === "patched") && (d.trigger.includes("halo") || d.trigger.includes("leftover_background") || d.trigger.includes("product_removed"))) add("second_matte", "photo", { matte: "second" }, "second cut-out model");
   if (d.trigger.includes("product_removed") && d.wholeFrame) add("matte_whole_frame", "photo", { matte: "whole" }, "a close-up kept as it is");
-  if (d.trigger.includes("product_removed")) add("matte_passthrough", "photo", { matte: "passthrough" }, "the whole frame kept");
+  // The route open or taken, the pass-through is no next step: on the same frame it would only bring back the band the route refuses, on channels the judge did not see.
+  if (d.trigger.includes("product_removed") && !d.wholeFrame && !tried.has("matte_whole_frame")) add("matte_passthrough", "photo", { matte: "passthrough" }, "the whole frame kept");
   // Cheapest first: a move or a re-encode before a shadow change, a refit, a plain re-render, then the matte steps.
   const order: RepairStep[] = [...RENDER_STEPS, ...MATTE_STEPS];
   return out.sort((a, b) => order.indexOf(a.step) - order.indexOf(b.step));
@@ -141,6 +142,8 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
 /** Every step a record may carry: the repairs, the matte stage's integrity ladder (`matte_check`, `padded_matte`), `flush_cut`, `matte_retry`, and the retired ladder's `smaller_fit` and `apply` on old rows. */
 /** The detail of the step a repair parks on: it needs an enlargement that is now queued, and runs again once that has settled. */
 export const ENLARGEMENT_WAIT_DETAIL = "waiting for the enlargement";
+/** The detail of the whole-frame step on a channel it refused: the untrimmed frame does not fill that canvas (wholeFrameFills), so the channel keeps the photo held. */
+export const WHOLE_FRAME_BAND_DETAIL = "the whole frame does not fill this canvas";
 /** A photo parks a chunk at most this often (an x2 and an x4 image): past it the step is recorded skipped and the hold stands. */
 export const MAX_ENLARGEMENT_WAITS = 2;
 export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte" | "matte_agreement" | "matte_chunk_removed" | "photo_promoted";
@@ -182,6 +185,10 @@ export function actionsOn(compliance: unknown, channel: ChannelId): AutoAction[]
 /** The repair of this output parked for an enlargement and has not run again yet. */
 export function waitingForEnlargement(compliance: unknown): boolean {
   return autoActionsOf(compliance).at(-1)?.detail === ENLARGEMENT_WAIT_DETAIL;
+}
+/** The whole-frame route left this channel out: its image would have shown a band, so its hold names that. */
+export function wholeFrameRefusedOn(compliance: unknown, channel: ChannelId): boolean {
+  return actionsOn(compliance, channel).some(action => action.step === "matte_whole_frame" && action.detail === WHOLE_FRAME_BAND_DETAIL);
 }
 /** The compliance measurement recorded on an output (null on rows made before it existed). */
 export function measuredOf(compliance: unknown): RenderMeasured | null {

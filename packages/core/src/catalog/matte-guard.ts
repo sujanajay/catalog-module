@@ -356,16 +356,39 @@ export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">
 }
 
 /**
- * The matte with its kept background chunks (keptBackgroundMask) taken out; null when it has none. `anyDepth` also takes a
- * chunk in the upper half (a backdrop patch at the neck): the guard does not look there, because a pale collar touches the dropped
+ * The most of what a matte keeps that one removal may take out. Measured on the stored mattes (share of the kept area): the good removals reach 73.2%, because a
+ * cut-out that kept its whole backdrop is mostly backdrop (719XF60 9.9, 72YFM_YELLOW 4.8, 72YNI 20.7, 729L610 21.7, 72YEF40 31.0, 789H610 9.7, Z05C7 n2 59.7, n3 57.8,
+ * Z0D5EC n2 73.2); 569F610 loses 82.8, 529A710_D1 86.1. This alone cannot tell a white top from its wall (Z40E29CD878FAA726501DZ shot 1: 15.5), hence the pieces below.
+ */
+export const KEPT_BACKGROUND_REMOVAL_MAX_SHARE = 0.75;
+/**
+ * Pieces (over KEPT_BACKGROUND_REMOVAL_PIECE_SHARE of the frame) a product may be left in by a removal. A backdrop comes away whole and leaves the product in one piece, or two
+ * where it ran between them: every good removal above leaves 1 or 2. Pale fabric matched only in its flat parts falls apart around the folds: Z40E29CD878FAA726501DZ shot 1
+ * leaves 6, 529E410 9, 529E110 12, 529K410 13, 569E920 9, 529A710_D1 6, 569F610 3. Limit: fitted on these photos, no held-out set; the judge still looks at every removal.
+ */
+export const KEPT_BACKGROUND_REMOVAL_MAX_PIECES = 2;
+export const KEPT_BACKGROUND_REMOVAL_PIECE_SHARE = 0.0005;
+
+/**
+ * The matte with its kept background chunks (keptBackgroundMask) taken out; null when it has none, or when taking them out would eat the product (more than
+ * KEPT_BACKGROUND_REMOVAL_MAX_SHARE of what it keeps, or the rest in more than KEPT_BACKGROUND_REMOVAL_MAX_PIECES pieces), which is what a white garment on a near-white
+ * wall looks like. `anyDepth` also takes a chunk in the upper half (a backdrop patch at the neck): the guard does not look there, because a pale collar touches the dropped
  * area as well, so only the judge's `leftover_background` asks for it, and the judge looks at the result.
  */
 export function withoutKeptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Matte, region: BackgroundRegion, opts: { anyDepth?: boolean } = {}): Matte | null {
   const mask = keptBackgroundMask(p, matte.alpha, region, opts);
   if (!mask.some(v => v)) return null;
-  const alpha = Buffer.from(matte.alpha);
-  for (let i = 0; i < mask.length; i++) if (mask[i]) alpha[i] = 0;
-  return { ...matte, alpha };
+  const { width: w, height: h } = p, alpha = Buffer.from(matte.alpha), left = new Uint8Array(w * h);
+  let kept = 0, removed = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (matte.alpha[i]! > 128) kept++;
+    if (mask[i]) { if (matte.alpha[i]! > 128) removed++; alpha[i] = 0; } else if (matte.alpha[i]! > 128) left[i] = 1;
+  }
+  if (removed > kept * KEPT_BACKGROUND_REMOVAL_MAX_SHARE) return null;
+  const { sizes } = components(left, w, h);
+  let pieces = 0;
+  for (let l = 1; l < sizes.length; l++) if (sizes[l]! > w * h * KEPT_BACKGROUND_REMOVAL_PIECE_SHARE) pieces++;
+  return pieces > KEPT_BACKGROUND_REMOVAL_MAX_PIECES ? null : { ...matte, alpha };
 }
 
 export interface MatteIntegrity {
@@ -662,8 +685,8 @@ export function wholePhotoMatte(p: Pick<Prepared, "width" | "height" | "rgb">, r
 
 /**
  * The whole frame as it is, for a close-up the judge read as one (wholeFrameRoute): every pixel opaque, nothing recoloured. No strips are trimmed: plain
- * fabric reads as a strip of the border colour (529E410_D2: 35% of the frame). Its model name makes every side count as cut (render.ts trimRules), so it
- * fills the canvas with the existing fill, and a stored copy stays so.
+ * fabric reads as a strip of the border colour (529E410_D2: 35% of the frame). Its model name makes every side count as cut and none trimmed (render.ts trimRules),
+ * so it sits flush only on a canvas of its own shape; on any other the render refuses it (wholeFrameBandFailure), and a stored copy stays so.
  */
 export function wholeFrameMatte(p: Pick<Prepared, "width" | "height">): Matte {
   const { width: w, height: h } = p;
@@ -679,12 +702,22 @@ export const WHOLE_FRAME_SIDE_FLAT_SHARE = 0.97;
 export const WHOLE_FRAME_SIDE_DELTA = 3;
 /** ... and that median stands this far from the frame's median: flat in another colour than what fills the frame. */
 export const WHOLE_FRAME_SIDE_COLOUR_DELTA = 10;
+/**
+ * A side of the frame shows a white backdrop when more than this share of its outer 1% is neutral near-white (all channels at least WHOLE_FRAME_WHITE_MIN, within
+ * WHOLE_FRAME_WHITE_SPREAD of each other). The flat-side rule above misses a white band over most of the frame (the median is then white), a collar touching the top on part
+ * of the line, and a whole garment on white. Measured on the stored raws: the close-ups that fill the frame hold at most 1% on any side (529A710, 529E410, 529K240, 729H910,
+ * 729M610, 73ZNQ40, 76YAP10), 769F610 4%; whole garments and backdrops 50 to 100% (569H801, 72YFM_YELLOW, 72YNI, SJZBK70).
+ */
+export const WHOLE_FRAME_WHITE_SIDE_MAX_SHARE = 0.1;
+export const WHOLE_FRAME_WHITE_MIN = 240;
+export const WHOLE_FRAME_WHITE_SPREAD = 6;
 
 export interface WholeFrameRoute { allowed: boolean; /** Short technical note for the logs; never shown to operators. */ detail: string }
 /**
  * Whether a photo the judge flagged `product_removed` may keep its whole frame. The judge's view decides (`detail`); the pixels only veto what the
- * route must never publish, whatever the view says: a person in the picture, or a flat strip of backdrop beside the product (a white band above a
- * collar). The render then goes back through the judge, which is the real check; a photo it flags stays held.
+ * route must never publish, whatever the view says: a person in the picture, a flat strip of backdrop beside the product (a white band above a
+ * collar), or white backdrop on a side (a collar touching the top, a whole garment on white). The render then goes back through the judge, which is the real check; a photo it flags stays held.
+ * What only the judge guards: a vignette, a band of another colour over most of the frame, a white shirt whose sides are not near-white, a crop of a person under the skin limit (a neck, dark skin), a scene with no flat side.
  */
 export function wholeFrameRoute(p: Pick<Prepared, "width" | "height" | "rgb">, view: string | null | undefined): WholeFrameRoute {
   if (view !== WHOLE_FRAME_VIEW) return { allowed: false, detail: `view ${view ?? "unknown"}` };
@@ -701,8 +734,13 @@ export function wholeFrameRoute(p: Pick<Prepared, "width" | "height" | "rgb">, v
     const sideBins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
     for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) { const i = at(k, d); for (let c = 0; c < 3; c++) sideBins[c]![rgb[i * 3 + c]!]!++; }
     const own = medianColour(sideBins, length * depth);
-    let near = 0;
-    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) if (delta(rgb, at(k, d), own) <= WHOLE_FRAME_SIDE_DELTA) near++;
+    let near = 0, white = 0;
+    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) {
+      const i = at(k, d), r = rgb[i * 3]!, g = rgb[i * 3 + 1]!, b = rgb[i * 3 + 2]!;
+      if (delta(rgb, i, own) <= WHOLE_FRAME_SIDE_DELTA) near++;
+      if (Math.min(r, g, b) >= WHOLE_FRAME_WHITE_MIN && Math.max(r, g, b) - Math.min(r, g, b) <= WHOLE_FRAME_WHITE_SPREAD) white++;
+    }
+    if (white / (length * depth) > WHOLE_FRAME_WHITE_SIDE_MAX_SHARE) return { allowed: false, detail: `white backdrop on the ${name} side` };
     if (near / (length * depth) >= WHOLE_FRAME_SIDE_FLAT_SHARE && own.some((v, c) => Math.abs(v - median[c]!) > WHOLE_FRAME_SIDE_COLOUR_DELTA)) return { allowed: false, detail: `a flat ${name} side in another colour` };
   }
   return { allowed: true, detail: `view ${view}` };

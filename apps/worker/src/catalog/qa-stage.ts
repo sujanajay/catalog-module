@@ -3,10 +3,10 @@ import { catalogBatches, catalogOutputs, catalogProducts, catalogSourceImages } 
 import { CHANNELS, CUT_BAND_NOTE_START } from "@catalog/core/catalog/channels";
 import { checkCatalogCaps } from "@catalog/core/catalog/qa/caps";
 import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy";
-import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
+import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence, wholeFrameBandSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough, waitingForEnlargement } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough, waitingForEnlargement, wholeFrameRefusedOn } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -352,7 +352,8 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
    const plain=plainPassthrough(o.compliance),lead=leadFlag(o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
    const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
-   const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
+   const band=wholeFrameRefusedOn(o.compliance,o.channel) ? wholeFrameBandSentence(CHANNELS[o.channel].label):"";
+   const why=lead ? [flagDetails(lead,ctx).why,tried,band].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
    const leftOut=o.flags.some(flag=>LEFT_OUT_FLAGS.has(flag));

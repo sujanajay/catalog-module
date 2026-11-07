@@ -89,7 +89,7 @@ export interface Measured {
   outside: { top: number; bottom: number; left: number; right: number };
   anchorDelta: { dx: number; dy: number } | null; bandBreach: boolean; bytes: number;
 }
-export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "background_light" | "inside_safe_box" | "styli_anchor" | "noon_wide";
+export type ComplianceCode = "magic" | "bytes" | "trendyol_name" | "extension" | "format" | "dims" | "density" | "background" | "background_light" | "inside_safe_box" | "styli_anchor" | "noon_wide" | "whole_frame_band";
 /** Codes our own encoder settings decide (not the photo): a second identical failure is a code fault, held for the technical team, never dropped (07 4.6a). */
 export const ENCODER_CODES: readonly ComplianceCode[] = ["dims", "density", "format", "magic", "extension", "trendyol_name"];
 /** The rule codes of a `failures` list ("code: sentence"). */
