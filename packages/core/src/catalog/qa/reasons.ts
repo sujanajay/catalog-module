@@ -50,7 +50,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     halo:["The edge of the product looks rough or shows a halo, often white on white.",'Compare the two images. The product itself is never redrawn; only the background changes. "Use as is" keeps it.'],
     product_removed:["Part of the product went missing when the background was removed.",`Compare the two images. We tried to make it again and could not keep the whole product. "Remove this photo" leaves it out; "Replace photo ${n}" swaps the photo.`],
     matte_passthrough:ctx.plainBackdrop ? ["No cut-out of this photo could be trusted, so only the plain backdrop around the product was replaced. Look at the image before you use it.","Send a better photo in a new batch to replace it."]:["This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out.","Nothing to do."],
-    chart_image:["The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images.","If it is a product photo, tell the technical team."],
+    chart_image:["The check read this photo as a size chart or a text image, so we left it out.","If it is a product photo, tell the technical team."],
     leftover_background:["Some of the original background is still visible around the product.",`Compare the two images. "Use as is" keeps it; "Replace photo ${n}" swaps the photo.`],
     text_or_watermark:["The image still shows text, a watermark or a logo overlay. Marketplaces reject these.","Remove it, or replace it with a clean photo."],
     collage:["This image combines several photos in one. Marketplaces reject these.","Remove it, or replace it with the single photos."],

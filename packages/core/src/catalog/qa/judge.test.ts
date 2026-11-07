@@ -228,7 +228,7 @@ describe("judge views amendment",()=>{
   const fetcher = byModel({"first/judge":chart});
   const result = await judgeOutput(await input({n:5}),{apiKey:"fake",fetch:fetcher});
   expect(result).toMatchObject({verdict:"flag",flags:["chart_image"],view:"chart",wrongItem:{first:false,confirmed:false}});
-  expect(result.reasons).toEqual(["The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images."]);
+  expect(result.reasons).toEqual(["The check read this photo as a size chart or a text image, so we left it out."]);
   expect(Object.values(result.scores).every(score => score === 100)).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(1);
  });

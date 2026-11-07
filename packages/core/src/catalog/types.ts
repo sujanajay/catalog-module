@@ -343,7 +343,7 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to do.",
   text_suspected: () => "",
   chart_image: () =>
-    "The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images. If it is a product photo, tell the technical team.",
+    "The check read this photo as a size chart or a text image, so we left it out. If it is a product photo, tell the technical team.",
   auto_dropped: () =>
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,
