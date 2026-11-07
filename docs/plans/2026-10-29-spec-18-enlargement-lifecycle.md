@@ -457,8 +457,9 @@ never takes a chunk claim; a chunk delivery never waits on a settle.
 
 ### 3.7 Everything else
 
-- QA stage: `enlargement_failed` joins `NOT_JUDGED` and is excluded from `repairable`: no judge call on an image
-  whose hold cannot change, no ladder churn.
+- QA stage: `enlargement_failed` is excluded from `repairable` (no ladder churn). In a batch without auto-decide rules
+  it also gets no judge call, since its hold cannot change. In an auto-decide batch nobody would look at it, so the
+  judge does before it is delivered (R1, 2026-11-07; M1-F3-R1).
 - Resume shortcut (`chunk.ts:461`): applies only when the row's flags do not include `enlargement_failed`; such an
   output is re-rendered (readiness decides again).
 - Ladder variants that need an identity the batch did not want (a second matte moves the box across 2.0x, or above

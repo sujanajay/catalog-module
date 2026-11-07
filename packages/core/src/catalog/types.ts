@@ -21,7 +21,7 @@ export const OUTPUT_FLAGS = [
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
   "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
   "product_removed","chart_image","matte_passthrough","enlargement_failed",
-  // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; may be improved later at the same URL.
+  // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; improved later at the same URL only when a retry exists.
   "provisional",
   // M1 D30 (M1-S6): a follow-up photo that was not added (another batch's live photo has its place, or over the channel limit).
   "not_added",
@@ -83,7 +83,11 @@ export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this mark
 export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
 export const ENLARGEMENT_FAILED_WHAT = "Try again, use it as it is after the warning, replace the photo, or ask the brand for a larger one.";
 /** M1-F3: the sheet note of a `provisional` output (delivered now by an auto-decide rule). Model-free. */
-export const PROVISIONAL_SENTENCE = "Delivered now with the best image we have; it may be improved later at the same link. Nothing to do.";
+export const PROVISIONAL_SENTENCE = "Delivered now with the best image we have. Nothing to do.";
+/** The same, for a plain render the improvement sweep can try again (a failed enlargement a call can make). Stays on the row after the tries end, so it must not read as a promise. Model-free. */
+export const PROVISIONAL_IMPROVES_SENTENCE = "Delivered now with the best image we have. We retry the enlargement for up to 3 days; if it works, a better image replaces this one at the same link. Nothing to do.";
+/** Spec 18 route `none`: the size rule refused the enlargement before any call, so no retry can change it. Model-free. */
+export const ENLARGEMENT_TOO_LARGE_WHY = "This photo is too large to enlarge fully, so it was enlarged the plain way.";
 export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
 /** What to do when "Try again" cannot run (a size refusal, or a batch that has stopped): the card offers no Try again. */
 export const ENLARGEMENT_FAILED_WHAT_NO_RETRY = "Use it as it is after the warning, replace the photo, or ask the brand for a different one.";

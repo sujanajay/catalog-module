@@ -121,3 +121,64 @@ describe("QA triage: hard holds only", () => {
   expect(triageProduct(outputs).has(decided.id)).toBe(false);
  });
 });
+
+describe("QA triage: a failed enlargement (spec 18, M1 D40)", () => {
+ const judged = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs.map(o => ({qaScores:{overall:90},...o})), [], {judgedFailedEnlargement:true}).get(target.id);
+ const early = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs, [], {judgedFailedEnlargement:true}).get(target.id);
+ it("without the judge first (no auto-decide rules) it always holds as not enlarged, whatever else it carries", () => {
+  for (const flags of [["enlargement_failed"], ["enlargement_failed", "small_source"], ["enlargement_failed", "fallback_matte"]] as OutputFlag[][]) {
+   const o = out(2, flags);
+   expect(action([out(1), o, out(3), out(4)], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+  }
+ });
+ it("judged with no other problem: not enlarged", () => {
+  const o = out(1, ["enlargement_failed"]);
+  expect(judged([o], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+ });
+ it("a judged visible defect takes its normal route: held, or left out when the channel can do without it", () => {
+  for (const flag of ["product_removed", "halo", "leftover_background", "text_or_watermark"] as const) {
+   const first = out(1, ["enlargement_failed", flag]);
+   expect(judged([first], first)).toMatchObject({action:"hold",cause:"visible_defect"});
+   const spare = out(3, ["enlargement_failed", flag]);
+   expect(judged([out(1), out(2), spare], spare)).toMatchObject({action:"drop"});
+   const needed = out(2, ["enlargement_failed", flag]);
+   expect(judged([out(1), needed], needed)).toMatchObject({action:"hold",cause:"visible_defect"});
+  }
+ });
+ it("one the judge did not see is never delivered: left out when the channel can do without it, else held", () => {
+  for (const flag of ["qa_cap", "qa_unavailable"] as const) {
+   const spare = out(3, ["enlargement_failed", flag]);
+   expect(judged([out(1), out(2), spare], spare)).toMatchObject({action:"drop"});
+   const needed = out(2, ["enlargement_failed", flag]);
+   expect(judged([out(1), needed], needed)).toMatchObject({action:"hold",cause:"unusable"});
+   const first = out(1, ["enlargement_failed", flag]);
+   expect(judged([first, out(2), out(3)], first)).toMatchObject({action:"hold",cause:"unusable"});
+   // Any other unseen image still follows the `unchecked` rule.
+   const plain = out(1, [flag]);
+   expect(judged([plain], plain)).toMatchObject({action:"hold",cause:"unchecked"});
+  }
+ });
+ it("one the judge has not reached yet is left for the QA stage: not delivered, held or left out", () => {
+  for (const flags of [["enlargement_failed"], ["enlargement_failed", "fallback_matte"]] as OutputFlag[][]) {
+   const spare = out(3, flags), first = out(1, flags);
+   expect(early([out(1), out(2), spare], spare)).toMatchObject({action:"none"});
+   expect(early([first], first)).toMatchObject({action:"none"});
+  }
+ });
+ it("no scores does not mean not reached: a capped row and a row with no staged image are still decided", () => {
+  const capped = out(1, ["enlargement_failed", "qa_cap"]);
+  expect(early([capped], capped)).toMatchObject({action:"hold",cause:"unusable"});
+  const notMade = out(1, ["enlargement_failed"], {stagingUri:null});
+  expect(early([notMade], notMade)).toMatchObject({action:"hold",cause:"not_enlarged"});
+ });
+ it("a wrong item and a collage come first, with or without the judge", () => {
+  const wrong = out(1, ["enlargement_failed", "different_product"]), collage = out(1, ["enlargement_failed", "collage"]);
+  expect(judged([wrong], wrong)).toMatchObject({action:"hold",cause:"wrong_item"});
+  expect(judged([collage], collage)).toMatchObject({action:"hold",cause:"collage"});
+  expect(action([wrong], wrong)).toMatchObject({action:"hold",cause:"wrong_item"});
+ });
+ it("never goes live as a plain note: a non-visible problem that would be noted is delivered by the not-enlarged rule, so it stays provisional and tracked", () => {
+  const o = out(2, ["enlargement_failed", "orientation"]);
+  expect(judged([out(1), o], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+ });
+});

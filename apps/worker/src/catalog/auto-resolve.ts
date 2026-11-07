@@ -67,8 +67,9 @@ export async function preparePrimed(deps: CatalogDeps, input: { batch: Batch; so
 /** The render context of the batch's pinned route (the plain path when it has none on this worker). */
 /** The batch's render context: its pinned upscalers and (M3-S1) the channel values from the M5 registry. */
 const routeContext = async (deps: CatalogDeps, batch: Batch): Promise<Partial<RenderInput>> => { const be = batchEnlargement(deps,batch); return {upscaler:be?.x2 ?? null,upscalerX4:be?.x4 ?? null,channelRules:await deps.channelRules(batch.rulesetVersion)} as Partial<RenderInput>; };
+const rendered = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg;
 // Spec 18 lifecycle 3.7: an image held for its enlargement is never an answer the ladder can accept.
-const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => !!r && r.status === "ok" && r.compliance.ok && !!r.jpeg && !r.flags.includes("enlargement_failed");
+const ok = (r: RenderOutput | undefined | null): r is RenderOutput & { jpeg: Buffer } => rendered(r) && !r.flags.includes("enlargement_failed");
 const codes = (r: RenderOutput) => r.compliance.failures.map(f => f.split(":")[0]).join(",") || r.notes.join("; ") || r.status;
 /** The context the first render used, read back from the row: one canvas per product, Styli's size kept. */
 const rowContext = (o: Output): Partial<RenderInput> => ({...(o.canvasW > 0 && o.canvasH > 0 ? {canvas:{w:o.canvasW,h:o.canvasH}}:{}),...(o.channel === "styli" && o.scale > 0 ? {uniformScale:o.scale}:{})});
@@ -114,7 +115,10 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     second = null;
     if (!secondPossible) return second;
     const health = await deps.matting.health();
-    if (!health.models.some(m => m.id === secondModel)) return second;
+    if (!health.models.some(m => m.id === secondModel)) {
+      deps.log("catalog second cut-out model not served",{severity:"WARNING",batchId:input.batch.id,productId:product.id,sourceImageId:source.id,model:secondModel,served:health.models.map(m=>m.id)});
+      return second;
+    }
     await underClaim(async()=>{});
     const matte = await deps.matteFor(p,deps.matting,secondModel!,{},trace);
     second = matte.source === "model" ? matte : null;
@@ -321,7 +325,8 @@ export async function flushCutPhoto(deps: CatalogDeps, input: FlushCutInput): Pr
  * M1-F3-R1, M1 D40: image 1 is held on every channel and another photo of the product passed. The two photos change places:
  * the best other photo showing the whole product (pickPromotion) becomes image 1 and the held photo takes its number, so a
  * listing never leads with a gap. Both are rendered again at their new numbers (image 1 has its own canvas colour on some
- * channels), and nothing changes unless every render passes. Staged in a folder of their own (a public copy needs the staged file to carry the public name), so a stop part way leaves the
+ * channels), and nothing changes unless every render passes. A held row that already carries `enlargement_failed` passes with it,
+ * since it stays held and unpublished at its new number; the promoted photo never does. Staged in a folder of their own (a public copy needs the staged file to carry the public name), so a stop part way leaves the
  * rows and their staged images as they were. Returns true when the photos changed places.
  */
 export async function promoteOverHeldPhoto(deps: CatalogDeps, input: { batch: Batch; product: Product; policy: ResolvedPolicy; underClaim: UnderClaim }): Promise<boolean> {
@@ -345,7 +350,8 @@ export async function promoteOverHeldPhoto(deps: CatalogDeps, input: { batch: Ba
         await underClaim(async()=>{});
         const variant = variantOf(o.compliance);
         const r = (await deps.renderAllChannels(prepared, matte, [o.channel], { shotNumber: n, productType: product.productType ?? "other", identifier: product.identifier, publicObjectPath: publicObjectPath(batch.brandSlug, product.pathKey, o.channel, n, batch.isTest), ...rowContext(o), ...variantOptions(variant, shadowAllowed), ...route, trace }))[o.channel];
-        if (!ok(r)) { deps.log("catalog image 1 not replaced", { batchId: batch.id, productId: product.id, channel: o.channel, codes: codes(r) }); return false; }
+        const passes = source === from && o.flags.includes("enlargement_failed") ? rendered : ok;
+        if (!passes(r)) { deps.log("catalog image 1 not replaced", { batchId: batch.id, productId: product.id, channel: o.channel, codes: codes(r) }); return false; }
         made.push({ o, source, n, r, jpeg: r.jpeg, variant });
       }
     } catch (error) {

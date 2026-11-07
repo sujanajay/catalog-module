@@ -14,6 +14,7 @@ import type { EnlargeTaskBody } from "@catalog/core/tasks";
 import { afterUnpark, batchEnlargement, derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, photosWantingEnlargement, primeReadiness, productHasQueuedEnlargement, reconcileEnlargements, type PhotoShot } from "./enlarge";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { EnlargementNotReadyError, isCpuUpscalerId } from "@catalog/core/catalog/upscale";
+import { isConnectionError } from "@catalog/core/db/connection-error";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd, upscaleCallUsd } from "@catalog/core/catalog/cost";
 import type { VendorCall } from "@catalog/core/catalog/matte-routing";
@@ -45,6 +46,13 @@ export const QA_BACKOFF_DEADLINE_MARGIN_MS = 120_000;
  * Spec 15 E3 threshold (the fifth real error of one task fails the chunk), counted by this code in the batch's
  * `counts.chunkErrors` (spec 17 G4). Not X-CloudTasks-TaskRetryCount: that also counts 429 and 503 attempts
  * that never reached this handler, so with unlimited queue retries one error after a 429 storm would fail a chunk.
+ * A lost database or storage connection counts here too, with two differences (isConnectionError): it is not a stall,
+ * and a delivery that finished a photo starts the count again, so only errors with no photo finished between them add
+ * up. With the chunk queue's backoff (10, 20, 40, 60 s; infra/lib/queues.sh) 5 in a row is about 130 s plus the
+ * deliveries' own time: a shorter wobble fails nothing, a longer one with no photo finishing fails the chunk. The loop
+ * is bounded because a chunk has a fixed number of photos, and each one finishes once per stage. A database too far
+ * gone to claim the chunk or save the count is counted by nothing here; the queue's retry window (1800 s) and the sweep
+ * end that case, as before.
  */
 export const CHUNK_MAX_ERRORS = 5;
 const OWNERSHIP_CHANGED = "Chunk ownership changed.";
@@ -336,12 +344,9 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       }
       // 08: an eval batch runs exactly its forced policy (source manual), so each run measures one matte model.
       const forced=!!batch.options.evalSet && batch.isTest && policy.source==="manual";
-      let productPolicy=forced ? {...policy} : {...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
-      if(!forced && product.productType==="other" && sources.some(source=>source.flags.includes("transparent"))) {
-       // Transparent material gets the policy's second cut-out model (a deployed one); the first becomes the ladder's second choice.
-       const second=productPolicy.matteModelSecond;
-       if(second && second!==productPolicy.matteModel) productPolicy={...productPolicy,matteModel:second,matteModelSecond:productPolicy.matteModel};
-      }
+      // A product flagged transparent uses the policy's first model like any other: sending it to the second model first
+      // was never measured, and a live image would change for it.
+      const productPolicy=forced ? {...policy} : {...await deps.resolvePolicy(batch.brandSlug,product.productType ?? "other"),qaModel:policy.qaModel,qaModelSecond:policy.qaModelSecond};
       // Threshold, floor, mode and sampling follow the product's policy; the judge stays the batch's (4.4).
       if(chunk.stage==="qa") {
         const qa=await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id,{shouldStop:()=>!budgetLeft(),onPhoto:photoDone,photoConcurrency:photoLimit});
@@ -483,6 +488,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             const {p,alpha} = await loadShotFromMatte(deps,source,matteUri,trace);
             ready[at] = {source,p,matte:{alpha,width:p.width,height:p.height,model:source.matteModel ?? productPolicy.matteModel,ms:source.matteMs ?? 0,source:source.flags.includes("alpha_source") ? "alpha_source":"model",target:null,sentLongSide:null}};
           } catch(error) {
+            if (isConnectionError(error)) throw error;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status:"failed",reason:error instanceof Error ? error.message : String(error),updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending"))));
           }
         });
@@ -538,7 +544,11 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             // M0-F2-R2, R3: the staged bytes, hashed while in memory, become the output's version in the same write.
             const asset = rendered.jpeg ? await imageAsset(rendered.jpeg,uri,"image/jpeg"):null;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,contentVersionId:asset ? await recordOutputVersion(tx,{output:{...output,flags},source,product,batch,asset}):null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
-          } catch(error) { if (error instanceof EnlargementNotReadyError) throw error; const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);}); }
+          } catch(error) {
+            // A lost database or storage connection says nothing about the photo: the chunk is redelivered (see CHUNK_MAX_ERRORS).
+            if (error instanceof EnlargementNotReadyError || isConnectionError(error)) throw error;
+            const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);});
+          }
           // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
           // before anything is held, with the fix the measured failure asks for, on the failing channel only.
           const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
@@ -550,7 +560,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
               contextFor:row=>({...(productPlan(row.channel) ? {canvas:productPlan(row.channel)!.canvas}:{}),...(row.channel==="styli" && uniformScale!==undefined ? {uniformScale}:{})})});
           } catch(error) {
             // The ladder only improves an image; the photo keeps its flags (and its decision path) when it breaks.
-            if (error instanceof Error && /ownership changed/.test(error.message)) throw error;
+            if ((error instanceof Error && /ownership changed/.test(error.message)) || isConnectionError(error)) throw error;
             deps.log("catalog auto-resolve failed",{batchId:batch.id,sourceImageId:source.id,error:error instanceof Error ? error.message:String(error)});
           }
           if (outputs.length) await underClaim(photoDone);
@@ -640,15 +650,17 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     // Terminal (the chunk is marked failed below) is ERROR, a retried attempt WARNING: the alert counts ERROR only.
     // An Error object is passed whole, so a terminal line carries its stack for Error Reporting (the line shows its message).
     // A count that cannot be saved (the database is down too) is not terminal: the failure is still logged and retried.
-    const errors = await recordError().catch(()=>null);
+    const connection = isConnectionError(error);
+    const errors = await recordError(connection && await finishedAPhoto().catch(()=>false)).catch(()=>null);
     const terminal = errors !== null && errors >= CHUNK_MAX_ERRORS;
     deps.log("chunk failed",{severity:terminal ? "ERROR":"WARNING",batchId:chunk.batchId,chunkId:chunk.id,stage:chunk.stage,attempt:chunk.attempt,errors,retryCount:opts.retryCount ?? 0,error:error instanceof Error ? error:reason});
     if (terminal) {
       if (!(await failChunk(reason,`Processing stopped after repeated errors: ${reason}`))) return answer(200,"lost");
       return answer(200,"failed");
     }
-    // The same task retries at the same step and claims the released row.
-    await deps.db.update(catalogChunks).set({status:"queued",taskName:null,leaseUntil:null}).where(ownsClaim());
+    // The same task retries at the same step and claims the released row. A lost connection is a wait on a dependency,
+    // as for an enlargement above: its progress time is set, so the next claim does not count it among the stalls.
+    await deps.db.update(catalogChunks).set({status:"queued",taskName:null,leaseUntil:null,...(connection ? {progressAt:deps.now()}:{})}).where(ownsClaim());
     return answer(503,"retry","failed");
   } finally {
     stopHeartbeat();
@@ -688,10 +700,16 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
     try { await redispatchUnstartedChunks(deps.db,deps.enqueue,chunk!.batchId,{now:deps.now(),log:deps.log}); }
     catch (error) { deps.log("chunk redispatch failed",{severity:"WARNING",batchId:chunk!.batchId,error:error instanceof Error ? error.message:String(error)}); }
   }
-  /** Counts this real error against the chunk's current task (stage, step) in one atomic write; returns the count. */
-  async function recordError():Promise<number> {
+  /** A photo of this delivery reached its final write: read back, so a write that rolled back does not count. */
+  async function finishedAPhoto():Promise<boolean> {
+    if (!photos) return false;
+    const [row] = await deps.db.select({progressAt:catalogChunks.progressAt}).from(catalogChunks).where(eq(catalogChunks.id,chunk!.id));
+    return !!row?.progressAt && +row.progressAt > +started;
+  }
+  /** Counts this real error against the chunk's current task (stage, step) in one atomic write; returns the count. `restart`: it is the first since a finished photo. */
+  async function recordError(restart = false):Promise<number> {
     const {id,stage,step} = chunk!, entry = sql`${catalogBatches.counts}->'chunkErrors'->${id}::text`;
-    const errors = sql`CASE WHEN ${entry}->>'stage' = ${stage}::text AND (${entry}->>'step')::int = ${step}::int THEN (${entry}->>'errors')::int + 1 ELSE 1 END`;
+    const errors = restart ? sql`1` : sql`CASE WHEN ${entry}->>'stage' = ${stage}::text AND (${entry}->>'step')::int = ${step}::int THEN (${entry}->>'errors')::int + 1 ELSE 1 END`;
     const [row] = await deps.db.update(catalogBatches)
       .set({counts:sql`${catalogBatches.counts} || jsonb_build_object('chunkErrors',coalesce(${catalogBatches.counts}->'chunkErrors','{}'::jsonb) || jsonb_build_object(${id}::text,jsonb_build_object('stage',${stage}::text,'step',${step}::int,'errors',${errors})))`})
       .where(eq(catalogBatches.id,chunk!.batchId)).returning({errors:sql<number>`(${entry}->>'errors')::int`});

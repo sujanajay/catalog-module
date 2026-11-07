@@ -44,6 +44,17 @@ const provisionalPlain = sql`${catalogOutputs.flags} @> '["provisional", "enlarg
 /** The same condition on `catalog_outputs AS o` (raw queries); catalog_outputs_provisional_plain_idx (0015) serves it. */
 const provisionalPlainO = sql.raw(`o.flags @> '["provisional", "enlargement_failed"]'::jsonb AND o.is_live AND o.status = 'verified' AND o.decision IS NULL`);
 
+/** What can still happen to a photo's failed enlargement: `retry` a call can make one (the sweep's rule), `too_large` only the size rule's refusal (route `none`). */
+export type EnlargementOutlook = "retry" | "too_large";
+/** The outlook per photo of the batch, from its failed wanted rows (`sourceImageIds` narrows it). A photo with neither kind of row is absent. */
+export async function enlargementOutlooks(db: Db, batchId: string, sourceImageIds?: readonly string[]): Promise<Map<string, EnlargementOutlook>> {
+  const rows = await db.select({ sourceImageId: catalogEnlargements.sourceImageId, route: catalogEnlargements.route }).from(catalogEnlargements)
+    .where(and(eq(catalogEnlargements.batchId, batchId), eq(catalogEnlargements.wanted, true), eq(catalogEnlargements.status, "failed"), ...(sourceImageIds ? [inArray(catalogEnlargements.sourceImageId, [...sourceImageIds])] : [])));
+  const outlooks = new Map<string, EnlargementOutlook>();
+  for (const row of rows) if (row.route !== "none") outlooks.set(row.sourceImageId, "retry"); else if (!outlooks.has(row.sourceImageId)) outlooks.set(row.sourceImageId, "too_large");
+  return outlooks;
+}
+
 /**
  * Review round 3 (P2-1): a product in a draft batch whose preview is ready (the operator is about to Start it) is not
  * improved, so a background try never makes Start refuse the operator's batch with the product's lock.

@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { autoDecide, autoDecideNote, autoDecideOf, DEFAULT_AUTO_DECIDE_RULES, deliverable, ruleFor, type AutoDecideSnapshot } from "./auto-decide";
-import { HOLD_CAUSES, PROVISIONAL_SENTENCE } from "./types";
+import { autoDecide, autoDecideNote, autoDecideOf, DEFAULT_AUTO_DECIDE_RULES, deliverable, HOLD_SENTENCE, ruleFor, type AutoDecideSnapshot } from "./auto-decide";
+import { HOLD_CAUSES, PROVISIONAL_IMPROVES_SENTENCE, PROVISIONAL_SENTENCE } from "./types";
 import { INFORMATION_FLAGS } from "./qa/triage";
 
 const staged = { status: "needs_attention" as const, stagingUri: "gs://assets/x.jpg", bytes: 10, flags: [] as never[], channel: "noon" as const };
@@ -47,6 +47,18 @@ describe("M1-F3-R1 auto-decide rules", () => {
   it("provisional is an information flag (it never holds) and its sentences name no model", () => {
     expect(INFORMATION_FLAGS.has("provisional")).toBe(true);
     expect(autoDecideNote("deliver", "This photo could not be checked")).toBe(`This photo could not be checked. ${PROVISIONAL_SENTENCE}`);
+    expect(PROVISIONAL_SENTENCE).not.toMatch(/later|improved/);
+    // Nothing rewrites this on the row when the tries end, so it must read true then too (IMPROVE_WINDOW_MS is 72 hours).
+    expect(PROVISIONAL_IMPROVES_SENTENCE).toBe("Delivered now with the best image we have. We retry the enlargement for up to 3 days; if it works, a better image replaces this one at the same link. Nothing to do.");
+    expect(autoDecideNote("deliver", "Not enlarged", true, true)).toBe(`Not enlarged. ${PROVISIONAL_IMPROVES_SENTENCE}`);
     expect(autoDecideNote("drop", null)).toMatch(/^Left out automatically/);
+  });
+
+  it("a hold names the product's other photos only when some are delivered", () => {
+    expect(autoDecideNote("hold", "The edge is rough")).toBe(`The edge is rough. ${HOLD_SENTENCE}`);
+    expect(HOLD_SENTENCE).toContain("other photos are delivered");
+    expect(autoDecideNote("hold", "The edge is rough", false)).toBe("The edge is rough. It has no link yet. Replace it, use it as it is, or remove it.");
+    expect(autoDecideNote("drop", "The edge is rough")).toContain("the product's other photos are delivered");
+    expect(autoDecideNote("drop", "The edge is rough", false)).toBe("The edge is rough. Left out automatically; this photo gets no link here.");
   });
 });
