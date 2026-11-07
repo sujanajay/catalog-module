@@ -133,8 +133,22 @@ describe("a photo the size rule refused to enlarge, and images no judge looked a
     expect(exceptions[0]!.fix).toBe("Send a photo where the product fills more of the frame in a new batch.");
   });
   it("counts live images with no judge's look, and only those", () => {
-    const { digest } = build([{ qaModel: null, flags: ["provisional"] }, { qaModel: null, flags: ["qa_sampled_out"] }, { qaModel: "m", flags: ["qa_unavailable", "provisional"] }, { qaModel: "m" }, { qaModel: null, status: "needs_attention", isLive: false }, { qaModel: null, status: "skipped", isLive: false }], []);
-    expect(digest.deliveredUnjudged).toBe(3);
+    const { digest } = build([{ qaModel: null, flags: ["provisional"] }, { qaModel: null, flags: ["qa_sampled_out"] }, { qaModel: "m", flags: ["qa_unavailable", "provisional"] }, { qaModel: "m", flags: ["qa_sampled_out"] }, { qaModel: "m" }, { qaModel: null, status: "needs_attention", isLive: false }, { qaModel: null, status: "skipped", isLive: false }], []);
+    expect(digest.deliveredUnjudged).toBe(4);
+  });
+  it("an image no judge saw says so and promises no later check", () => {
+    const { digest } = build([{ flags: ["qa_unavailable", "provisional"], compliance: { auto_decide: { rule: "unchecked:*", cause: "unchecked", action: "deliver" } } }], []);
+    expect(digest.provisionalReasons).toEqual([{ text: "not checked: our quality check could not run", count: 1 }]);
+    expect(JSON.stringify(digest)).not.toMatch(/later/);
+  });
+  it("'yet' stays only while a try can still come", () => {
+    const tried = (tries: number, endReason: string | null) => build([sent], [], [{ sourceImageId: "s", improvedAt: null, tries, endReason }]);
+    expect(tried(1, null).digest.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 1 }]);
+    expect(tried(1, null).notes[0]!.improves).toBe(true);
+    for (const done of [tried(3, null), tried(1, "not_passed")]) {
+      expect(done.digest.provisionalReasons).toEqual([{ text: "not enlarged, and no more tries are planned", count: 1 }]);
+      expect(done.notes[0]!.improves).toBe(false);
+    }
   });
 });
 
@@ -250,7 +264,7 @@ describe("the two digest sheets (M1-F4-R4)", () => {
 
 const digest = (over: Partial<BatchDigest> = {}): BatchDigest => ({
   version: 1, products: 312, productsWithLinks: 312, completeEveryChannel: 271, linksPerChannel: [{ channel: "noon", links: 1200 }], provisionalLinks: 41,
-  provisionalReasons: [{ text: "not checked yet; it is checked later", count: 22 }, { text: "not enlarged yet", count: 12 }], improving: 12, stayedAsSent: 0,
+  provisionalReasons: [{ text: "not checked: our quality check could not run", count: 22 }, { text: "not enlarged yet", count: 12 }], improving: 12, stayedAsSent: 0,
   photosLeftOut: 3, leftOutReasons: [{ text: "a different product in the photo", count: 2 }, { text: "the photo file is damaged", count: 1 }], exceptions: 5,
   exceptionReasons: [{ text: "Noon image 4 missing: a different product in the photo", count: 2 }], exceptionsNotGrouped: 0, controlsSkipped: 12, unchanged: 0, needsYou: 0,
   startedAt: "2026-11-05T08:00:00.000Z", firstLinksAt: "2026-11-05T08:04:00.000Z", linksReadyAt: "2026-11-05T08:46:00.000Z", cancelledAt: null,
@@ -273,7 +287,7 @@ describe("the digest words (UX 5.3, M1 section 5 screen 3)", () => {
     const many = digest({ exceptionReasons: Array.from({ length: 30 }, (_, i) => ({ text: `Noon image ${i + 1} missing: no photo`, count: 30 - i })) });
     const { lines, more } = digestReasonLines(many);
     expect(lines).toHaveLength(10);
-    expect(lines[0]).toBe("41 images were sent with the best image we have. Main reasons: not checked yet; it is checked later (22), not enlarged yet (12).");
+    expect(lines[0]).toBe("41 images were sent with the best image we have. Main reasons: not checked: our quality check could not run (22), not enlarged yet (12).");
     expect(lines[2]).toBe("3 photos were left out: a different product in the photo (2), the photo file is damaged (1). See the Exceptions sheet.");
     expect(lines[4]).toBe("Noon image 1 missing: no photo - 30");
     expect(more).toBe(30 - 6);

@@ -37,7 +37,7 @@ export interface NoteRow { identifier: string; channel: ChannelId; image: number
 /** Why an image was sent with a note, by the auto-decide cause that sent it. */
 const SENT_REASON: Record<HoldCause, string> = {
   not_enlarged: "not enlarged yet",
-  unchecked: "not checked yet; it is checked later",
+  unchecked: "not checked: our quality check could not run",
   unusable: "busy background in the photo, so the whole photo was used",
   photo_one: "a problem with the first image",
   every_photo: "every photo of the product had a problem",
@@ -72,6 +72,8 @@ const LEFT_OUT_FIX: Partial<Record<HoldCause, string>> = {
 const SENT_TOO_LARGE = "the photo is too large to enlarge fully, so it was enlarged the plain way";
 const LEFT_OUT_TOO_LARGE = "the photo is too large to enlarge fully";
 const FIX_TOO_LARGE = "Send a photo where the product fills more of the frame in a new batch.";
+// Every try used, or the tries ended: the image stays as sent, so "yet" is no longer true.
+const SENT_NO_MORE_TRIES = "not enlarged, and no more tries are planned";
 const BETTER_TOO_LARGE = "This image stays as it is. If it looks soft, send a photo where the product fills more of the frame in a new batch.";
 const FIX_DEFAULT = "Send a better photo of this product in a new batch.";
 const FIX_NOT_MADE = "Run this product again in a new batch.";
@@ -198,7 +200,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
         const improves = notEnlarged && !!improvement && !improvement.improvedAt && !improvement.endReason && improvement.tries < IMPROVE_MAX_TRIES;
         // M1-F3-R5 (M1 D11): every try used, or the re-made image did not pass: it stays as sent.
         if (improvement && !improvement.improvedAt && (improvement.tries >= IMPROVE_MAX_TRIES || improvement.endReason === "not_passed")) stayedAsSent++;
-        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: cause === "not_enlarged" && refused ? SENT_TOO_LARGE : SENT_REASON[cause], rule: record?.rule ?? "", improves,
+        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: cause === "not_enlarged" && refused ? SENT_TOO_LARGE : cause === "not_enlarged" && !improves && improvement && !improvement.improvedAt ? SENT_NO_MORE_TRIES : SENT_REASON[cause], rule: record?.rule ?? "", improves,
           better: improves ? "A larger version replaces it at the same link when the enlargement works. Nothing to do."
             : refused ? BETTER_TOO_LARGE
             : notEnlarged ? "We could not enlarge it. Send a larger photo in a new batch."
@@ -288,8 +290,8 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     provisionalReasons: groupReasons(notes.map(n => n.reason)).slice(0, DIGEST_TOP_REASONS),
     improving: notes.filter(n => n.improves).length,
     stayedAsSent,
-    // No model on the row, or one that gave no verdict: qa_unavailable keeps the model it asked, and a re-made image keeps the last one.
-    deliveredUnjudged: outputs.filter(o => o.status === "verified" && o.isLive && channels.includes(o.channel) && (o.qaModel === null || o.flags.includes("qa_unavailable") || o.flags.includes("qa_cap"))).length,
+    // No model on the row, or one that gave no verdict: qa_unavailable keeps the model it asked, and a re-made image keeps the last one (qa_sampled_out on a re-made image).
+    deliveredUnjudged: outputs.filter(o => o.status === "verified" && o.isLive && channels.includes(o.channel) && (o.qaModel === null || o.flags.includes("qa_unavailable") || o.flags.includes("qa_cap") || o.flags.includes("qa_sampled_out"))).length,
     photosLeftOut: photoReasons.size,
     leftOutReasons: groupReasons([...photoReasons.values()]),
     exceptions: exceptions.length,
