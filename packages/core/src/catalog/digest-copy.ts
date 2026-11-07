@@ -56,6 +56,7 @@ export function digestReasonLines(d: BatchDigest, max: number = DIGEST_REASON_LI
   if (d.provisionalLinks) lines.push(`${n(d.provisionalLinks)} ${plural(d.provisionalLinks, "image was", "images were")} sent with the best image we have. Main reasons: ${reasonList(d.provisionalReasons)}.`);
   if (d.improving) lines.push(`${n(d.improving)} of these will improve by themselves at the same link.`);
   if (d.stayedAsSent) lines.push(`${n(d.stayedAsSent)} could not be made better and stay as sent.`);
+  if (d.deliveredUnjudged) lines.push(`${n(d.deliveredUnjudged)} ${plural(d.deliveredUnjudged, "image was", "images were")} delivered without our automatic quality check.`);
   if (d.photosLeftOut) lines.push(`${n(d.photosLeftOut)} ${plural(d.photosLeftOut, "photo was", "photos were")} left out: ${reasonList(d.leftOutReasons)}. See the Exceptions sheet.`);
   if (d.controlsSkipped) lines.push(`${n(d.controlsSkipped)} ${plural(d.controlsSkipped, "product is", "products are")} in a running experiment. Their images on those channels were left unchanged on purpose.`);
   // M1-F5-R3: the digest says "unchanged: N". Older stored digests have no count.

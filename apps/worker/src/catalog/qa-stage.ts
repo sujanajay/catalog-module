@@ -12,7 +12,8 @@ import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./aut
 import { recordCost } from "@catalog/core/spend";
 import { recordCostEvent, type CostEventInput } from "@catalog/core/cost-events";
 import { qaCallCost } from "@catalog/core/catalog/cost";
-import { flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
+import { ENLARGEMENT_TOO_LARGE_WHY, flagReason, type ChannelId, type ResolvedPolicy, type OutputFlag } from "@catalog/core/catalog/types";
+import { enlargementOutlooks, type EnlargementOutlook } from "@catalog/core/catalog/improve";
 import type { CatalogDeps } from "./deps";
 import { eachLimit } from "@catalog/core/concurrency";
 import { autoDecide, autoDecideNote, autoDecideOf, autoDecideRecord } from "@catalog/core/catalog/auto-decide";
@@ -116,10 +117,11 @@ interface Judged { row: Output; result: JudgeResult; role: "judge" | "recheck" }
 const MODEL_TEXT = /birefnet|bria|gemini|haiku|qwen|openrouter|google\/|anthropic\//i;
 const OWN_OUTPUT_FLAGS = new Set<OutputFlag>(OUTPUT_DIMENSIONS.map(d => DIMENSION_FLAGS[d]));
 /** Outputs that never get a (new) judge call: no verdict can change them, or one is already recorded. */
-// Spec 18 lifecycle 3.7: an output held for its enlargement is not judged (its hold cannot change by a verdict).
-const NOT_JUDGED = new Set<OutputFlag>(["failed_compliance", "qa_cap", "qa_unavailable", "enlargement_failed"]);
-// M1 D45: except a photo the text detector sent for a check: only the judge can tell a real size chart from a printed pattern.
-const skipsJudge = (flags: readonly OutputFlag[]) => flags.some(flag => NOT_JUDGED.has(flag) && !(flag === "enlargement_failed" && flags.includes("text_suspected")));
+const NOT_JUDGED = new Set<OutputFlag>(["failed_compliance", "qa_cap", "qa_unavailable"]);
+// Spec 18 lifecycle 3.7: an output held for its enlargement is not judged, because a person looks at it. An auto-decide
+// batch delivers it with nobody looking, so it is judged like any other (M1 D40: a visible defect is never delivered with a warning).
+// M1 D45: so is a photo the text detector sent for a check, in any batch: only the judge can tell a real size chart from a printed pattern.
+const skipsJudge = (flags: readonly OutputFlag[], auto: boolean) => flags.some(flag => NOT_JUDGED.has(flag) || (flag === "enlargement_failed" && !auto && !flags.includes("text_suspected")));
 /** A judge sentence reaches the report and the attention card only when it names no model. */
 const clean = (sentence: string | undefined, fallback: string) => sentence && !MODEL_TEXT.test(sentence) ? sentence : fallback;
 
@@ -140,8 +142,9 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
  const onPhoto=options.onPhoto ?? (async()=>{});
  const router=deps.routes ? await deps.routes():undefined;
  const candidates=await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.sourceImageId,sources.map(s=>s.id)),inArray(catalogOutputs.status,["staged","needs_attention"]),isNull(catalogOutputs.qaScores),isNull(catalogOutputs.decision)));
+ const auto=!!autoDecideOf(batch.options);
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
- const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !skipsJudge(row.flags)));
+ const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !skipsJudge(row.flags,auto)));
  const groups=sources.map(source=>rows.filter(row=>row.sourceImageId===source.id)).filter(group=>group.length);
  // A stop between groups: the continuation judges only rows without scores, then triages.
  const notStarted=await eachLimit(groups,options.photoConcurrency ?? 1,async group=>{
@@ -149,9 +152,9 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
   const first=group[0]!,source=sources.find(s=>s.id===first.sourceImageId)!;
   const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,source.productId));
   if(!product) return;
-  // M1 D40: an agreed cut-out is always judged, whatever the sample rate: the judge is what stands behind it. So is a photo
-  // the text detector sent for a check (M1 D45): only the judge can say it is a size chart.
-  if(!sampledForQa(product.identifier,policy.qaSampleRate) && !group.some(row=>agreedMatte(row.compliance)) && !source.flags.includes("text_suspected")) {
+  // M1 D40: an agreed cut-out is always judged, whatever the sample rate: the judge is what stands behind it. So is a failed enlargement a rule will deliver,
+  // and a photo the text detector sent for a check (M1 D45): only the judge can say it is a size chart.
+  if(!sampledForQa(product.identifier,policy.qaSampleRate) && !group.some(row=>agreedMatte(row.compliance) || (auto && row.flags.includes("enlargement_failed"))) && !source.flags.includes("text_suspected")) {
    await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});return;
   }
   try {
@@ -326,9 +329,11 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
  const live=await deps.db.select({channel:catalogOutputs.channel,n:catalogOutputs.n}).from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.isLive,true),inArray(catalogOutputs.channel,batch.channels)));
  const keptLive=live.filter(l=>shots.has(l.n) && !outputs.some(o=>o.channel===l.channel && o.n===l.n && o.decision!=="replaced"));
  const current=outputs.filter(o=>!replaced.has(o.sourceImageId));
- const decisions=triageProduct(current,keptLive);
  // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional), drop or, rarely, a photo held for a person (M1 D40); the batch never waits.
  const auto=autoDecideOf(batch.options);
+ const decisions=triageProduct(current,keptLive,{judgedFailedEnlargement:!!auto});
+ const notEnlarged=current.filter(o=>o.flags.includes("enlargement_failed")).map(o=>o.sourceImageId);
+ const outlooks=auto && notEnlarged.length ? await enlargementOutlooks(deps.db,batch.id,[...new Set(notEnlarged)]):new Map<string,EnlargementOutlook>();
  // A hold with no cause (rare: a held render with no problem flag) is decided as not publishable, so every auto
  // decision carries a rule id (D10). A pipeline failure without a cause is not a rule decision and stays failed.
  const causeOf=(o:Output)=>{const decision=decisions.get(o.id);return auto && decision?.action==="hold" ? decision.cause ?? (o.status==="failed" ? undefined:"not_publishable"):undefined;};
@@ -352,7 +357,8 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
    const others=auto ? o.flags.filter(flag=>flag!=="enlargement_failed"):o.flags;
    const plain=plainPassthrough(o.compliance),lead=leadFlag(problemFlags(others).length ? others:o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
    const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
-   const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
+   const tooLarge=lead==="enlargement_failed" && outlooks.get(o.sourceImageId)==="too_large";
+   const why=tooLarge ? ENLARGEMENT_TOO_LARGE_WHY:lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
    const ordered=[...new Set([...o.flags.filter(flag=>HARD_HOLD_FLAGS.has(flag)),...bySeverity(o.flags)])];
    const leftOut=o.flags.some(flag=>LEFT_OUT_FLAGS.has(flag));
@@ -363,7 +369,7 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
     const problem=why ?? (o.status==="failed" ? o.reason:null);
     // M1 D40: `hold` keeps the image staged but unpublished, so a person can still "Use as is"; the batch does not wait.
     patch=d.action==="deliver"
-     ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
+     ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem,true,o.flags.includes("enlargement_failed") && outlooks.get(o.sourceImageId)==="retry")}
      : d.action==="hold"
       ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem,othersDelivered(o))}
       : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem,othersDelivered(o))};

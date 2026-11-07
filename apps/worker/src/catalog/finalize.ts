@@ -9,7 +9,7 @@ import { recordBatchOutcome } from "@catalog/core/catalog/reliability";
 import { ENLARGING_TASK } from "@catalog/core/catalog/pipeline/enlargement";
 import { recheckSheetPart, type RecheckProgress } from "@catalog/core/catalog/recheck/index";
 import { compareXlsxCsv, fillProductListWorkbook, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx, writeNotesCsv } from "@catalog/core/catalog/sheet";
-import { digestCost, digestFrom, readImprovements, type BatchDigest } from "@catalog/core/catalog/digest";
+import { digestCost, digestFrom, readImprovements, readTooLargePhotos, type BatchDigest } from "@catalog/core/catalog/digest";
 import { inrPerUsdFromEnv } from "@catalog/core/catalog/cost";
 import { batchCostFigure } from "@catalog/core/catalog/cost-report";
 import { positiveIntEnv } from "@catalog/core/concurrency";
@@ -137,7 +137,7 @@ export async function handleFinalizeTask(deps:CatalogDeps,body:Record<string,unk
       // M1-S5 review P2-4: buildReport's rows are reused, so the outputs are read once per build; only improvements are new.
       const digest=digestFrom({batch:built.batch,sheet:built.sheet,files:[...(built.report.unsupportedFiles as unknown[]),...(built.report.linkFailures as unknown[])],
         cost,leftOutProducts:ingest?.leftOutProducts ?? [],sharedPhotos:ingest?.sharedPhotos ?? [],sameFilesMerged:(ingest?.sameFiles ?? []).reduce((k,s)=>k+s.dropped.length,0),sameShots:ingest?.sameShots ?? [],
-        pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId)});
+        pairs:rows.pairs.map(r=>({productId:r.pair.productId,identifier:r.product.identifier,change:r.pair.change,notes:r.pair.notes})),outputs:rows.outputs,improvements:await readImprovements(db,batchId),tooLarge:await readTooLargePhotos(db,batchId)});
       return {...built,digest};
     };
     const initial=await deps.db.transaction(tx=>build(tx as unknown as CatalogDeps["db"]),{isolationLevel:"repeatable read"});

@@ -39,6 +39,8 @@ export interface BatchDigest {
   improving: number;
   /** Of those, the ones every try left as they were (M1-F3-R5): they stay as sent. */
   stayedAsSent: number;
+  /** Live images of the batch no judge verdict stands behind (not judged, or the judge gave no answer). Older stored digests have none. */
+  deliveredUnjudged?: number;
   /** Photos (and unreadable files) that gave no link, with their reasons, most common first. */
   photosLeftOut: number;
   leftOutReasons: DigestReason[];
