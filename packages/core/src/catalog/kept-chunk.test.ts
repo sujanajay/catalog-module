@@ -17,7 +17,7 @@ const dressOnWhite: Pick<Prepared, "width" | "height" | "rgb"> = (() => {
 const matteOf = (keep: (x: number, y: number) => boolean, model = "first"): Matte => {
   const alpha = Buffer.alloc(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (keep(x, y)) alpha[y * W + x] = 255;
-  return { alpha, width: W, height: H, model, ms: 1, source: "model" };
+  return { alpha, width: W, height: H, model, ms: 1, source: "model", target: "cpu", sentLongSide: 1024 };
 };
 const region = backgroundRegion(dressOnWhite);
 const lowChunk = (x: number, y: number) => garment(x, y) || inside(x, y, 280, 380, 60, 60);
