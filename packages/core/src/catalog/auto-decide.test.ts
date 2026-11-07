@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { autoDecide, autoDecideNote, autoDecideOf, DEFAULT_AUTO_DECIDE_RULES, deliverable, ruleFor, type AutoDecideSnapshot } from "./auto-decide";
+import { autoDecide, autoDecideNote, autoDecideOf, DEFAULT_AUTO_DECIDE_RULES, deliverable, HOLD_SENTENCE, ruleFor, type AutoDecideSnapshot } from "./auto-decide";
 import { HOLD_CAUSES, PROVISIONAL_SENTENCE } from "./types";
 import { INFORMATION_FLAGS } from "./qa/triage";
 
@@ -48,5 +48,13 @@ describe("M1-F3-R1 auto-decide rules", () => {
     expect(INFORMATION_FLAGS.has("provisional")).toBe(true);
     expect(autoDecideNote("deliver", "This photo could not be checked")).toBe(`This photo could not be checked. ${PROVISIONAL_SENTENCE}`);
     expect(autoDecideNote("drop", null)).toMatch(/^Left out automatically/);
+  });
+
+  it("a hold names the product's other photos only when some are delivered", () => {
+    expect(autoDecideNote("hold", "The edge is rough")).toBe(`The edge is rough. ${HOLD_SENTENCE}`);
+    expect(HOLD_SENTENCE).toContain("other photos are delivered");
+    expect(autoDecideNote("hold", "The edge is rough", false)).toBe("The edge is rough. It has no link yet. Replace it, use it as it is, or remove it.");
+    expect(autoDecideNote("drop", "The edge is rough")).toContain("the product's other photos are delivered");
+    expect(autoDecideNote("drop", "The edge is rough", false)).toBe("The edge is rough. Left out automatically; this photo gets no link here.");
   });
 });

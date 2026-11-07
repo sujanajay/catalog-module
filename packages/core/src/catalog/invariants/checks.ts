@@ -65,9 +65,13 @@ export const CHECKS: readonly InvariantCheck[] = [
   },
   {
     id: "held_without_reason",
-    sentence: "Every output held for the operator says why.",
+    sentence: "In a done or failed batch, every output held for the operator says why.",
     severity: "ERROR",
-    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o WHERE o.status = 'needs_attention' AND coalesce(btrim(o.reason), '') = ''`,
+    // While a batch runs, the judge's flag leaves an output needs_attention with no reason until triage decides, after
+    // the chunk's last photo (qa-stage.ts), so only a batch that has ended can break this.
+    sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o
+      JOIN catalog_batches AS b ON b.id = o.batch_id
+      WHERE b.status IN ('done', 'failed') AND o.status = 'needs_attention' AND coalesce(btrim(o.reason), '') = ''`,
   },
   {
     id: "stale_running_chunk",

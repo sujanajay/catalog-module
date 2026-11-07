@@ -206,6 +206,17 @@ describe("07 auto-resolve: re-render and re-judge before holding", () => {
     expect(s.held).toEqual([]);
   }, 180_000);
 
+  it("a policy that names a second cut-out model the service does not list logs a warning, and the step is recorded skipped", async () => {
+    const w = world(), log = vi.fn<CatalogDeps["log"]>();
+    w.deps.log = log;
+    w.deps.resolvePolicy = vi.fn(async () => ({ ...policy, matteModelSecond: "not-served" }));
+    const s = await seed(w, "apparel_flat", [block(HALO_ALWAYS), block(PLAIN), block(PLAIN)]);
+    expect(steps(autoActionsOf(s.outputs.find(row => row.n === 1)!.compliance))).toContain("second_matte:skipped");
+    const warnings = log.mock.calls.filter(([message]) => message === "catalog second cut-out model not served");
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings[0]![1]).toMatchObject({ severity: "WARNING", model: "not-served", served: ["first", "second"] });
+  }, 120_000);
+
   it("a halo no cut-out fixes on photo 1 holds the product with the existing flag and the tried sentence on the card", async () => {
     const w = world(), s = await seed(w, "apparel_flat", [block(HALO_ALWAYS), block(PLAIN), block(PLAIN)]);
     const o = s.outputs.find(row => row.n === 1)!;

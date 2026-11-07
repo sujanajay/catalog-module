@@ -100,6 +100,16 @@ describe("invariant checks", () => {
     expect((await run()).counts.held_without_reason).toBe(2);
   });
 
+  it("held_without_reason: a running batch's output waiting for triage does not violate; once the batch ended it does", async () => {
+    for (const status of ["done", "failed"] as const) {
+      const b = await batch("rendering"), p = await product(b.id, "pending_attention");
+      await output(b.id, p, "needs_attention");
+      expect((await run(b.id)).counts.held_without_reason).toBe(0);
+      await db.update(catalogBatches).set({ status }).where(eq(catalogBatches.id, b.id));
+      expect((await run(b.id)).counts.held_without_reason).toBe(1);
+    }
+  });
+
   it("stale_running_chunk: a running chunk whose lease ended more than 5 minutes ago violates; a live or just-lapsed lease does not", async () => {
     const b = await batch("matting");
     await chunk(b.id, { status: "running", startedMin: 20, leaseMin: -2 });
