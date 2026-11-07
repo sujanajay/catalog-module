@@ -14,7 +14,7 @@ import { verifyPublic } from "./verify";
 import { CHANNEL_IMAGE_LIMITS } from "../ingest/append";
 import type { ChannelRules } from "../channel-rules";
 import { frozenChannels } from "../holdout";
-import { autoDecideNote, autoDecideOf, heldForPerson } from "../auto-decide";
+import { autoDecideNote, autoDecideOf, heldForPerson, imageRejected } from "../auto-decide";
 import { restoreUnpassedImprovements } from "../improve";
 import { otherTargetUpscalerId, upscaleConfigFromEnv, upscalerId, upscalerKey } from "../upscale";
 export { lockProducts };
@@ -72,7 +72,9 @@ export function renderKeys(input: Omit<Parameters<typeof renderKey>[0], "upscale
 export function outputNote(o: Pick<Output, "channel" | "n" | "reason" | "decision" | "decidedBy">): string {
   return `${channel(o.channel).label} img ${o.n}: ${o.decision === "use_as_is" ? `kept as is by ${o.decidedBy}: ` : ""}${o.reason}`;
 }
-export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[]; deletes: { output: Output; objectPath: string; ifGenerationMatch: number }[]; kept: Output[]; skipped: { output: Output; reason: string }[] }
+export interface PublishPlan { copies: { output: Output; objectPath: string; ifGenerationMatch: number }[];
+  /** `rejectedBy` (M1 D45): this batch's output whose rejection takes an older batch's live image down. */
+  deletes: { output: Output; objectPath: string; ifGenerationMatch: number; rejectedBy?: Output }[]; kept: Output[]; skipped: { output: Output; reason: string }[] }
 /** M1 D30: the note on a follow-up photo that is not added because its channel's image limit is reached. */
 export function overLimitNote(channelId: ChannelId, limit: number): string {
   return `Not added: ${channel(channelId).label} takes at most ${limit} images of a product. The photos already live are kept.`;
@@ -116,10 +118,17 @@ export function planPublish(input: { brandSlug: string; pathKey: string; isTest:
   // Image 1 held stays until the person decides: a listing with no first image is worse than the image it had.
   const first = input.sources.length ? Math.min(...input.sources.map(s => s.n)) : null;
   const removes = (o: Output) => input.outputs.some(x => x.channel === o.channel && x.n === o.n && (x.decision === "remove" || (x.id === o.id && ((heldForPerson(x) && x.n !== first) || x.flags.includes("auto_dropped")))));
-  const deletes = selected.filter(o => input.append ? o.batchId === input.batchId && removes(o) : !input.sources.some(s => s.n === o.n) || removes(o)).map(output => {
+  // M1 D45: this run rejected the photo for what the image shows, so the older live image at its place comes down too (a watermark or a
+  // wrong item must not stay live because a new run refused it). Not in a follow-up (D30), not for a transient failure (imageRejected),
+  // not where this run delivers a new image, and not image 1 held for a person, for the reason above. An older image of another photo at
+  // this number goes too: publish retires that photo below, so it is not what the sender wants at this place any more.
+  const rejectedBy = (o: Output) => input.append || o.batchId === input.batchId || copies.some(c => c.output.channel === o.channel && c.output.n === o.n) ? undefined
+    : input.outputs.find(x => x.id !== o.id && x.channel === o.channel && x.n === o.n && imageRejected(x) && !(heldForPerson(x) && x.n === first));
+  const deletes = selected.filter(o => input.append ? o.batchId === input.batchId && removes(o) : !input.sources.some(s => s.n === o.n) || removes(o) || rejectedBy(o)).map(output => {
     assertWithinProduct(output.objectPath, scope);
     if (input.append) assertOwnedByBatch(output, input.batchId, output.n);
-    return { output, objectPath: output.objectPath, ifGenerationMatch: output.generation ?? 0 };
+    const rejecter = rejectedBy(output);
+    return { output, objectPath: output.objectPath, ifGenerationMatch: output.generation ?? 0, ...(rejecter ? { rejectedBy: rejecter } : {}) };
   });
   const kept = selected.filter(o => (input.append || input.sources.some(s => s.n === o.n)) && !input.outputs.some(x => x.channel === o.channel && x.n === o.n));
   return { copies, deletes, kept, skipped };
@@ -134,6 +143,8 @@ export async function releaseLocks(db: Db, batchId: string, options: { everyProd
 }
 /** M1-F3-R2: the note of an auto-decide product with no deliverable photo at all (an exception, never a held product). */
 export const NO_DELIVERABLE_PHOTO = "No photo of this product could be delivered in this batch. Links from earlier batches stay as they were.";
+/** The same, when this batch also took down older images it rejected (M1 D45). */
+export const NO_DELIVERABLE_PHOTO_REMOVED = "No photo of this product could be delivered in this batch. Older images this batch rejected were taken down; other links from earlier batches stay as they were.";
 /** `batch` (brand and test flag, for the worker's cost ledger row) is present whenever the batch was read. */
 /**
  * `changed`: this call published a real content change (new, updated, reordered or removed shots). An unchanged
@@ -281,17 +292,20 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     // still `staged` in this batch end with the same reason, so a failed product has no staged leftovers.
     if (failure) await tx.update(catalogOutputs).set({status:"failed",reason:failure,error:failure,updatedAt:now}).where(and(eq(catalogOutputs.batchId,batchId),eq(catalogOutputs.productId,productId),eq(catalogOutputs.status,"staged")));
     const removed: Output[] = [];
+    const rejections = new Map<string, Output>();
     if (!failure) for (const target of plan.deletes) {
       if (append) assertOwnedByBatch(target.output, batchId, target.output.n);
       await deps.storage.deletePublicObject(target.objectPath,productPrefix(product.brandSlug,product.pathKey,product.isTest),{ifGenerationMatch:target.ifGenerationMatch});
       const stillHeld = outputs.find(o => o.id === target.output.id && heldForPerson(o));
-      await tx.update(catalogOutputs).set(stillHeld ? {isLive:false,supersededAt:now,updatedAt:now} : {isLive:false,status:"skipped",supersededAt:now,reason:`Removed in batch ${batch.name}`,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
+      const why = target.rejectedBy?.reason ? `Removed in batch ${batch.name}: ${target.rejectedBy.reason}` : `Removed in batch ${batch.name}`;
+      await tx.update(catalogOutputs).set(stillHeld ? {isLive:false,supersededAt:now,updatedAt:now} : {isLive:false,status:"skipped",supersededAt:now,reason:why,updatedAt:now}).where(eq(catalogOutputs.id,target.output.id));
       removed.push(target.output);
+      if (target.rejectedBy) rejections.set(target.output.id, target.rejectedBy);
     }
     // M0-F3-R1, R2: the change log, in this transaction (one event per changed slot of each listing), inside a savepoint:
     // the public links already changed, so a failed log write is rolled back alone, logged at ERROR and never fails or
     // rolls back the delivery (decision D26).
-    try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,now,actor,rulesKeyVersion:c => rules.keyVersion(c),log})); }
+    try { await tx.transaction(sp => recordPublishEvents(sp,{batch,product,channels,live,delivered:delivered.filter(o => o.contentVersionId),removed,rejections,now,actor,rulesKeyVersion:c => rules.keyVersion(c),log})); }
     catch (error) { log("change log not written",{severity:"ERROR",batchId,productId,error:error instanceof Error ? error.message : String(error)}); }
     const previousSources = await tx.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.productId,productId),eq(catalogSourceImages.isCurrent,true)));
     const reordered = !append && sources.length === previousSources.length && sources.map(s=>s.sha256).sort().join("|") === previousSources.map(s=>s.sha256).sort().join("|") && sources.some(s=> previousSources.find(p=>p.n===s.n)?.sha256 !== s.sha256);
@@ -308,7 +322,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     if (!wasNew && changes.some(c=>!all.some(o=>o.batchId!==batchId && o.channel===c.channel && o.publishedAt))) events.push("channel_added");
     for (const kind of events) {
       const [existing] = await tx.select({id:catalogProductEvents.id}).from(catalogProductEvents).where(and(eq(catalogProductEvents.productId,productId),eq(catalogProductEvents.batchId,batchId),eq(catalogProductEvents.kind,kind)));
-      if (!existing) await tx.insert(catalogProductEvents).values({productId,batchId,kind,actor,details:{channels:batch.channels,shots:kind==="shots_removed" ? removed.map(o=>o.n):changes.map(o=>o.n),changes,removedLinks:removed.map(o=>({channel:o.channel,n:o.n,url:o.publicUrl}))}});
+      if (!existing) await tx.insert(catalogProductEvents).values({productId,batchId,kind,actor,details:{channels:batch.channels,shots:kind==="shots_removed" ? removed.map(o=>o.n):changes.map(o=>o.n),changes,removedLinks:removed.map(o=>({channel:o.channel,n:o.n,url:o.publicUrl,...(rejections.has(o.id) ? {rejectedBy:rejections.get(o.id)!.id,reason:rejections.get(o.id)!.reason}:{})}))}});
     }
     if (!failure) {
       for (const source of sources) {
@@ -324,7 +338,7 @@ export async function publishProduct(deps: PublishDeps, batchId: string, product
     }
     const unverified = [...landed.values()].filter(copy => !changes.some(change => change.channel === copy.channel && change.n === copy.n));
     const liveNotes = [changes.length ? `Verified live images: ${changes.map(c=>`${c.channel} ${c.n}`).join(", ")}.` : "", unverified.length ? `Public images replaced but unverified: ${unverified.map(c=>`${c.channel} img ${c.n} generation ${c.generation}`).join(", ")}.` : "", !changes.length && !landed.size ? "No replacements were verified." : ""].filter(Boolean).join(" ");
-    const notes = [nothingDelivered ? NO_DELIVERABLE_PHOTO : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>heldForPerson(o) && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
+    const notes = [nothingDelivered ? (rejections.size ? NO_DELIVERABLE_PHOTO_REMOVED : NO_DELIVERABLE_PHOTO) : "", auto && missingPairs ? "Some photos could not be processed. Start this product again." : "", failure ? `Some images could not be published: ${failure}. ${liveNotes}` : "", removed.length ? `photos ${removed.map(o=>o.n).join(" and ")} removed in batch ${batch.name}` : "",...outputs.filter(o=>o.decision === "use_as_is" && o.reason).map(outputNote),...outputs.filter(o=>o.status === "skipped" && o.reason).map(outputNote),...outputs.filter(o=>heldForPerson(o) && o.reason).map(outputNote),...outputs.filter(o=>o.flags.includes("provisional") && o.status !== "skipped" && o.reason).map(outputNote)].filter(Boolean).join("; ");
     await tx.update(catalogBatchProducts).set({change,notes}).where(where);
     await tx.update(catalogProducts).set(publisherOf(batchId, append)).where(eq(catalogProducts.id,productId));
     return { outcome: failure || nothingDelivered ? "failed" : "published", batch: found, changed: !failure && !nothingDelivered && change !== "unchanged" };
@@ -391,7 +405,7 @@ async function recordStagedVersions(deps: PublishDeps, batchId: string, productI
  * yet (M0-S2 has not linked it), or with no listing on a channel, still gets one event per changed slot of that channel:
  * on the product and channel instead of a listing (D23), keyed `publish:<output id>:<last seq>:product`.
  */
-export async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string; log?: PublishDeps["log"] }): Promise<void> {
+export async function recordPublishEvents(db: GraphDb, input: { batch: typeof catalogBatches.$inferSelect; product: typeof catalogProducts.$inferSelect; channels: ChannelId[]; live: Output[]; delivered: Output[]; removed: Output[]; /** M1 D45: per removed output, this batch's output whose rejection took it down: its reason and evidence. */ rejections?: ReadonlyMap<string, Output>; now: Date; actor: string; rulesKeyVersion: (c: ChannelId) => string; log?: PublishDeps["log"] }): Promise<void> {
   const { batch, product, live, delivered, removed, now, actor } = input;
   const log = input.log ?? (() => {});
   // A key that already names an equal event writes nothing; with keys on the slot's last event that only happens if
@@ -459,8 +473,9 @@ export async function recordPublishEvents(db: GraphDb, input: { batch: typeof ca
     for (const target of targets.filter(t => t.channel === o.channel)) {
       const before = lastOf(target, o.n);
       if (before?.kind === "removed") continue;
+      const rejecter = input.rejections?.get(o.id);
       await write({ ...common, idempotencyKey: `removed:${o.id}:${before ? before.seq : "none"}:${target.id ?? "product"}`, listingId: target.id, channel: target.channel, slot: `image:${o.n}`, fromVersionId: before ? before.toVersionId : o.contentVersionId ?? null,
-        toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: "new_content", reasonRef: null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);
+        toVersionId: null, kind: "removed", evidenceRef: `catalog_outputs:${o.id}`, reasonKind: rejecter ? "auto_decide" : "new_content", reasonRef: rejecter ? `catalog_outputs:${rejecter.id}` : null, changeTypeId: REMOVED_CHANGE_TYPE }, o.id);
     }
   }
 }

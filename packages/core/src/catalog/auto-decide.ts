@@ -82,6 +82,23 @@ export function heldForPerson(o: { status: string; decision?: string | null; com
   return o.status === "needs_attention" && !o.decision && autoDecideRecordOf(o.compliance)?.action === "hold";
 }
 
+/**
+ * M1 D45: the flags that reject a photo for what the image itself shows: part of the product gone, a rough edge, background left in,
+ * a mark on the image, another item, several photos in one, a size chart, a rotated product. A broken channel rule on a new render
+ * (`failed_compliance`, `placement`) and a small source are not here: they say nothing against an older image.
+ */
+export const IMAGE_REJECTION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["product_removed", "halo", "leftover_background", "text_or_watermark", "different_product", "collage", "chart_image", "orientation"]);
+/** M1 D45: the run could not look properly (the judge down or capped, the enlargement or the cut-out service failed): no verdict on the image. */
+export const TRANSIENT_FAILURE_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["qa_unavailable", "qa_cap", "enlargement_failed", "fallback_matte"]);
+/**
+ * M1 D45: this run left the photo out or held it because of the image itself. A transient failure, a corrupt file (status `failed`)
+ * and a person's decision are not. Whatever is already live at that place is taken down for this, and kept for the others.
+ */
+export function imageRejected(o: { status: string; decision?: string | null; flags: readonly OutputFlag[]; compliance: unknown }): boolean {
+  if (o.decision || !o.flags.some(flag => IMAGE_REJECTION_FLAGS.has(flag)) || o.flags.some(flag => TRANSIENT_FAILURE_FLAGS.has(flag))) return false;
+  return heldForPerson(o) || (o.status === "skipped" && (o.flags.includes("auto_dropped") || o.flags.includes("chart_image")));
+}
+
 /** A hold on a photo with no other photo of the product delivered on its channel. */
 export const HOLD_SENTENCE_ALONE = "It has no link yet. Replace it, use it as it is, or remove it.";
 
