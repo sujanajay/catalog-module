@@ -360,7 +360,7 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
      ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
      : d.action==="hold"
       ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem,othersDelivered(o))}
-      : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
+      : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem,othersDelivered(o))};
     patch.compliance={...(o.compliance ?? {}),auto_decide:autoDecideRecord(cause,d)};
     if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":d.action,holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};
     await tx.update(catalogOutputs).set({...patch,updatedAt:deps.now()}).where(eq(catalogOutputs.id,o.id));
