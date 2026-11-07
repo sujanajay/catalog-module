@@ -14,7 +14,7 @@ import { LEFT_OUT_WORDS, type SharedPhotos } from "./ingest/group";
 import type { LeftOutProduct } from "./ingest/types";
 import { normalizeKey } from "./naming";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
-import { IMPROVE_MAX_TRIES } from "./improve";
+import { enlargementOutlooks, IMPROVE_MAX_TRIES } from "./improve";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, NO_DELIVERABLE_PHOTO } from "./pipeline/publish";
 import type { SheetRow, SheetSpec } from "./sheet";
 import type { ChannelId, HoldCause } from "./types";
@@ -53,7 +53,7 @@ const LEFT_OUT_REASON: Record<HoldCause, string> = {
   wrong_item: "a different product in the photo",
   collage: "several photos in one",
   corrupt: "the photo file is damaged",
-  not_enlarged: "the photo is too small and could not be enlarged",
+  not_enlarged: "the photo could not be enlarged",
   unchecked: "the image could not be checked",
   unusable: "the photo could not be used",
   photo_one: "the first image had a problem",
@@ -68,6 +68,11 @@ const LEFT_OUT_FIX: Partial<Record<HoldCause, string>> = {
   corrupt: "Send the photo file again in a new batch.",
   not_enlarged: "Send a larger photo in a new batch.",
 };
+// Spec 18 route `none`: a size refusal, the same on every try, and a larger photo makes it worse. A closer photo needs less enlarging.
+const SENT_TOO_LARGE = "the photo is too large to enlarge fully, so it was enlarged the plain way";
+const LEFT_OUT_TOO_LARGE = "the photo is too large to enlarge fully";
+const FIX_TOO_LARGE = "Send a photo where the product fills more of the frame in a new batch.";
+const BETTER_TOO_LARGE = "This image stays as it is. If it looks soft, send a photo where the product fills more of the frame in a new batch.";
 const FIX_DEFAULT = "Send a better photo of this product in a new batch.";
 const FIX_NOT_MADE = "Run this product again in a new batch.";
 const FIX_PRODUCT = "Send usable photos of this product in a new batch.";
@@ -120,7 +125,7 @@ export interface DigestInput {
 export interface DigestParts { digest: BatchDigest; exceptions: ExceptionRow[]; notes: NoteRow[]; kept: { keptPhotos: number; styliSkipped: number } }
 
 /** The output columns the digest reads (buildReport's rows carry them). */
-export type DigestOutput = { id: string; batchId: string; productId: string; sourceImageId: string; channel: ChannelId; n: number; status: string; isLive: boolean; flags: readonly string[]; reason: string | null; decision: string | null; compliance: unknown; publicUrl: string; publishedAt: Date | null };
+export type DigestOutput = { id: string; batchId: string; productId: string; sourceImageId: string; channel: ChannelId; n: number; status: string; isLive: boolean; flags: readonly string[]; reason: string | null; decision: string | null; compliance: unknown; qaModel: string | null; publicUrl: string; publishedAt: Date | null };
 export type DigestPair = { productId: string; identifier: string; change: string; notes: string | null };
 export type DigestImprovement = { sourceImageId: string; improvedAt: Date | null; tries: number; endReason: string | null };
 
@@ -130,13 +135,18 @@ export async function readImprovements(db: Db, batchId: string): Promise<DigestI
     .from(catalogImprovements).where(eq(catalogImprovements.batchId, batchId)).orderBy(asc(catalogImprovements.sourceImageId));
 }
 
+/** The batch's photos whose enlargement only the size rule refused (route `none`): no retry exists. */
+export async function readTooLargePhotos(db: Db, batchId: string): Promise<Set<string>> {
+  return new Set([...await enlargementOutlooks(db, batchId)].flatMap(([id, outlook]) => outlook === "too_large" ? [id] : []));
+}
+
 /**
  * The digest and its two sheets for one batch from rows already read (finalize passes buildReport's rows, so the
  * outputs are read once per build). `outputs` may hold other batches' outputs of the same products; only this batch's
  * count. `linksReadyAt` is left null: finalize sets it in its done write, keeping the first one.
  */
-export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; outputs: readonly DigestOutput[]; improvements: readonly DigestImprovement[] }): DigestParts {
-  const batchId = input.batch.id, channels = input.batch.channels, improvements = input.improvements;
+export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; outputs: readonly DigestOutput[]; improvements: readonly DigestImprovement[]; tooLarge: ReadonlySet<string> }): DigestParts {
+  const batchId = input.batch.id, channels = input.batch.channels, improvements = input.improvements, tooLarge = input.tooLarge;
   const byText = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   const pairs = [...input.pairs].sort((x, y) => collator.compare(x.identifier, y.identifier) || byText(x.productId, y.productId));
   const outputs = input.outputs.filter(o => o.batchId === batchId)
@@ -174,7 +184,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     if (!mine.some(heldForPerson) && (pair.change === "failed" || (!withLinks && pair.change !== "unchanged"))) {
       const reason = pair.notes?.split("; ")[0] || NO_DELIVERABLE_PHOTO;
       exceptions.push({ identifier: pair.identifier, channel: null, image: null, reason, fix: FIX_PRODUCT, group: `No image on any channel: ${shortReason(reason)}` });
-      for (const o of mine) if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: leftOutReason(o) });
+      for (const o of mine) if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: leftOutReason(o, tooLarge) });
       continue;
     }
     let productHeld = false;
@@ -183,12 +193,15 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
         const record = autoDecideRecordOf(o.compliance);
         const cause = record?.cause ?? "not_publishable";
         const improvement = improvementOf.get(o.sourceImageId);
-        const improves = cause === "not_enlarged" && !!improvement && !improvement.improvedAt && !improvement.endReason && improvement.tries < IMPROVE_MAX_TRIES;
+        // The sweep goes by the flag: a failed enlargement a judged problem sent here under another rule is tried too.
+        const notEnlarged = cause === "not_enlarged" || o.flags.includes("enlargement_failed"), refused = notEnlarged && tooLarge.has(o.sourceImageId);
+        const improves = notEnlarged && !!improvement && !improvement.improvedAt && !improvement.endReason && improvement.tries < IMPROVE_MAX_TRIES;
         // M1-F3-R5 (M1 D11): every try used, or the re-made image did not pass: it stays as sent.
         if (improvement && !improvement.improvedAt && (improvement.tries >= IMPROVE_MAX_TRIES || improvement.endReason === "not_passed")) stayedAsSent++;
-        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: SENT_REASON[cause], rule: record?.rule ?? "", improves,
+        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: cause === "not_enlarged" && refused ? SENT_TOO_LARGE : SENT_REASON[cause], rule: record?.rule ?? "", improves,
           better: improves ? "A larger version replaces it at the same link when the enlargement works. Nothing to do."
-            : cause === "not_enlarged" ? "We could not enlarge it. Send a larger photo in a new batch."
+            : refused ? BETTER_TOO_LARGE
+            : notEnlarged ? "We could not enlarge it. Send a larger photo in a new batch."
               : "Send a better photo in a new batch to replace it." });
         productNotes++;
         continue;
@@ -215,9 +228,9 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
       // Left out on purpose, or replaced by a later image of the same slot: not an exception.
       if (o.decision === "remove" || o.decision === "replaced" || o.reason?.includes(HOLDOUT_KEPT_NOTE) || o.reason?.startsWith("Removed in batch")) continue;
       if (linkAt(pair.identifier, o.channel, o.n)) continue;
-      const why = o.flags.includes("auto_dropped") ? leftOutReason(o) : o.reason?.includes(STYLI_SKIP_NOTE) ? TOO_SMALL : shortReason(o.reason);
+      const why = o.flags.includes("auto_dropped") ? leftOutReason(o, tooLarge) : o.reason?.includes(STYLI_SKIP_NOTE) ? TOO_SMALL : shortReason(o.reason);
       const cause = autoDecideRecordOf(o.compliance)?.cause;
-      exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? why, fix: o.status === "failed" ? FIX_NOT_MADE : why === TOO_SMALL ? "Send a larger photo in a new batch." : (cause && LEFT_OUT_FIX[cause]) ?? FIX_DEFAULT,
+      exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? why, fix: o.status === "failed" ? FIX_NOT_MADE : why === TOO_SMALL ? "Send a larger photo in a new batch." : cause === "not_enlarged" && tooLarge.has(o.sourceImageId) ? FIX_TOO_LARGE : (cause && LEFT_OUT_FIX[cause]) ?? FIX_DEFAULT,
         group: `${CHANNELS[o.channel].label} image ${o.n} missing: ${why}` });
       if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: why });
       productExceptions++;
@@ -275,6 +288,8 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     provisionalReasons: groupReasons(notes.map(n => n.reason)).slice(0, DIGEST_TOP_REASONS),
     improving: notes.filter(n => n.improves).length,
     stayedAsSent,
+    // No model on the row, or one that gave no verdict: qa_unavailable keeps the model it asked, and a re-made image keeps the last one.
+    deliveredUnjudged: outputs.filter(o => o.status === "verified" && o.isLive && channels.includes(o.channel) && (o.qaModel === null || o.flags.includes("qa_unavailable") || o.flags.includes("qa_cap"))).length,
     photosLeftOut: photoReasons.size,
     leftOutReasons: groupReasons([...photoReasons.values()]),
     exceptions: exceptions.length,
@@ -321,12 +336,13 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
     .from(catalogBatchProducts).innerJoin(catalogProducts, eq(catalogProducts.id, catalogBatchProducts.productId)).where(eq(catalogBatchProducts.batchId, batchId))
     .orderBy(asc(catalogProducts.identifier), asc(catalogProducts.id));
   const outputs = await db.select({ id: catalogOutputs.id, batchId: catalogOutputs.batchId, productId: catalogOutputs.productId, sourceImageId: catalogOutputs.sourceImageId, channel: catalogOutputs.channel, n: catalogOutputs.n, status: catalogOutputs.status, isLive: catalogOutputs.isLive,
-    flags: catalogOutputs.flags, reason: catalogOutputs.reason, decision: catalogOutputs.decision, compliance: catalogOutputs.compliance, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt })
+    flags: catalogOutputs.flags, reason: catalogOutputs.reason, decision: catalogOutputs.decision, compliance: catalogOutputs.compliance, qaModel: catalogOutputs.qaModel, publicUrl: catalogOutputs.publicUrl, publishedAt: catalogOutputs.publishedAt })
     .from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId)).orderBy(asc(catalogOutputs.createdAt), asc(catalogOutputs.id));
-  return digestFrom({ ...input, pairs, outputs, improvements: await readImprovements(db, batchId) });
+  return digestFrom({ ...input, pairs, outputs, improvements: await readImprovements(db, batchId), tooLarge: await readTooLargePhotos(db, batchId) });
 }
 
-function leftOutReason(o: { compliance: unknown; reason: string | null }): string {
+function leftOutReason(o: { compliance: unknown; reason: string | null; sourceImageId: string }, tooLarge: ReadonlySet<string>): string {
   const cause = autoDecideRecordOf(o.compliance)?.cause;
+  if (cause === "not_enlarged" && tooLarge.has(o.sourceImageId)) return LEFT_OUT_TOO_LARGE;
   return cause ? LEFT_OUT_REASON[cause] : shortReason(o.reason);
 }

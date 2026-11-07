@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { autoDecide, autoDecideNote, autoDecideOf, DEFAULT_AUTO_DECIDE_RULES, deliverable, HOLD_SENTENCE, ruleFor, type AutoDecideSnapshot } from "./auto-decide";
-import { HOLD_CAUSES, PROVISIONAL_SENTENCE } from "./types";
+import { HOLD_CAUSES, PROVISIONAL_IMPROVES_SENTENCE, PROVISIONAL_SENTENCE } from "./types";
 import { INFORMATION_FLAGS } from "./qa/triage";
 
 const staged = { status: "needs_attention" as const, stagingUri: "gs://assets/x.jpg", bytes: 10, flags: [] as never[], channel: "noon" as const };
@@ -47,6 +47,8 @@ describe("M1-F3-R1 auto-decide rules", () => {
   it("provisional is an information flag (it never holds) and its sentences name no model", () => {
     expect(INFORMATION_FLAGS.has("provisional")).toBe(true);
     expect(autoDecideNote("deliver", "This photo could not be checked")).toBe(`This photo could not be checked. ${PROVISIONAL_SENTENCE}`);
+    expect(PROVISIONAL_SENTENCE).not.toMatch(/later|improved/);
+    expect(autoDecideNote("deliver", "Not enlarged", true, true)).toBe(`Not enlarged. ${PROVISIONAL_IMPROVES_SENTENCE}`);
     expect(autoDecideNote("drop", null)).toMatch(/^Left out automatically/);
   });
 

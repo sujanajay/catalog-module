@@ -61,8 +61,10 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
  * A size chart or text-only image (`LEFT_OUT_FLAGS`) is always left out with a note, never held, and
  * photo 1 is the lowest photo that is not one.
  * `keptLive` lists (channel, n) pairs whose live image stays unchanged in this batch; they count as good.
+ * `judgedFailedEnlargement` (an auto-decide batch): nobody will look at a failed enlargement, so the judge did, and only
+ * one with no other problem goes to `not_enlarged`. Any other problem takes its normal route (M1 D40).
  */
-export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = []): Map<string, TriageDecision> {
+export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = [], options: {judgedFailedEnlargement?: boolean} = {}): Map<string, TriageDecision> {
   const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
   const shots = [...new Set([...outputs.filter(o => !leftOut(o)).map(o => o.n), ...keptLive.map(k => k.n)])];
   const photoOne = shots.length ? Math.min(...shots) : 1;
@@ -82,7 +84,7 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
     // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
-    if (problems.includes("enlargement_failed")) { hold("not_enlarged"); continue; }
+    if (problems.includes("enlargement_failed") && (!options.judgedFailedEnlargement || problems.length === 1)) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
     // M1 D40: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) {
@@ -108,7 +110,9 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     // Our own defects (halo, leftover background, a broken channel rule) are never published with a
     // note: the re-render loop already tried, so the photo is dropped above or held here.
     const publishable = !!o.stagingUri && !problems.includes("fallback_matte") && !visible && !problems.some(flag => OWN_DEFECT_FLAGS.has(flag));
-    if (publishable) result.set(o.id, {action:"note",flags:problems}); else hold(visible ? "visible_defect" : "not_publishable");
+    // A failed enlargement goes live only through the rule, flagged provisional, so the improvement sweep and the invariants still see it.
+    if (publishable) { if (problems.includes("enlargement_failed")) hold("not_enlarged"); else result.set(o.id, {action:"note",flags:problems}); }
+    else hold(visible ? "visible_defect" : "not_publishable");
   }
   return result;
 }

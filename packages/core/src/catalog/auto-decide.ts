@@ -6,7 +6,7 @@
 import { asc, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogAutoDecideRules } from "../db/schema";
-import { HOLD_CAUSES, PROVISIONAL_SENTENCE, type AutoDecideAction, type BatchOptions, type ChannelId, type HoldCause, type OutputFlag, type OutputStatus } from "./types";
+import { HOLD_CAUSES, PROVISIONAL_IMPROVES_SENTENCE, PROVISIONAL_SENTENCE, type AutoDecideAction, type BatchOptions, type ChannelId, type HoldCause, type OutputFlag, type OutputStatus } from "./types";
 
 export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
 export type AutoDecideRule = AutoDecideSnapshot["rules"][number];
@@ -88,11 +88,12 @@ export const HOLD_SENTENCE_ALONE = "It has no link yet. Replace it, use it as it
 /**
  * The operator sentence of an auto decision: the problem first (when known), then what was done. Model-free.
  * `othersDelivered` false: the product has no other photo delivered here, so a hold does not claim one.
+ * `improves` true: a later try can still replace a delivered image, the only case that may promise it.
  */
-export function autoDecideNote(action: AutoDecideAction, why: string | null, othersDelivered = true): string {
+export function autoDecideNote(action: AutoDecideAction, why: string | null, othersDelivered = true, improves = false): string {
   const lead = why ? `${why.trim()}${/[.!?]$/.test(why.trim()) ? "" : "."} ` : "";
   if (action === "hold") return `${lead}${othersDelivered ? HOLD_SENTENCE : HOLD_SENTENCE_ALONE}`;
   return action === "deliver"
-    ? `${lead}${PROVISIONAL_SENTENCE}`
+    ? `${lead}${improves ? PROVISIONAL_IMPROVES_SENTENCE : PROVISIONAL_SENTENCE}`
     : `${lead}Left out automatically; this photo gets no link here and the product's other photos are delivered.`;
 }

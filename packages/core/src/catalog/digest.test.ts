@@ -10,7 +10,7 @@ import { seedLargeBatch } from "./pipeline/large-batch-fixture";
 import { batchCostFigure } from "./cost-report";
 import { buildReport } from "./pipeline/report";
 import { APPEND_TAKEN_NOTE, HOLDOUT_KEPT_NOTE, overLimitNote } from "./pipeline/publish";
-import { AMAZON_NO_WHITE_FIRST, buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, type BatchDigest, type DigestOutput } from "./digest";
+import { AMAZON_NO_WHITE_FIRST, buildDigest, digestFrom, digestWithCost, groupReasons, readImprovements, readTooLargePhotos, type BatchDigest, type DigestOutput } from "./digest";
 import { digestCostLine, digestEmail, digestHeadline, digestLeftOutLine, digestReasonLines, digestTiles, digestTimeLine, duration } from "./digest-copy";
 import { compareXlsxCsv, EXCEPTIONS_SHEET, NO_EXCEPTIONS, NOTES_SHEET, writeExceptionsCsv, writeLinksCsv, writeLinksXlsx } from "./sheet";
 
@@ -42,7 +42,7 @@ async function parts(files: unknown[] = []) {
   const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
   const input = { batch: built.batch, sheet: built.sheet, files, cost };
   const fromRows = digestFrom({ ...input, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })),
-    outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+    outputs: built.rows.outputs, improvements: await readImprovements(db, batchId), tooLarge: await readTooLargePhotos(db, batchId) });
   expect(fromRows).toEqual(await buildDigest(db, input));
   return { built, ...fromRows };
 }
@@ -52,7 +52,7 @@ describe("products grouping left out (R1 exit 2 finding 1)", () => {
   const links = { identifier: "LNK", why: "links" as const, reason: "Row 2, Image 1: the link answered 404.", photos: 1, files: ["LNK_1.jpg"] };
   const digestOf = async (leftOutProducts: Parameters<typeof digestFrom>[0]["leftOutProducts"], files: unknown[] = [], sameFilesMerged = 0, sharedPhotos: Parameters<typeof digestFrom>[0]["sharedPhotos"] = []) => {
     const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
-    return digestFrom({ batch: built.batch, sheet: built.sheet, files, cost, leftOutProducts, sameFilesMerged, sharedPhotos, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+    return digestFrom({ batch: built.batch, sheet: built.sheet, files, cost, leftOutProducts, sameFilesMerged, sharedPhotos, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId), tooLarge: await readTooLargePhotos(db, batchId) });
   };
 
   it("counts them in the total and gives each an Exceptions row with its reason and what to do, so All N can never be said", async () => {
@@ -107,10 +107,41 @@ describe("products grouping left out (R1 exit 2 finding 1)", () => {
   });
 });
 
+describe("a photo the size rule refused to enlarge, and images no judge looked at", () => {
+  const notEnlarged = (action: string) => ({ auto_decide: { rule: "not_enlarged:*", cause: "not_enlarged", action } });
+  const base = { batchId: "b", productId: "p", channel: "noon" as const, reason: null, decision: null, publicUrl: "u", publishedAt: null };
+  const build = (outputs: Partial<DigestOutput>[], tooLarge: string[], improvements: Parameters<typeof digestFrom>[0]["improvements"] = []) => digestFrom({ batch: { id: "b", channels: ["noon"], status: "done", startedAt: null, updatedAt: new Date() },
+    sheet: { channels: ["noon"], rows: [{ brand: "b", identifier: "A", optionIdStyleColor: "", opptraSkuIds: [], links: { noon: ["u"] }, status: "ok", notes: "", change: "new", changedAt: null }] }, files: [], cost, improvements, tooLarge: new Set(tooLarge), pairs: [{ productId: "p", identifier: "A", change: "new", notes: null }],
+    outputs: outputs.map((o, i) => ({ ...base, id: String(i), sourceImageId: "s", n: i + 1, status: "verified", isLive: true, flags: [], compliance: {}, qaModel: "m", ...o })) as DigestOutput[] });
+  const sent = { flags: ["enlargement_failed", "provisional"], compliance: notEnlarged("deliver") };
+
+  it("says it is too large and was enlarged the plain way, with no 'yet' and no 'send a larger photo'", () => {
+    const { notes, digest } = build([sent], ["s"]);
+    expect(digest.provisionalReasons).toEqual([{ text: "the photo is too large to enlarge fully, so it was enlarged the plain way", count: 1 }]);
+    expect(notes[0]).toMatchObject({ improves: false, better: expect.stringContaining("fills more of the frame") });
+    expect(notes[0]!.better).not.toMatch(/larger photo/i);
+    expect(JSON.stringify(digest)).not.toMatch(/\byet\b/);
+  });
+  it("a failure a call can retry keeps its own words", () => {
+    const { notes, digest } = build([sent], []);
+    expect(digest.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 1 }]);
+    expect(notes[0]!.better).toBe("We could not enlarge it. Send a larger photo in a new batch.");
+  });
+  it("left out by a rule, it says too large and asks for no larger photo", () => {
+    const { exceptions, digest } = build([{ status: "verified" }, { status: "skipped", isLive: false, flags: ["auto_dropped"], compliance: notEnlarged("drop"), sourceImageId: "t" }], ["t"]);
+    expect(digest.leftOutReasons).toEqual([{ text: "the photo is too large to enlarge fully", count: 1 }]);
+    expect(exceptions[0]!.fix).toBe("Send a photo where the product fills more of the frame in a new batch.");
+  });
+  it("counts live images with no judge's look, and only those", () => {
+    const { digest } = build([{ qaModel: null, flags: ["provisional"] }, { qaModel: null, flags: ["qa_sampled_out"] }, { qaModel: "m", flags: ["qa_unavailable", "provisional"] }, { qaModel: "m" }, { qaModel: null, status: "needs_attention", isLive: false }, { qaModel: null, status: "skipped", isLive: false }], []);
+    expect(digest.deliveredUnjudged).toBe(3);
+  });
+});
+
 describe("a photo held for a person (M1 D40)", () => {
   const base = { batchId: "b", productId: "p", sourceImageId: "s", channel: "amazon" as const, isLive: false, flags: ["text_or_watermark"], reason: "A mark.", decision: null, publicUrl: "u", publishedAt: null };
   const hold = { auto_decide: { rule: "visible_defect:*", cause: "visible_defect", action: "hold" } };
-  const held = (n: number) => digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost, improvements: [], pairs: [{ productId: "p", identifier: "A", change: "updated", notes: null }],
+  const held = (n: number) => digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost, improvements: [], tooLarge: new Set(), pairs: [{ productId: "p", identifier: "A", change: "updated", notes: null }],
     outputs: [{ ...base, id: "1", n: 1, status: n === 1 ? "needs_attention" : "verified", isLive: n !== 1, flags: n === 1 ? base.flags : [], compliance: n === 1 ? hold : {} }, { ...base, id: "2", n: 2, status: n === 2 ? "needs_attention" : "verified", isLive: n !== 2, flags: n === 2 ? base.flags : [], compliance: n === 2 ? hold : {} }] as unknown as DigestOutput[] });
   it("points to where the person can act, and says when Amazon has no white first image", () => {
     const first = held(1), second = held(2);
@@ -119,7 +150,7 @@ describe("a photo held for a person (M1 D40)", () => {
     expect(second.exceptions.find(e => e.image === 2)!.reason).not.toContain(AMAZON_NO_WHITE_FIRST);
   });
   it("a product whose only photo is held still counts under Needs you, or nobody could reach it", () => {
-    const only = digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null }, improvements: [], pairs: [{ productId: "p", identifier: "A", change: "failed", notes: null }],
+    const only = digestFrom({ batch: { id: "b", channels: ["amazon"], status: "done", startedAt: null, updatedAt: new Date() }, sheet: { channels: ["amazon"], rows: [] }, files: [], cost: { usd: 0, inr: null, usdPerProduct: null, inrPerProduct: null }, improvements: [], tooLarge: new Set(), pairs: [{ productId: "p", identifier: "A", change: "failed", notes: null }],
       outputs: [{ ...base, id: "1", n: 1, status: "needs_attention", compliance: hold }] as unknown as DigestOutput[] });
     expect(only.digest.needsYou).toBe(1);
     expect(only.exceptions).toEqual([expect.objectContaining({ image: 1, fix: expect.stringContaining("need you") })]);
@@ -183,10 +214,10 @@ describe("buildDigest (M1-F4-R1 to R4)", () => {
     const products = 70_000, at = Date.UTC(2026, 10, 5);
     const pairs = Array.from({ length: products }, (_, i) => ({ productId: `p${i}`, identifier: id(i), change: "new", notes: null }));
     const outputs: DigestOutput[] = pairs.flatMap((pair, i) => [1, 2, 3].map(n => ({ id: `o${i}-${n}`, batchId: "b", productId: pair.productId, sourceImageId: `s${i}-${n}`, channel: "noon" as const, n,
-      status: "verified", isLive: true, flags: [], reason: null, decision: null, compliance: null, publicUrl: `https://x/${i}/${n}`, publishedAt: new Date(at + ((i * 3 + n) % 1000) * 1000) })));
+      status: "verified", isLive: true, flags: [], reason: null, decision: null, compliance: null, qaModel: "m", publicUrl: `https://x/${i}/${n}`, publishedAt: new Date(at + ((i * 3 + n) % 1000) * 1000) })));
     const sheet = { channels: ["noon" as const], rows: pairs.map((p, i) => ({ brand: "b", identifier: p.identifier, optionIdStyleColor: "", opptraSkuIds: [], links: { noon: [1, 2, 3].map(n => `https://x/${i}/${n}`) }, status: "ok" as const, notes: "", change: "new" as const, changedAt: null })) };
     expect(outputs.length).toBeGreaterThan(200_000);
-    const { digest: d } = digestFrom({ batch: { id: "b", channels: ["noon"], status: "done", startedAt: null, updatedAt: new Date(at) }, sheet, files: [], cost, pairs, outputs, improvements: [] });
+    const { digest: d } = digestFrom({ batch: { id: "b", channels: ["noon"], status: "done", startedAt: null, updatedAt: new Date(at) }, sheet, files: [], cost, pairs, outputs, improvements: [], tooLarge: new Set() });
     expect(d).toMatchObject({ products, productsWithLinks: products, completeEveryChannel: products, exceptions: 0, firstLinksAt: new Date(at).toISOString() });
   }, 60_000);
 
@@ -247,6 +278,13 @@ describe("the digest words (UX 5.3, M1 section 5 screen 3)", () => {
     expect(lines[4]).toBe("Noon image 1 missing: no photo - 30");
     expect(more).toBe(30 - 6);
     expect(digestReasonLines(digest({ provisionalLinks: 0, improving: 0, photosLeftOut: 0, controlsSkipped: 0, exceptionReasons: [] }))).toEqual({ lines: [], more: 0 });
+  });
+
+  it("says how many images went out without the quality check, and stays quiet at none or on an older digest", () => {
+    const quiet = { provisionalLinks: 0, improving: 0, photosLeftOut: 0, controlsSkipped: 0, exceptionReasons: [] };
+    expect(digestReasonLines(digest({ ...quiet, deliveredUnjudged: 45 })).lines).toEqual(["45 images were delivered without our automatic quality check."]);
+    expect(digestReasonLines(digest({ ...quiet, deliveredUnjudged: 1 })).lines).toEqual(["1 image was delivered without our automatic quality check."]);
+    expect(digestReasonLines(digest({ ...quiet, deliveredUnjudged: 0 })).lines).toEqual([]);
   });
 
   it("gives the time to first links and to all links", () => {

@@ -121,3 +121,41 @@ describe("QA triage: hard holds only", () => {
   expect(triageProduct(outputs).has(decided.id)).toBe(false);
  });
 });
+
+describe("QA triage: a failed enlargement (spec 18, M1 D40)", () => {
+ const judged = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs, [], {judgedFailedEnlargement:true}).get(target.id);
+ it("without the judge first (no auto-decide rules) it always holds as not enlarged, whatever else it carries", () => {
+  for (const flags of [["enlargement_failed"], ["enlargement_failed", "small_source"], ["enlargement_failed", "fallback_matte"]] as OutputFlag[][]) {
+   const o = out(2, flags);
+   expect(action([out(1), o, out(3), out(4)], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+  }
+ });
+ it("judged with no other problem: not enlarged", () => {
+  const o = out(1, ["enlargement_failed"]);
+  expect(judged([o], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+ });
+ it("a judged visible defect takes its normal route: held, or left out when the channel can do without it", () => {
+  for (const flag of ["product_removed", "halo", "leftover_background", "text_or_watermark"] as const) {
+   const first = out(1, ["enlargement_failed", flag]);
+   expect(judged([first], first)).toMatchObject({action:"hold",cause:"visible_defect"});
+   const spare = out(3, ["enlargement_failed", flag]);
+   expect(judged([out(1), out(2), spare], spare)).toMatchObject({action:"drop"});
+   const needed = out(2, ["enlargement_failed", flag]);
+   expect(judged([out(1), needed], needed)).toMatchObject({action:"hold",cause:"visible_defect"});
+  }
+ });
+ it("a wrong item and a collage come first, with or without the judge", () => {
+  const wrong = out(1, ["enlargement_failed", "different_product"]), collage = out(1, ["enlargement_failed", "collage"]);
+  expect(judged([wrong], wrong)).toMatchObject({action:"hold",cause:"wrong_item"});
+  expect(judged([collage], collage)).toMatchObject({action:"hold",cause:"collage"});
+  expect(action([wrong], wrong)).toMatchObject({action:"hold",cause:"wrong_item"});
+ });
+ it("no verdict takes the unchecked rule, as any other unseen image", () => {
+  const o = out(1, ["enlargement_failed", "qa_unavailable"]);
+  expect(judged([o], o)).toMatchObject({action:"hold",cause:"unchecked"});
+ });
+ it("never goes live as a plain note: a non-visible problem that would be noted is delivered by the not-enlarged rule, so it stays provisional and tracked", () => {
+  const o = out(2, ["enlargement_failed", "orientation"]);
+  expect(judged([out(1), o], o)).toMatchObject({action:"hold",cause:"not_enlarged"});
+ });
+});
