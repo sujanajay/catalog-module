@@ -302,8 +302,8 @@ Rules for all sources:
   no links; `not_in_sheet` rows carry their links and the status word. The uploaded workbook is kept
   verbatim under `uploads/`; its match column and sheet names are recorded in `catalog_uploads.detected`
   so finalize can write the filled copy.
-- Files: a duplicate `(identifier, n)` leaves that product out until one file is renamed ("<k> products
-  have two files for the same shot number: <ids>."); HEIC/HEIF files are normal images (`image/heic`,
+- Files: different photos at one `(identifier, n)` are all kept, each as its own shot, with a note and a row in the
+  Exceptions sheet ("<k> products have different photos with the same shot number: <ids>."; M1 D45); HEIC/HEIF files are normal images (`image/heic`,
   converted by `catalog-matting`); BMP and corrupt files are listed with plain reasons ("<name> is a BMP
   file. Save it as JPEG or PNG and add it again."); more than one top-level folder with images warns
   "Your upload has <k> top-level folders (<names>). Everything in them will be filed under <brand>. If
@@ -609,7 +609,7 @@ flood-fill fallback with flag `fallback_matte` and status `needs_attention` inst
   "photos", "marketplaces", "images will be made"; "Estimated cost: about INR <x> (<n> images, <m>
   quality checks)" or "not available" when `INR_PER_USD` is unset; warning list without any SKU warning:
   products with no photos, "<k> files could not be read." with names and reasons (no Styli size
-  warning: no photo is skipped for its size), "<k> products have photos but are not in your product list", "<k> products have two files for
+  warning: no photo is skipped for its size), "<k> products have photos but are not in your product list", "<k> products have different photos with
   the same shot number", multiple top-level folders, duplicate identifier rows, "<k> size rows matched
   <m> products."; overwrite preview "<n> products are new", "<m> products already exist and will be
   overwritten", per product the shots to be removed and the rename hint; busy products; the

@@ -8,10 +8,11 @@ import { createTestDb } from "@catalog/core/db/testing";
 import { catalogBatches, catalogBatchProducts, catalogChunks, catalogCostEvents, catalogOutputs, catalogProducts, catalogSourceImages, EMPTY_BATCH_COUNTS } from "@catalog/core/db/schema";
 import * as storage from "@catalog/core/storage";
 import { CHUNK_QUEUED_STALE_MS, CHUNK_STALLED_REASON, CHUNK_UNSTARTED_STALE_MS, dispatchChunks } from "@catalog/core/catalog/pipeline/dispatch";
+import { renderKey } from "@catalog/core/catalog/pipeline/publish";
 import { chunkTaskId, DISPATCH_DEADLINE_SEC } from "@catalog/core/tasks";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import { refreshBatchProgress, workerCatalogDeps, type CatalogDeps } from "./deps";
-import { currentChunkTask, handleChunkTask } from "./chunk";
+import { CHUNK_MAX_ERRORS, currentChunkTask, handleChunkTask } from "./chunk";
 import { handleSweep } from "./sweep";
 import type { HandleOptions } from "../server";
 
@@ -479,6 +480,204 @@ describe("G4 (spec 17): a task the queue dropped after a successful enqueue", ()
     expect(w.deps.matteFor).toHaveBeenCalledTimes(2);
     expect(await row(id)).toMatchObject({ stage: "render", status: "queued", step: 2 });
   }, 60_000);
+});
+
+describe("a lost database connection during a render is not a fault of the photo", () => {
+  const outputsOf = (batchId: string) => db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batchId));
+  const failingRender = (w: World, error: () => unknown, times: number) => {
+    const real = w.deps.renderAllChannels;
+    let left = times;
+    w.deps.renderAllChannels = vi.fn(async (...args: Parameters<typeof real>) => { if (left-- > 0) throw error(); return real(...args); }) as unknown as typeof real;
+  };
+
+  it.each([
+    ["the driver's message", () => new Error("Connection terminated unexpectedly")],
+    ["a socket code", () => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
+    ["a server SQLSTATE", () => Object.assign(new Error("terminating connection due to administrator command"), { code: "57P01" })],
+    ["drizzle's wrapper", () => new Error("Failed query: update", { cause: new Error("Connection terminated unexpectedly") })],
+  ])("%s: the delivery asks for a retry, the retry renders the photo, nothing is recorded as failed", async (name, error) => {
+    const w = world(), s = await seed(w, `conn-once-${name.replace(/\W/g, "")}`, [[1]]);
+    failingRender(w, error, 1);
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2, now: w.deps.now() });
+    await drain(w);
+    const [output] = await outputsOf(s.batch.id);
+    expect(output!.status).not.toBe("failed");
+    expect(output!.error).toBeNull();
+    expect(output!.reason ?? "").not.toMatch(/Connection|ECONNRESET|terminating/);
+    expect(output!.stagingUri).toBeTruthy();
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(2);
+    expect(w.log.mock.calls.some(([message, fields]) => message === "chunk failed" && fields?.severity === "WARNING")).toBe(true);
+  }, 120_000);
+
+  it("a statement timeout, a database too busy to answer, is treated the same", async () => {
+    const w = world(), s = await seed(w, "conn-57014", [[1]]);
+    failingRender(w, () => Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }), 1);
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2, now: w.deps.now() });
+    await drain(w);
+    expect((await outputsOf(s.batch.id)).map(o => o.status)).not.toContain("failed");
+  }, 120_000);
+
+  it("the retry does not render again a photo that an earlier delivery saved", async () => {
+    const w = world(), s = await seed(w, "conn-saved", [[2]]);
+    const real = w.deps.renderAllChannels;
+    let calls = 0;
+    w.deps.renderAllChannels = vi.fn(async (...args: Parameters<typeof real>) => { if (++calls === 2) throw new Error("Connection terminated unexpectedly"); return real(...args); }) as unknown as typeof real;
+    w.deps.photoConcurrency = 1;
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2, now: w.deps.now() });
+    await drain(w);
+    expect((await outputsOf(s.batch.id)).map(o => o.status)).not.toContain("failed");
+    // Photo 1 once, photo 2's lost call and its retry.
+    expect(calls).toBe(3);
+  }, 120_000);
+
+  /**
+   * Delivers the queue as Cloud Tasks does: a 503 comes back after the chunk queue's real backoff (infra/lib/queues.sh:
+   * 10, 20, 40, then 60 s), with no cap on retries here, so only the worker's own limit can end a loop.
+   */
+  const driveWithBackoff = async (w: World, limit = 60) => {
+    const gaps = new Map<string, number>();
+    let deliveries = 0;
+    for (; deliveries < limit && w.queue.length; deliveries++) {
+      const task = w.queue.shift()!;
+      const result = await w.deliver(task.body, { retryCount: task.retryCount });
+      w.advance(5_000);
+      if (result.httpStatus >= 500) {
+        const tries = (gaps.get(task.taskId) ?? 0) + 1;
+        gaps.set(task.taskId, tries);
+        w.advance(Math.min(10_000 * 2 ** (tries - 1), 60_000));
+        w.queue.push({ ...task, retryCount: task.retryCount + 1 });
+      }
+    }
+    expect(deliveries).toBeLessThan(limit);
+  };
+  const start = (w: World, batchId: string) => dispatchChunks(db, w.deps.enqueue, batchId, { window: 2, now: w.deps.now() });
+
+  it(`with real backoff, a wobble that ends before delivery ${CHUNK_MAX_ERRORS} (about 130 s of backoff plus the deliveries' own time) is survived: no stall, nothing failed`, async () => {
+    const w = world(), s = await seed(w, "conn-wobble", [[1]]);
+    failingRender(w, () => new Error("Connection terminated unexpectedly"), CHUNK_MAX_ERRORS - 1);
+    await start(w, s.batch.id);
+    await driveWithBackoff(w);
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+    expect((await outputsOf(s.batch.id)).map(o => o.status)).not.toContain("failed");
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(CHUNK_MAX_ERRORS);
+  }, 120_000);
+
+  it(`with real backoff, a connection that never comes back stops at ${CHUNK_MAX_ERRORS} deliveries with no progress (about 130 s of backoff), not at the stall limit`, async () => {
+    const w = world(), s = await seed(w, "conn-always", [[1]]);
+    failingRender(w, () => new Error("Connection terminated unexpectedly"), Number.MAX_SAFE_INTEGER);
+    await start(w, s.batch.id);
+    await driveWithBackoff(w);
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(CHUNK_MAX_ERRORS);
+    const chunk = await row(s.chunks[0]!.id);
+    expect(chunk).toMatchObject({ status: "failed", stalls: 0 });
+    expect(chunk.error).toBe("Connection terminated unexpectedly");
+    const [output] = await outputsOf(s.batch.id);
+    expect(output).toMatchObject({ status: "failed" });
+    expect(output!.reason).toContain("Processing stopped after repeated errors");
+  }, 120_000);
+
+  it("P2-2: a long chunk in a wobble, every delivery finishing a photo before its socket error, is not failed: more errors than the limit, every photo made", async () => {
+    const w = world(), s = await seed(w, "conn-progress", [[8]]);
+    w.deps.photoConcurrency = 1;
+    w.slow("renderAllChannels", () => 5_000);
+    const real = w.deps.renderAllChannels;
+    let calls = 0;
+    w.deps.renderAllChannels = vi.fn(async (...args: Parameters<typeof real>) => { if (++calls % 2 === 0) throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }); return real(...args); }) as unknown as typeof real;
+    await start(w, s.batch.id);
+    await driveWithBackoff(w);
+    expect(w.log.mock.calls.filter(([message]) => message === "chunk failed").length).toBeGreaterThan(CHUNK_MAX_ERRORS);
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+    const outputs = await outputsOf(s.batch.id);
+    expect(outputs).toHaveLength(8);
+    expect(outputs.map(o => o.status)).not.toContain("failed");
+    expect(outputs.map(o => o.status)).not.toContain("pending");
+  }, 120_000);
+
+  it(`progress resets the count, then ${CHUNK_MAX_ERRORS} errors with no progress between them still end the loop`, async () => {
+    const w = world(), s = await seed(w, "conn-progress-then-none", [[2]]);
+    w.deps.photoConcurrency = 1;
+    w.slow("renderAllChannels", () => 5_000);
+    const real = w.deps.renderAllChannels;
+    let calls = 0;
+    w.deps.renderAllChannels = vi.fn(async (...args: Parameters<typeof real>) => { if (++calls > 1) throw new Error("Connection terminated unexpectedly"); return real(...args); }) as unknown as typeof real;
+    await start(w, s.batch.id);
+    await driveWithBackoff(w);
+    // The first delivery: photo 1 made, photo 2 lost (count 1). Then 4 more with no photo finished, to 5.
+    expect(calls).toBe(1 + CHUNK_MAX_ERRORS);
+    expect((await row(s.chunks[0]!.id)).status).toBe("failed");
+  }, 120_000);
+
+  it("a socket error loading the stored cut-out is redelivered, not recorded as a failed photo", async () => {
+    const w = world(), s = await seed(w, "conn-matte", [[1]]);
+    const download = w.deps.storage.downloadBuffer;
+    let armed = false;
+    w.deps.storage = { ...w.deps.storage, downloadBuffer: (async (uri: string) => {
+      if (armed && uri.includes("matte")) { armed = false; throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }); }
+      return download(uri);
+    }) as typeof download };
+    await start(w, s.batch.id);
+    const matted = w.queue.shift()!;
+    expect((await w.deliver(matted.body)).httpStatus).toBe(200);
+    armed = true;
+    await driveWithBackoff(w);
+    expect(armed).toBe(false);
+    expect((await outputsOf(s.batch.id)).map(o => o.status)).not.toContain("failed");
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+  }, 120_000);
+
+  it("a connection error in the repair ladder redelivers the chunk instead of being logged away", async () => {
+    const w = world(), s = await seed(w, "conn-ladder", [[1]], { channels: ["styli"] });
+    const real = w.deps.renderAllChannels;
+    let calls = 0;
+    w.deps.renderAllChannels = vi.fn(async (...args: Parameters<typeof real>) => {
+      if (++calls === 2) throw new Error("Connection terminated unexpectedly");
+      const made = await real(...args);
+      if (calls > 1) return made;
+      const styli = made.styli!;
+      return { ...made, styli: { ...styli, flags: [...styli.flags, "failed_compliance"], compliance: { ...styli.compliance, ok: false, failures: ["styli_anchor: x"], measured: { ...styli.compliance.measured, anchorDelta: { dx: 0, dy: -7 } } } } };
+    }) as unknown as typeof real;
+    const results: number[] = [];
+    const deliver = w.deliver;
+    await start(w, s.batch.id);
+    for (let i = 0; i < 20 && w.queue.length; i++) {
+      const task = w.queue.shift()!;
+      const result = await deliver(task.body, { retryCount: task.retryCount });
+      results.push(result.httpStatus);
+      w.advance(30_000);
+      if (result.httpStatus >= 500) w.queue.push({ ...task, retryCount: task.retryCount + 1 });
+    }
+    expect(results).toContain(503);
+    expect(w.log.mock.calls.some(([message]) => message === "catalog auto-resolve failed")).toBe(false);
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+  }, 120_000);
+
+  it("any other render error still fails that one output, and the chunk goes on", async () => {
+    const w = world(), s = await seed(w, "conn-not", [[1]]);
+    failingRender(w, () => new Error("Input buffer has corrupt header"), 1);
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2, now: w.deps.now() });
+    await drain(w);
+    const [output] = await outputsOf(s.batch.id);
+    expect(output).toMatchObject({ status: "failed", reason: "Input buffer has corrupt header" });
+    expect(w.deps.renderAllChannels).toHaveBeenCalledTimes(1);
+    expect((await row(s.chunks[0]!.id)).status).toBe("done");
+  }, 120_000);
+});
+
+describe("a transparent product of type other", () => {
+  it("stays on the policy's first cut-out model, with the render key of that model; routing it to the second was never measured", async () => {
+    const w = world(), s = await seed(w, "transparent-other", [[1]]);
+    w.deps.resolvePolicy = vi.fn<CatalogDeps["resolvePolicy"]>(async () => ({ matteModel: "fixture", matteModelSecond: "fixture-two", qaModel: "test/judge", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" }));
+    w.deps.matting = { ...w.deps.matting, health: vi.fn(async () => ({ ok: true, models: [{ id: "fixture", inputSize: 1024, target: "cpu" }, { id: "fixture-two", inputSize: 1024, target: "cpu" }], default: "fixture", versions: { cpu: null, gpu: null } })) } as unknown as CatalogDeps["matting"];
+    const [source] = await db.update(catalogSourceImages).set({ flags: ["transparent"] }).where(eq(catalogSourceImages.batchId, s.batch.id)).returning();
+    await db.update(catalogProducts).set({ productType: "other" }).where(eq(catalogProducts.id, source!.productId));
+    await dispatchChunks(db, w.deps.enqueue, s.batch.id, { window: 2, now: w.deps.now() });
+    await drain(w);
+    expect(vi.mocked(w.deps.matteFor).mock.calls.map(call => call[2])).toEqual(["fixture"]);
+    const [output] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, s.batch.id));
+    const rules = await w.deps.channelRules(s.batch.rulesetVersion);
+    expect(output!.renderKey).toBe(renderKey({ sourceSha256: source!.sha256, channel: "noon", n: 1, policyKey: "default|fixture", rulesVersion: rules.keyVersion("noon") }));
+  }, 120_000);
 });
 
 describe("E5: a window per batch", () => {

@@ -21,10 +21,12 @@ export const OUTPUT_FLAGS = [
   "qa_unavailable","qa_cap","qa_sampled_out","type_unknown",
   "shadow_synthesised","transparent","upscaled","cut_in_source","auto_dropped",
   "product_removed","chart_image","matte_passthrough","enlargement_failed",
-  // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; may be improved later at the same URL.
+  // M1-F3 (M1-S3): delivered now by an auto-decide rule with the best image we have; improved later at the same URL only when a retry exists.
   "provisional",
   // M1 D30 (M1-S6): a follow-up photo that was not added (another batch's live photo has its place, or over the channel limit).
   "not_added",
+  // M1 D45: a code check saw rows of marks on a plain page, so the photo is always judged; only the judge's `chart` view leaves it out.
+  "text_suspected",
 ] as const;
 /** Why the QA triage would hold an output for a person (qa/triage.ts `HoldCause`). */
 export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged","visible_defect"] as const;
@@ -83,7 +85,11 @@ export const UPSCALED_SENTENCE = "Enlarged with a quality pass to meet this mark
 export const ENLARGEMENT_FAILED_WHY = "This photo could not be enlarged to this marketplace's size.";
 export const ENLARGEMENT_FAILED_WHAT = "Try again, use it as it is after the warning, replace the photo, or ask the brand for a larger one.";
 /** M1-F3: the sheet note of a `provisional` output (delivered now by an auto-decide rule). Model-free. */
-export const PROVISIONAL_SENTENCE = "Delivered now with the best image we have; it may be improved later at the same link. Nothing to do.";
+export const PROVISIONAL_SENTENCE = "Delivered now with the best image we have. Nothing to do.";
+/** The same, for a plain render the improvement sweep can try again (a failed enlargement a call can make). Stays on the row after the tries end, so it must not read as a promise. Model-free. */
+export const PROVISIONAL_IMPROVES_SENTENCE = "Delivered now with the best image we have. We retry the enlargement for up to 3 days; if it works, a better image replaces this one at the same link. Nothing to do.";
+/** Spec 18 route `none`: the size rule refused the enlargement before any call, so no retry can change it. Model-free. */
+export const ENLARGEMENT_TOO_LARGE_WHY = "This photo is too large to enlarge fully, so it was enlarged the plain way.";
 export const ENLARGEMENT_FAILED_SENTENCE = `${ENLARGEMENT_FAILED_WHY} ${ENLARGEMENT_FAILED_WHAT}`;
 /** What to do when "Try again" cannot run (a size refusal, or a batch that has stopped): the card offers no Try again. */
 export const ENLARGEMENT_FAILED_WHAT_NO_RETRY = "Use it as it is after the warning, replace the photo, or ask the brand for a different one.";
@@ -339,8 +345,9 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "This product looks transparent or glass; the cut-out may need a look. Compare the two images. 'Use as is' keeps it.",
   matte_passthrough: () =>
     "This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to do.",
+  text_suspected: () => "",
   chart_image: () =>
-    "This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",
+    "The check read this photo as a size chart or a text image, so we left it out. If it is a product photo, tell the technical team.",
   auto_dropped: () =>
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,
@@ -353,8 +360,8 @@ const GENERIC_REASON = "This image needs a look. Compare the two images; 'Use as
 
 /**
  * The operator sentence for a flag. `ctx` fills details when known: `w`, `h`, `min`, `channel`
- * (marketplace label), `failures`, `name`, `format`, `n`, `list`. `shadow_synthesised` is
- * information only and returns "".
+ * (marketplace label), `failures`, `name`, `format`, `n`, `list`. `shadow_synthesised` and
+ * `text_suspected` are information only and return "": they put no note on a delivered image.
  */
 export function flagReason(flag: OutputFlag, ctx?: Record<string, string | number>): string {
   const reason = REASONS[flag];

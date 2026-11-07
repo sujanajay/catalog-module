@@ -7,7 +7,7 @@ import { classifyImageReject } from "./image-check";
 import { linkIdentity } from "./link-identity";
 import { classifyLinkReject } from "./link-reasons";
 import { matchProductList, missingIdentifier, type ProductListRow } from "./product-list";
-import type { GroupingResult, LeftOutProduct, LeftOutWhy, PreviewRow, SameFile, SourceItem } from "./types";
+import type { GroupingResult, LeftOutProduct, LeftOutWhy, PreviewRow, SameFile, SameShot, SourceItem } from "./types";
 import { collectRejectReason } from "./zip";
 import { detectRoots } from "./roots";
 import { pushAll } from "../../arrays";
@@ -19,8 +19,13 @@ export type ItemDimensions = Map<SourceItem, { width: number | null; height: num
 
 // --- Sentences ---------------------------------------------------------------
 
+/** The reject of a batch grouped before M1 D45, when a clash left the whole product out: stored ledgers still carry it. */
 export function duplicateShotMessage(n: number, identifier: string, names: string[]): string {
   return `Two files claim shot ${n} of ${identifier}: ${names.join(", ")}. Rename one and re-upload.`;
+}
+/** M1 D45: the note on files of different bytes that claim one shot. Both are used; nothing is guessed. */
+export function sameShotMessage(n: number, identifier: string, names: string[]): string {
+  return `Different photos claim shot ${n} of ${identifier}: ${names.join(", ")}. We cannot tell which is right, so each was kept as its own shot. If one is wrong, send this product again without it.`;
 }
 export function noShotNumbersMessage(identifier: string, names: string[]): string {
   return `Files for ${identifier} have no shot numbers: ${names.join(", ")}. Rename them ${identifier}_1.jpg, ${identifier}_2.jpg.`;
@@ -265,8 +270,6 @@ export function originalOf(item: SourceItem): SourceItem {
 
 interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean; mode: IdentifierMode; notes?: string[]; shown?: number | null }
 
-const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(a.item.uploadId, b.item.uploadId);
-
 /** The name of an item without its folders and extension: `X.jpg` and `X.jpeg` have one stem. */
 /**
  * One file per photo, in every grouping mode: all entries of a product with the same bytes are one file, whatever their
@@ -365,7 +368,9 @@ function pastesInOrder(list: Entry[]): Entry[] {
  *
  * `sha256Of` (optional): the sha256 of an item's bytes. Every item has been downloaded and hashed before the batch-wide
  * step groups it, so a same-number clash is judged by bytes here at no extra read: the same bytes are one file
- * (mergeSameFiles, listed in `sameFiles`), and different bytes leave the product out, since we cannot tell which is right.
+ * (mergeSameFiles, listed in `sameFiles`). Different bytes at one number (M1 D45, owner rule: no silent loss): no file is lost
+ * and none is preferred. The first by name keeps the number, the others take the next free places, each with a note, and the
+ * clash is listed in `sameShots` for the digest and the Exceptions sheet.
  */
 export function groupItems(items: SourceItem[], options: BatchOptions, unreadable?: Map<SourceItem, string>, sha256Of?: (item: SourceItem) => string | null | undefined): GroupingResult {
   const perRoot = options.perRoot === true;
@@ -373,6 +378,9 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
   const modeOf = detected ? detected.modeOf : () => options.identifierMode;
   const rejected: GroupingResult["rejected"] = [];
   const sameFiles: SameFile[] = [];
+  const sameShots: SameShot[] = [];
+  // Two uploads can hold one path with different bytes. A re-send gets new upload ids, so the bytes break that tie and each photo keeps its shot (M1 D45).
+  const byNameThenBytes = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(sha256Of?.(a.item) ?? "", sha256Of?.(b.item) ?? "") || byText(a.item.uploadId, b.item.uploadId);
   let entries: Entry[] = [];
 
   for (const item of items) {
@@ -404,7 +412,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
 
   const products = new Map<string, SourceItem[]>();
   for (const id of [...byId.keys()].sort(byText)) {
-    let list = pastesInOrder(byId.get(id)!.sort(byNameThenUpload));
+    let list = pastesInOrder(byId.get(id)!.sort(byNameThenBytes));
     const uploads = list.filter((e) => !e.link);
     const links = list.filter((e) => e.link);
     // Precedence only decides for a product that both kinds have; a product only one kind has keeps it.
@@ -442,22 +450,29 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
       for (const e of whole) rejected.push({ item: copyOf(e.item, id, e.raw), reason });
     };
 
-    // Two different photos at one shot number leave the whole product out: we cannot tell which is right. For pasted rows
-    // the shot is the one their file name states, so the result never depends on what else is in the folder.
+    // Different photos at one shot number (M1 D45): we cannot tell which is right, so each stays as its own shot. The first by
+    // name keeps the number and the others go last, so unclashing files keep theirs. A pasted row already has its own place; for
+    // pasted rows the clash is on the shot their file name states, so the result never depends on what else is in the folder.
     const claims = new Map<number, Entry[]>();
     for (const e of list) {
       const claim = e.item.positional ? namedShot(e) : e.raw;
       if (claim !== null) claims.set(claim, [...(claims.get(claim) ?? []), e]);
     }
-    const clash = [...claims.entries()].filter(([, es]) => es.length > 1).sort(([a], [b]) => a - b)[0];
-    if (clash) {
-      const stated = clash[1][0]!.item.positional ? clash[0] : (clash[1][0]!.shown ?? clash[0]);
-      rejectAll(duplicateShotMessage(stated, id, namesOf(clash[1].map((e) => e.item))));
-      continue;
+    const clashNotes = new Map<SourceItem, string>();
+    const moved = new Set<SourceItem>();
+    const shotsOfProduct: SameShot[] = [];
+    for (const [claim, es] of [...claims.entries()].filter(([, group]) => group.length > 1).sort(([a], [b]) => a - b)) {
+      const stated = es[0]!.item.positional ? claim : (es[0]!.shown ?? claim);
+      const names = namesOf(es.map((e) => e.item));
+      shotsOfProduct.push({ identifier: id, shot: stated, files: es.map((e) => e.item.originalName) });
+      for (const e of es) clashNotes.set(e.item, sameShotMessage(stated, id, names));
+      const staying = es.find((e) => !e.item.positional);
+      for (const e of es) if (!e.item.positional && e !== staying) moved.add(e.item);
     }
+    const notesOf = (e: Entry) => [...(e.notes ?? []), ...(clashNotes.has(e.item) ? [clashNotes.get(e.item)!] : [])];
 
-    let numbered = list.filter((e) => e.raw !== null);
-    const unnumbered = list.filter((e) => e.raw === null).sort(byNameThenUpload);
+    let numbered = list.filter((e) => e.raw !== null && !moved.has(e.item));
+    const unnumbered = list.filter((e) => e.raw === null).sort(byNameThenBytes);
     let placedLast = unnumbered;
     if (!numbered.length) {
       if (list.some((e) => e.mode === "folder") || list.length === 1) {
@@ -472,15 +487,17 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
 
     const shots = renumberShots(numbered, (e) => e.raw!);
     const gap = shots.note ? [shots.note] : [];
-    const out = shots.shots.map((s) => copyOf(s.item.item, id, s.n, [...gap, ...(s.item.notes ?? [])]));
-    // An unnumbered file beside numbered ones takes the next free position, in name order.
-    for (const e of placedLast) out.push(copyOf(e.item, id, out.length + 1, [...gap, ...(e.notes ?? []), shotMissingMessage(baseName(e.item))]));
+    const out = shots.shots.map((s) => copyOf(s.item.item, id, s.n, [...gap, ...notesOf(s.item)]));
+    // An unnumbered file beside numbered ones takes the next free position, in name order; then a file that shared a number.
+    for (const e of placedLast) out.push(copyOf(e.item, id, out.length + 1, [...gap, ...notesOf(e), shotMissingMessage(baseName(e.item))]));
+    for (const e of list.filter((x) => moved.has(x.item))) out.push(copyOf(e.item, id, out.length + 1, [...gap, ...notesOf(e)]));
     products.set(id, out);
     pushAll(sameFiles, merged.same);
+    pushAll(sameShots, shotsOfProduct);
   }
 
   rejected.sort((a, b) => byText(a.item.identifier, b.item.identifier) || byText(a.item.originalName, b.item.originalName));
-  return { products, rejected, warnings: [], ...(detected ? { roots: detected.roots } : {}), ...(sameFiles.length ? { sameFiles } : {}) };
+  return { products, rejected, warnings: [], ...(detected ? { roots: detected.roots } : {}), ...(sameFiles.length ? { sameFiles } : {}), ...(sameShots.length ? { sameShots } : {}) };
 }
 
 // --- Preview rows ----------------------------------------------------------------
@@ -638,6 +655,11 @@ export function warningSentences(
   const duplicates = distinct(grouped.rejected.filter((r) => DUPLICATE_REJECT.test(r.reason)).map((r) => r.item.identifier));
   if (duplicates.length) {
     out.push(split(`${fmt(duplicates.length)} products have two files for the same shot number: ${duplicates.join(", ")}. They are left out until one file is renamed; see the grouping table.`));
+  }
+
+  const clashed = distinct((grouped.sameShots ?? []).map((s) => s.identifier));
+  if (clashed.length) {
+    out.push(split(`${fmt(clashed.length)} ${clashed.length === 1 ? "product has" : "products have"} different photos with the same shot number: ${clashed.join(", ")}. Each photo is kept as its own shot; see the grouping table.`));
   }
 
   // Left out by name too, with no sentence of their own until now: the preview says so before the batch moves on.

@@ -125,6 +125,10 @@ export interface JudgeInput {
    * from the first judging, so `wrong_item` never asks the second judge there. Default true.
    */
   wrongItemCheck?: boolean;
+  /** The sides image 1 is measured as cut at its own frame edge (render `measured.cut`). Absent or empty says nothing: no line is sent. */
+  sourceCut?: readonly string[];
+  /** A code check saw rows of small marks on a plain page (detectTextImage). It never decides; the judge's `chart` view does. */
+  chartSuspected?: boolean;
 }
 /** One judge model's reading of one output. */
 export interface JudgeOpinion {
@@ -209,6 +213,7 @@ export function backoffRetry(line: string, model: string, budgets: BackoffBudget
 async function askJudge(input: JudgeInput, model: string, deps: CatalogLlmDeps) {
   const content = [textPart("Image 1: the source photo"), ...imageParts([await qaImage(input.original)]), textPart(`Image 2: the output we rendered from image 1 for ${CHANNELS[input.channel].label}`), ...imageParts([await qaImage(input.output)])];
   if (input.n > 1 && input.shotOne) content.push(textPart(`Image 3: photo 1 of the same product id (${input.identifier}), for reference only`), ...imageParts([await qaImage(input.shotOne)]));
+  for (const hint of judgeHints(input)) content.push(textPart(hint));
   content.push(textPart("Return only the JSON object."));
   const system = renderTemplate(CATALOG_QA_TEMPLATE, {channel: CHANNELS[input.channel].label, productType: PRODUCT_TYPE_WORDS[input.productType] ?? PRODUCT_TYPE_WORDS.other!});
   return callCatalogJson([{role:"system",content:system},{role:"user",content}], obj => {
@@ -219,6 +224,13 @@ async function askJudge(input: JudgeInput, model: string, deps: CatalogLlmDeps) 
     if (missing.length) throw new LlmJsonError(`Missing scores: ${missing.join(", ")}. Return every score as a number from 0 to 100.`, JSON.stringify(obj));
     return obj;
   }, model, deps);
+}
+/** What code measured about image 1, for the judge to check against image 1. The prompt says image 1 decides. */
+export function judgeHints(input: Pick<JudgeInput, "sourceCut" | "chartSuspected">): string[] {
+  return [
+    ...(input.sourceCut?.length ? [`Measured by code: image 1 is cut at its own frame edge on these sides: ${input.sourceCut.join(", ")}.`] : []),
+    ...(input.chartSuspected ? ["Measured by code: image 1 has rows of small marks on a plain page. That can be a size chart, or a printed pattern on a product photo. Use view chart only when the image is mostly text, a table or a diagram rather than a photo of the product."] : []),
+  ];
 }
 /** Older replies carry a `reasons` array instead of `evidence`; keep them in their order. */
 function legacyReasons(value: Record<string, unknown>, names: Record<number, string>): string[] {

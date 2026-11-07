@@ -6,6 +6,7 @@ import { ENLARGEMENT_FAILED_WHAT_NO_RETRY,type ChannelId,type OutputFlag } from 
 import { strictestChannel } from "./qa/policy";
 import { MAX_REASONS_PER_PHOTO,bySeverity,flagDetails,problemLine,severityRank } from "./qa/reasons";
 import { INFORMATION_FLAGS } from "./qa/triage";
+import { autoDecideOf } from "./auto-decide";
 import { actionsOn, busyBackgroundHold, failuresOf, OWN_DEFECT_FLAGS } from "./auto-resolve";
 import { plainFailures, triedSentence } from "./qa/reasons";
 /** `canRetry`: "Try again" can run for this photo (spec 18 lifecycle 3.6): it is held for its enlargement, its batch is not stopped and a call can make one of its failed identities (a size refusal cannot). */
@@ -44,7 +45,9 @@ export async function listAttention(db:Db,batchId:string,sign:(uri:string)=>Prom
   const preferred=batch.channels.length?strictestChannel(batch.channels):siblings[0]!.output.channel;
   const row=siblings.find(r=>r.output.channel===preferred)??siblings[0]!,o=row.output;
   // Worst first (FLAG_SEVERITY), so the photo's lead sentence is its main problem.
-  const flags=bySeverity(siblings.flatMap(r=>r.output.flags)),problemFlags=flags.filter(f=>!information.has(f));
+  const worst=bySeverity(siblings.flatMap(r=>r.output.flags));
+  // Auto-decide: a failed enlargement is judged, so another problem is why the photo was held and leads, as on its row (qa-stage decideOutputs).
+  const flags=autoDecideOf(batch.options)&&worst.includes("enlargement_failed")&&worst.some(f=>f!=="enlargement_failed"&&!information.has(f))?[...worst.filter(f=>f!=="enlargement_failed"),"enlargement_failed" as const]:worst,problemFlags=flags.filter(f=>!information.has(f));
   const flag=o.status==="failed"?"failed":problemFlags[0]??flags[0]??"qa_unavailable";
   const spec=channel(o.channel);
   const context={busy:busyBackgroundHold(o.compliance),n:o.n,k:batch.channels.length,channel:spec.label,...(row.source.width!==null&&row.source.height!==null?{w:row.source.width,h:row.source.height}:{}),min:Math.max(spec.minCanvas.w,spec.minCanvas.h),...(spec.fixedCanvas?{deliverW:spec.targetCanvas.w,deliverH:spec.targetCanvas.h}:{}),failures:plainFailures(failuresOf(o.compliance),spec.label),...(o.status==="failed"&&o.error?{error:o.error}:{})};

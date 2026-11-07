@@ -172,6 +172,11 @@ export function measuredOf(compliance: unknown): RenderMeasured | null {
   const m = (compliance as { measured?: unknown } | null | undefined)?.measured;
   return m && typeof m === "object" ? m as RenderMeasured : null;
 }
+/** The sides of the source photo this render measured as cut at its own frame edge, for the judge. */
+export function cutSidesOf(compliance: unknown): ("top" | "bottom" | "left" | "right")[] {
+  const cut = measuredOf(compliance)?.cut;
+  return cut ? (["top", "bottom", "left", "right"] as const).filter(side => cut[side]) : [];
+}
 /**
  * The render options a repaired output was last made with (kept in `compliance.variant`, relative to the photo's
  * stored matte, so `matte` is always "first"); the first render's options on a row never repaired.

@@ -56,12 +56,14 @@ export function digestReasonLines(d: BatchDigest, max: number = DIGEST_REASON_LI
   if (d.provisionalLinks) lines.push(`${n(d.provisionalLinks)} ${plural(d.provisionalLinks, "image was", "images were")} sent with the best image we have. Main reasons: ${reasonList(d.provisionalReasons)}.`);
   if (d.improving) lines.push(`${n(d.improving)} of these will improve by themselves at the same link.`);
   if (d.stayedAsSent) lines.push(`${n(d.stayedAsSent)} could not be made better and stay as sent.`);
+  if (d.deliveredUnjudged) lines.push(`${n(d.deliveredUnjudged)} ${plural(d.deliveredUnjudged, "image was", "images were")} delivered without our automatic quality check.`);
   if (d.photosLeftOut) lines.push(`${n(d.photosLeftOut)} ${plural(d.photosLeftOut, "photo was", "photos were")} left out: ${reasonList(d.leftOutReasons)}. See the Exceptions sheet.`);
   if (d.controlsSkipped) lines.push(`${n(d.controlsSkipped)} ${plural(d.controlsSkipped, "product is", "products are")} in a running experiment. Their images on those channels were left unchanged on purpose.`);
   // M1-F5-R3: the digest says "unchanged: N". Older stored digests have no count.
   if (d.unchanged) lines.push(`Unchanged: ${n(d.unchanged)} ${plural(d.unchanged, "product was", "products were")} the same as before, so no new image was made and their links stay the same.`);
   if (d.photosUnderSeveralProducts) lines.push(`${n(d.photosUnderSeveralProducts)} ${plural(d.photosUnderSeveralProducts, "photo is", "photos are")} under more than one product name. Nothing was merged; the Exceptions sheet names them so you can check.`);
   if (d.sameFilesMerged) lines.push(`${n(d.sameFilesMerged)} ${plural(d.sameFilesMerged, "file was a copy", "files were copies")} of a photo already in the batch, so one of each was used.`);
+  if (d.sameShotsKept) lines.push(`${n(d.sameShotsKept)} ${plural(d.sameShotsKept, "product had", "products had")} different photos with the same shot number. Each photo was kept as its own shot; the Exceptions sheet names them so you can check.`);
   const groups = d.exceptionReasons.map(g => `${g.text} - ${n(g.count)}`);
   const room = Math.max(0, max - lines.length);
   const more = Math.max(0, groups.length - room) + (d.exceptionsNotGrouped ? 1 : 0);
