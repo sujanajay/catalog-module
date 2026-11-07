@@ -78,7 +78,7 @@ async function looksAt(output: Buffer): Promise<{ edge: number; background: numb
 
 const policy: ResolvedPolicy = { matteModel: "first", matteModelSecond: "second", qaModel: "test/judge", qaModelSecond: "test/second", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" };
 
-function world(opts: { photoScores?: (n: number) => Record<string, number> } = {}) {
+function world(opts: { photoScores?: (n: number) => Record<string, number>; view?: string } = {}) {
   const objects = new Map<string, Buffer>();
   let generation = 1;
   const upload = async (path: string, buf: Buffer) => { objects.set(`gs://assets/${path}`, buf); generation++; return `gs://assets/${path}`; };
@@ -86,7 +86,7 @@ function world(opts: { photoScores?: (n: number) => Record<string, number> } = {
   const judgeOutput = vi.fn<CatalogDeps["judgeOutput"]>(async input => {
     const seen = await looksAt(input.output);
     const scores = { complete_product: 95, same_product: 100, edge_quality: seen.edge, background_clean: seen.background, no_text_or_watermark: 95, orientation_ok: 95, ...opts.photoScores?.(input.n) };
-    return { scores: { ...scores, overall: Math.min(...Object.values(scores)) } as never, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], view: "side", evidence: {}, wrongItem: { first: false, second: null, secondModel: null, confirmed: false } };
+    return { scores: { ...scores, overall: Math.min(...Object.values(scores)) } as never, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], view: opts.view ?? "side", evidence: {}, wrongItem: { first: false, second: null, secondModel: null, confirmed: false } };
   });
   const matteFor = vi.fn<CatalogDeps["matteFor"]>(async (p, _client, model) => fakeMatte(p.rgb, model ?? "first"));
   const deps: CatalogDeps = {
@@ -403,4 +403,47 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(source!.matteUri).toMatch(/\.matte-whole\.png$/);
     expect(source!.flags).toContain("matte_passthrough");
   }, 180_000);
+
+  describe("the close-up route", () => {
+    /** Plain pale fabric from edge to edge, as a shirt close-up fills the frame. */
+    const FABRIC: RGB = [226, 226, 222];
+    const fabric: Shot = { draw: rgb => rect(rgb, 0, 0, W, H, (x, y) => { const n = ((x * 31 + y * 17) ^ (x * y)) % 9 - 4 + Math.round(6 * Math.sin(x / 37)); return [FABRIC[0] + n, FABRIC[1] + n, FABRIC[2] + n]; }) };
+    const stepsOfShot = async (o: { compliance: unknown }) => steps(autoActionsOf(o.compliance));
+
+    it("a detail the judge says lost its product is kept whole, looked at again, and stored as the photo's matte", async () => {
+      let judged = 0;
+      const w = world({ view: "detail", photoScores: (n): Record<string, number> => (n === 2 && ++judged < 3 ? { product_intact: 30 } : {}) });
+      const s = await seed(w, "apparel_flat", [block(PLAIN), fabric]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect(await stepsOfShot(o)).toEqual(["second_matte:failed", "matte_whole_frame:passed"]);
+      expect(o.flags).not.toContain("product_removed");
+      expect(o.status).toBe("staged");
+      // The image the judge looked at last is the whole frame, flush with the canvas.
+      expect(autoActionsOf(o.compliance).at(-1)).toMatchObject({ step: "matte_whole_frame", rejudged: true });
+      const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));
+      expect(source!.matteUri).toMatch(/\.matte-whole\.png$/);
+      expect(source!.matteModel).toBe("whole-frame");
+    }, 180_000);
+
+    it("the judge is the real check: a whole frame it still flags keeps the first image and its hold", async () => {
+      const w = world({ view: "detail", photoScores: (n): Record<string, number> => (n === 2 ? { product_intact: 30 } : {}) });
+      const s = await seed(w, "apparel_flat", [block(PLAIN), fabric]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect(await stepsOfShot(o)).toEqual(expect.arrayContaining(["second_matte:failed", "matte_whole_frame:failed"]));
+      expect(o.flags).toContain("product_removed");
+      expect(o.status).toBe("needs_attention");
+      const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));
+      expect(source!.matteUri).not.toMatch(/\.matte-whole\.png$/);
+    }, 180_000);
+
+    it("control: a person on a model never takes the route, whatever the frame looks like", async () => {
+      let judged = 0;
+      const w = world({ view: "on-model", photoScores: (n): Record<string, number> => (n === 2 && ++judged < 3 ? { product_intact: 30 } : {}) });
+      const s = await seed(w, "apparel_model", [block(PLAIN), fabric]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect((await stepsOfShot(o)).some(step => step.startsWith("matte_whole_frame"))).toBe(false);
+      const [source] = await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.n, 2)));
+      expect(source!.matteModel).not.toBe("whole-frame");
+    }, 180_000);
+  });
 });

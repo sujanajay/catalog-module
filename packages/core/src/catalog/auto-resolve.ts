@@ -39,10 +39,11 @@ export function judgeSawSourceCut(flags: readonly string[], qaScores?: Record<st
  * - `reencode`: the same pixels saved at a lower JPEG quality (a file over 2 MB).
  * - `re_render`: one plain re-render with the same inputs (a transient encoder fault).
  * - `second_matte`: the policy's second cut-out model (per photo).
+ * - `matte_whole_frame`: a frame-filling close-up kept exactly as it is (wholeFrameRoute, matte-guard.ts; per photo, only for `product_removed`, after the second cut-out).
  * - `matte_passthrough`: the whole frame kept (matte-guard.ts; per photo, only for `product_removed`).
  */
 export const RENDER_STEPS = ["reshift", "reencode", "shadow_off", "source_shadow_off", "refit", "re_render"] as const;
-export const MATTE_STEPS = ["second_matte", "matte_passthrough"] as const;
+export const MATTE_STEPS = ["second_matte", "matte_whole_frame", "matte_passthrough"] as const;
 export type RenderStep = typeof RENDER_STEPS[number];
 export type MatteStep = typeof MATTE_STEPS[number];
 export type RepairStep = RenderStep | MatteStep;
@@ -59,7 +60,7 @@ export const REFIT_FALLBACK_SCALE = 0.95;
 export const JPEG_QUALITY_REPAIR_MIN = 50;
 
 /** How one output is rendered: the render options the repairs turn. A render never puts a shadow back once a step took it off. */
-export interface RenderVariant { synthesiseShadow?: false; keepSourceShadow?: false; matte: "first" | "second" | "passthrough"; fitScale: number; anchorShift?: { dx: number; dy: number }; jpegQualityMin?: number }
+export interface RenderVariant { synthesiseShadow?: false; keepSourceShadow?: false; matte: "first" | "second" | "whole" | "passthrough"; fitScale: number; anchorShift?: { dx: number; dy: number }; jpegQualityMin?: number }
 export const FIRST_VARIANT: RenderVariant = Object.freeze({ matte: "first", fitScale: 1 });
 export interface Repair { step: RepairStep; scope: "output" | "photo"; variant: RenderVariant; /** Short technical note for the record; never shown to operators. */ why: string }
 
@@ -77,6 +78,8 @@ export interface Diagnosis {
   tried: readonly AutoActionKind[];
   /** A second cut-out model may exist for this photo (the worker still checks the service). */
   secondMatte: boolean;
+  /** The whole frame may be kept as it is (wholeFrameRoute): the judge read a close-up, and nothing in the pixels argues against it. */
+  wholeFrame?: boolean;
 }
 
 const REPEATABLE: ReadonlySet<RepairStep> = new Set<RepairStep>(["reshift", "refit"]);
@@ -124,6 +127,7 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
   if (d.trigger.includes("leftover_background")) shadowOff("leftover_background: a drawn shadow reads as background");
   if (d.trigger.includes("placement") && !reshift("placement")) add("re_render", "output", {}, "placement: re-placed by rule");
   if (d.secondMatte && d.current.matte === "first" && (d.trigger.includes("halo") || d.trigger.includes("leftover_background") || d.trigger.includes("product_removed"))) add("second_matte", "photo", { matte: "second" }, "second cut-out model");
+  if (d.trigger.includes("product_removed") && d.wholeFrame) add("matte_whole_frame", "photo", { matte: "whole" }, "a close-up kept as it is");
   if (d.trigger.includes("product_removed")) add("matte_passthrough", "photo", { matte: "passthrough" }, "the whole frame kept");
   // Cheapest first: a move or a re-encode before a shadow change, a refit, a plain re-render, then the matte steps.
   const order: RepairStep[] = [...RENDER_STEPS, ...MATTE_STEPS];

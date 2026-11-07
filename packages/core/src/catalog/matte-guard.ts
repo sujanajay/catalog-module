@@ -13,7 +13,7 @@
 import { components, delta, dilate, erode, thresholdMask, type Mask } from "./evals/image";
 import { estimateForeground, SHADOW_ZONE_CHROMA_MAX } from "./evals/cutout";
 import { borderBand } from "./shadow";
-import { PASSTHROUGH_MODEL, type Matte, type Prepared } from "./render";
+import { PASSTHROUGH_MODEL, WHOLE_FRAME_MODEL, type Matte, type Prepared } from "./render";
 import type { OutputFlag } from "./types";
 import type { AutoAction } from "./auto-resolve";
 
@@ -646,6 +646,55 @@ export function wholePhotoMatte(p: Pick<Prepared, "width" | "height" | "rgb">, r
   for (let y = y0; y <= y1; y++) alpha.fill(255, y * w + x0, y * w + x1 + 1);
   return { alpha, width: w, height: h, model: PASSTHROUGH_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
 }
+
+/**
+ * The whole frame as it is, for a close-up the judge read as one (wholeFrameRoute): every pixel opaque, nothing recoloured. No strips are trimmed: plain
+ * fabric reads as a strip of the border colour (529E410_D2: 35% of the frame). Its model name makes every side count as cut (render.ts trimRules), so it
+ * fills the canvas with the existing fill, and a stored copy stays so.
+ */
+export function wholeFrameMatte(p: Pick<Prepared, "width" | "height">): Matte {
+  const { width: w, height: h } = p;
+  return { alpha: Buffer.alloc(w * h, 255), width: w, height: h, model: WHOLE_FRAME_MODEL, ms: 0, source: "model", target: null, sentLongSide: null };
+}
+
+/** The judge's view that may keep the whole frame: it names what image 1 shows, and a model or a whole product is another view. */
+export const WHOLE_FRAME_VIEW = "detail";
+/** Over this share of the frame in skin colours, a person is in the picture. */
+export const WHOLE_FRAME_SKIN_MAX_SHARE = 0.03;
+/** A side of the frame shows a backdrop when this share of its outer 1% is within WHOLE_FRAME_SIDE_DELTA per channel of the side's own median ... */
+export const WHOLE_FRAME_SIDE_FLAT_SHARE = 0.97;
+export const WHOLE_FRAME_SIDE_DELTA = 3;
+/** ... and that median stands this far from the frame's median: flat in another colour than what fills the frame. */
+export const WHOLE_FRAME_SIDE_COLOUR_DELTA = 10;
+
+export interface WholeFrameRoute { allowed: boolean; /** Short technical note for the logs; never shown to operators. */ detail: string }
+/**
+ * Whether a photo the judge flagged `product_removed` may keep its whole frame. The judge's view decides (`detail`); the pixels only veto what the
+ * route must never publish, whatever the view says: a person in the picture, or a flat strip of backdrop beside the product (a white band above a
+ * collar). The render then goes back through the judge, which is the real check; a photo it flags stays held.
+ */
+export function wholeFrameRoute(p: Pick<Prepared, "width" | "height" | "rgb">, view: string | null | undefined): WholeFrameRoute {
+  if (view !== WHOLE_FRAME_VIEW) return { allowed: false, detail: `view ${view ?? "unknown"}` };
+  const { width: w, height: h, rgb } = p, frame = w * h, color = borderBackground(p).color, bins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  let skin = 0;
+  for (let i = 0; i < frame; i++) {
+    for (let c = 0; c < 3; c++) bins[c]![rgb[i * 3 + c]!]!++;
+    if (delta(rgb, i, color) > SKIN_MIN_BACKGROUND_DELTA && isSkin(rgb[i * 3]!, rgb[i * 3 + 1]!, rgb[i * 3 + 2]!)) skin++;
+  }
+  if (skin / frame > WHOLE_FRAME_SKIN_MAX_SHARE) return { allowed: false, detail: `skin ${(skin / frame * 100).toFixed(1)}% of the frame` };
+  const median = medianColour(bins, frame), depth = Math.max(2, Math.round(Math.max(w, h) * 0.01));
+  const sides: [string, (k: number, d: number) => number, number][] = [["top", (k, d) => d * w + k, w], ["bottom", (k, d) => (h - 1 - d) * w + k, w], ["left", (k, d) => k * w + d, h], ["right", (k, d) => k * w + w - 1 - d, h]];
+  for (const [name, at, length] of sides) {
+    const sideBins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) { const i = at(k, d); for (let c = 0; c < 3; c++) sideBins[c]![rgb[i * 3 + c]!]!++; }
+    const own = medianColour(sideBins, length * depth);
+    let near = 0;
+    for (let d = 0; d < depth; d++) for (let k = 0; k < length; k++) if (delta(rgb, at(k, d), own) <= WHOLE_FRAME_SIDE_DELTA) near++;
+    if (near / (length * depth) >= WHOLE_FRAME_SIDE_FLAT_SHARE && own.some((v, c) => Math.abs(v - median[c]!) > WHOLE_FRAME_SIDE_COLOUR_DELTA)) return { allowed: false, detail: `a flat ${name} side in another colour` };
+  }
+  return { allowed: true, detail: `view ${view}` };
+}
+const medianColour = (bins: Uint32Array[], total: number): [number, number, number] => bins.map(counts => { let seen = 0; for (let v = 0; v < 256; v++) { seen += counts[v]!; if (seen * 2 >= total) return v; } return 255; }) as [number, number, number];
 
 /** Separable sigma-1 Gaussian on a 0/1 mask (edge pixels replicated), as floodFillMatte does, but only inward: the background around the product stays fully clear, so no source background bleeds onto the canvas. */
 function softenEdge(mask: Mask, w: number, h: number): Buffer {

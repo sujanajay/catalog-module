@@ -24,7 +24,7 @@ export function plainFailures(failures: readonly string[], channel?: string): st
 /** What each repair step did, in operator words, for the tried sentence. Steps with no operator meaning are left out. */
 export const STEP_WORDS: Record<string, string> = {
   shadow_off: "the added shadow removed", source_shadow_off: "the photo's own shadow removed", refit: "a smaller fit", reshift: "moved onto the guide",
-  reencode: "saved smaller", re_render: "made again", second_matte: "a second cut-out", matte_passthrough: "the whole photo kept", smaller_fit: "a smaller fit", padded_matte: "a padded cut-out",
+  reencode: "saved smaller", re_render: "made again", second_matte: "a second cut-out", matte_whole_frame: "the whole photo kept", matte_passthrough: "the whole photo kept", smaller_fit: "a smaller fit", padded_matte: "a padded cut-out",
 };
 /** "We tried the added shadow removed and a smaller fit and could not fix it." from the steps that ran; "" when none ran. */
 export function triedSentence(steps: readonly string[]): string {

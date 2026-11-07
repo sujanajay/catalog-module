@@ -265,7 +265,8 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
    rows=await photo();
   }
   const flush=rows.some(o=>tried(o,"flush_cut","passed"));
-  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
+  // The matte stage's own ladder (no channels, before anything was judged) is no answer to the judge (529K240_D2 reached its verdict with only a matte-stage step on it).
+  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>(!Array.isArray(action.channels) || action.channels.length>0) && action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
   if(!failing.length) continue;
   const rejudge=stopOn(error=>error instanceof CatalogQaCapError,async(row,jpeg)=>{
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
