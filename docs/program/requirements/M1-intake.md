@@ -437,7 +437,7 @@ page. We will keep going." First links appear in the sheet as soon as the first 
 **Screen 3: Batch page when done (the digest).**
 - "Links ready for 312 of 312 products."
 - "41 links are provisional and will improve by themselves. Main reasons: no back view in the photos (22), not
-  enlarged yet (12), checked later (7)."
+  enlarged yet (12), not checked: our quality check could not run (7)."
 - "3 photos left out: wrong product in the photo (2), file unreadable (1). See the Exceptions sheet."
 - "12 products are controls in a running experiment; their Noon and Namshi images were left unchanged on purpose."
 - "Cost: USD 0.11 per product. Time to first links 4 min, to all links 46 min."

@@ -141,6 +141,15 @@ describe("a photo the size rule refused to enlarge, and images no judge looked a
     expect(digest.provisionalReasons).toEqual([{ text: "not checked: our quality check could not run", count: 1 }]);
     expect(JSON.stringify(digest)).not.toMatch(/later/);
   });
+  it("whatever rule sent an unseen image, it says it was not checked", () => {
+    const { digest } = build([{ flags: ["qa_cap", "provisional"], compliance: { auto_decide: { rule: "unusable:*", cause: "unusable", action: "deliver" } } }], []);
+    expect(digest.provisionalReasons).toEqual([{ text: "not checked: our quality check could not run", count: 1 }]);
+  });
+  it("a spare photo left out because the check could not run does not blame the photo", () => {
+    const { digest, exceptions } = build([{}, { status: "skipped", isLive: false, flags: ["qa_unavailable", "enlargement_failed", "auto_dropped"], compliance: { auto_decide: { rule: "unusable:*", cause: "unusable", action: "hold" } }, reason: "The quality check could not read this image. Left out automatically.", sourceImageId: "t" }], []);
+    expect(digest.leftOutReasons).toEqual([{ text: "the image could not be checked", count: 1 }]);
+    expect(exceptions[0]!.fix).toBe("Our quality check could not run, so this photo is not at fault. Send it again in a new batch.");
+  });
   it("'yet' stays only while a try can still come", () => {
     const tried = (tries: number, endReason: string | null) => build([sent], [], [{ sourceImageId: "s", improvedAt: null, tries, endReason }]);
     expect(tried(1, null).digest.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 1 }]);

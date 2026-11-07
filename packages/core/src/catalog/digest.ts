@@ -74,6 +74,8 @@ const LEFT_OUT_TOO_LARGE = "the photo is too large to enlarge fully";
 const FIX_TOO_LARGE = "Send a photo where the product fills more of the frame in a new batch.";
 // Every try used, or the tries ended: the image stays as sent, so "yet" is no longer true.
 const SENT_NO_MORE_TRIES = "not enlarged, and no more tries are planned";
+const FIX_UNCHECKED = "Our quality check could not run, so this photo is not at fault. Send it again in a new batch.";
+const notChecked = (o: { flags: readonly string[] }) => o.flags.includes("qa_unavailable") || o.flags.includes("qa_cap");
 const BETTER_TOO_LARGE = "This image stays as it is. If it looks soft, send a photo where the product fills more of the frame in a new batch.";
 const FIX_DEFAULT = "Send a better photo of this product in a new batch.";
 const FIX_NOT_MADE = "Run this product again in a new batch.";
@@ -200,7 +202,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
         const improves = notEnlarged && !!improvement && !improvement.improvedAt && !improvement.endReason && improvement.tries < IMPROVE_MAX_TRIES;
         // M1-F3-R5 (M1 D11): every try used, or the re-made image did not pass: it stays as sent.
         if (improvement && !improvement.improvedAt && (improvement.tries >= IMPROVE_MAX_TRIES || improvement.endReason === "not_passed")) stayedAsSent++;
-        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: cause === "not_enlarged" && refused ? SENT_TOO_LARGE : cause === "not_enlarged" && !improves && improvement && !improvement.improvedAt ? SENT_NO_MORE_TRIES : SENT_REASON[cause], rule: record?.rule ?? "", improves,
+        notes.push({ identifier: pair.identifier, channel: o.channel, image: o.n, link: o.publicUrl, reason: notChecked(o) ? SENT_REASON.unchecked : cause === "not_enlarged" && refused ? SENT_TOO_LARGE : cause === "not_enlarged" && !improves && improvement && !improvement.improvedAt ? SENT_NO_MORE_TRIES : SENT_REASON[cause], rule: record?.rule ?? "", improves,
           better: improves ? "A larger version replaces it at the same link when the enlargement works. Nothing to do."
             : refused ? BETTER_TOO_LARGE
             : notEnlarged ? "We could not enlarge it. Send a larger photo in a new batch."
@@ -232,7 +234,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
       if (linkAt(pair.identifier, o.channel, o.n)) continue;
       const why = o.flags.includes("auto_dropped") ? leftOutReason(o, tooLarge) : o.reason?.includes(STYLI_SKIP_NOTE) ? TOO_SMALL : shortReason(o.reason);
       const cause = autoDecideRecordOf(o.compliance)?.cause;
-      exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? why, fix: o.status === "failed" ? FIX_NOT_MADE : why === TOO_SMALL ? "Send a larger photo in a new batch." : cause === "not_enlarged" && tooLarge.has(o.sourceImageId) ? FIX_TOO_LARGE : (cause && LEFT_OUT_FIX[cause]) ?? FIX_DEFAULT,
+      exceptions.push({ identifier: pair.identifier, channel: o.channel, image: o.n, reason: o.reason ?? why, fix: o.status === "failed" ? FIX_NOT_MADE : o.flags.includes("auto_dropped") && notChecked(o) ? FIX_UNCHECKED : why === TOO_SMALL ? "Send a larger photo in a new batch." : cause === "not_enlarged" && tooLarge.has(o.sourceImageId) ? FIX_TOO_LARGE : (cause && LEFT_OUT_FIX[cause]) ?? FIX_DEFAULT,
         group: `${CHANNELS[o.channel].label} image ${o.n} missing: ${why}` });
       if (o.flags.includes("auto_dropped")) leftOut.push({ key: o.sourceImageId, reason: why });
       productExceptions++;
@@ -343,7 +345,8 @@ export async function buildDigest(db: Db, input: DigestInput): Promise<DigestPar
   return digestFrom({ ...input, pairs, outputs, improvements: await readImprovements(db, batchId), tooLarge: await readTooLargePhotos(db, batchId) });
 }
 
-function leftOutReason(o: { compliance: unknown; reason: string | null; sourceImageId: string }, tooLarge: ReadonlySet<string>): string {
+function leftOutReason(o: { compliance: unknown; reason: string | null; sourceImageId: string; flags: readonly string[] }, tooLarge: ReadonlySet<string>): string {
+  if (notChecked(o)) return LEFT_OUT_REASON.unchecked;
   const cause = autoDecideRecordOf(o.compliance)?.cause;
   if (cause === "not_enlarged" && tooLarge.has(o.sourceImageId)) return LEFT_OUT_TOO_LARGE;
   return cause ? LEFT_OUT_REASON[cause] : shortReason(o.reason);
