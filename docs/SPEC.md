@@ -525,7 +525,7 @@ measuring band; no shadow ever ends on a straight cut. Every product type uses t
 contact line. An apparel shadow is also read against the floor's own tone beside the band, so a toned studio
 floor is not kept as a shadow. A kept shadow that still leaves floor tone (1.5 to 25 levels under the canvas colour, below the product's middle,
 beside its columns plus 3% of its longer side) on an area of at least `FLOOR_PATCH_MAX_SHARE` (1%) of the square of
-the product's longer side, so the same on every channel, is left out by the render and the synthesis rule then decides, as
+the product's longer side, so within about 14% across channels, is left out by the render and the synthesis rule then decides, as
 if the photo had none: apparel stays clean (`no_shadow_source`), a shoe gets a synthesised shadow; no hold, no person
 (2026-11-07, faint floor patches no judge sees; `CHANNEL_RULES_VERSION` 11).
 

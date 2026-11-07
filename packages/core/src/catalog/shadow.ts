@@ -99,8 +99,9 @@ const FLOOR_EDGE_MIN_PIXELS = 3;
  * past the reach of a contact shadow, on each side, and a straight line between the two sides, since studio light makes
  * one side darker. The canvas stands for the floor, so only what is darker than this is the product's shadow. A side
  * with no background to read (the product fills it) takes the other side's tone. With neither, as on a garment wide enough
- * that both samples fall off the frame, the row reads the background at the frame's edges; with none there either, the
- * tone is 0.
+ * that both samples fall off the frame, the row reads the background at each frame edge and a straight line between them;
+ * those readings are not past a contact shadow's reach, so a shadow reaching the edges costs some of its depth there. With
+ * no background at the edges either, the tone is 0.
  */
 function floorTone(p: Prepared, matte: Matte, band: { x0: number; y0: number; x1: number; y1: number }, reach: number, bg: number, luma: (r: number, g: number, b: number) => number): (x: number, y: number) => number {
   const width = Math.max(4, Math.round(p.width * FLOOR_SAMPLE_WIDTH)), rows = Math.max(1, Math.round(p.height * FLOOR_SAMPLE_ROWS));
@@ -125,18 +126,23 @@ function floorTone(p: Prepared, matte: Matte, band: { x0: number; y0: number; x1
   const leftX = leftEnd - width / 2, rightX = rightStart + width / 2;
   const darkOf = (i: number) => (bg - luma(p.rgb[i * 3]!, p.rgb[i * 3 + 1]!, p.rgb[i * 3 + 2]!)) / bg;
   const medianOf = (values: number[]) => values.length ? values.sort((a, b) => a - b)[values.length >> 1]! : Number.NaN;
-  // The background a row shows from each frame edge up to the product, at most one sample's width on each side.
-  const atEdges = smooth(Float32Array.from({ length: count }, (_, at) => {
+  // The background a row shows from a frame edge up to the product, at most one sample's width. It has no gap from a contact shadow as the samples have, so a fade reaching both edges evenly reads as floor.
+  const edge = (leftSide: boolean) => smooth(Float32Array.from({ length: count }, (_, at) => {
     const values: number[] = [], rowStart = (y0 + at) * p.width;
-    for (let x = 0; x < Math.min(width, p.width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x++) values.push(darkOf(rowStart + x));
-    for (let x = p.width - 1; x >= Math.max(0, p.width - width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x--) values.push(darkOf(rowStart + x));
+    if (leftSide) for (let x = 0; x < Math.min(width, p.width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x++) values.push(darkOf(rowStart + x));
+    else for (let x = p.width - 1; x >= Math.max(0, p.width - width) && matte.alpha[rowStart + x]! <= ALPHA_BBOX_THRESHOLD; x--) values.push(darkOf(rowStart + x));
     return values.length >= FLOOR_EDGE_MIN_PIXELS ? medianOf(values) : Number.NaN;
   }));
+  const edgeLeft = edge(true), edgeRight = edge(false);
   return (x, y) => {
     const at = y - y0;
     if (at < 0 || at >= count) return 0;
     const l = left[at]!, r = right[at]!;
-    if (Number.isNaN(l) && Number.isNaN(r)) return Number.isNaN(atEdges[at]!) ? 0 : atEdges[at]!;
+    if (Number.isNaN(l) && Number.isNaN(r)) {
+      const a = edgeLeft[at]!, b = edgeRight[at]!;
+      if (Number.isNaN(a)) return Number.isNaN(b) ? 0 : b;
+      return Number.isNaN(b) ? a : a + (b - a) * Math.min(1, Math.max(0, x / p.width));
+    }
     if (Number.isNaN(l)) return r;
     if (Number.isNaN(r)) return l;
     const t = Math.min(1, Math.max(0, (x - leftX) / (rightX - leftX)));

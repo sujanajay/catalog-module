@@ -119,6 +119,32 @@ describe("a toned floor is not a contact shadow", () => {
     expect(kept[(BOX.y + BOX.h + 5) * W + W / 2]! / 255).toBeCloseTo(48 / WALL, 1);
   });
 
+  /** A garment 540 wide on a floor `floorLevels` under the wall: a real shadow under its hem, 40 levels from the middle to the right frame edge, a quarter of that at the left edge. */
+  const castRight = (floorLevels: number) => {
+    const scene = wideGarment(540, floorLevels), bottom = BOX.y + BOX.h, rgb = scene.prepared.rgb;
+    for (let y = bottom; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, along = Math.min(1, Math.max(0, (x + 100) / 400));
+      rgb.fill(Math.round(WALL - floorLevels - 40 * along * Math.exp(-0.5 * ((y - bottom) / 40) ** 2)), i * 3, i * 3 + 3);
+    }
+    return { ...scene, prepared: { ...scene.prepared, background: analyseBackground(rgb, W, H) } };
+  };
+
+  it("reads the two frame edges apart, so a wide garment's shadow cast to one side is not all read as floor", () => {
+    const { prepared, matte } = castRight(0), kept = preservedDarkness(prepared, matte, bbox(matte.alpha, W, H)!, "apparel_flat");
+    expect(kept).not.toBeNull();
+    const row = (BOX.y + BOX.h + 5) * W;
+    expect(kept![row + 300]! / 255).toBeGreaterThan(0.03);
+  });
+
+  it("a shadow reaching one frame edge fades towards that edge, and the floor still goes on a toned floor", () => {
+    const { prepared, matte } = castRight(12), kept = preservedDarkness(prepared, matte, bbox(matte.alpha, W, H)!, "apparel_flat")!;
+    const bottom = BOX.y + BOX.h;
+    // Shadow stays under the middle, is read away at the edge it reaches, and far under the hem only the floor is left: no shadow.
+    expect(kept[(bottom + 5) * W + 300]! / 255).toBeGreaterThan(0.03);
+    expect(kept[(bottom + 5) * W + 300]!).toBeGreaterThan(kept[(bottom + 5) * W + 590]!);
+    expect(kept[(bottom + 130) * W + 300]).toBe(0);
+  });
+
   it("keeps a wide garment's real shadow on a plain floor, where the frame's edges read no tone", () => {
     const { prepared, matte } = wideGarment(540, 0), kept = preservedDarkness(prepared, matte, bbox(matte.alpha, W, H)!, "apparel_flat")!;
     expect(kept[(BOX.y + BOX.h + 5) * W + W / 2]! / 255).toBeCloseTo(60 / WALL, 1);

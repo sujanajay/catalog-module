@@ -33,7 +33,7 @@ export interface RenderInput { prepared: Prepared; matte: Matte; channel: Channe
 export type ShadowKind = "kept" | "synthesised" | "none";
 /** The compliance measurement plus what this render drew (07 4.6a): the shadow kind and the cut sides. Stored in `catalog_outputs.compliance.measured`. */
 export interface RenderMeasured extends Measured { shadow: ShadowKind; cut: CutEdges;
-  /** A kept shadow's floor tone as a share of the canvas (floorPatchShare), and whether the render left that shadow out for it. Absent when no kept shadow was drawn. */ floorPatch?: { share: number; dropped: boolean } }
+  /** A kept shadow's floor tone against the product's size (floorPatchShare), and whether the render left that shadow out for it. Absent when no kept shadow was drawn. */ floorPatch?: { share: number; dropped: boolean } }
 export interface RenderCompliance { ok: boolean; failures: string[]; measured?: RenderMeasured }
 export interface RenderOutput { jpeg: Buffer | null; status: "ok" | "skipped" | "failed"; plan: CanvasPlan; quality: number; bytes: number; flags: OutputFlag[]; notes: string[]; attention: { why: string; what: string } | null; compliance: RenderCompliance; upscale?: { model: string; ms: number; reused?: true };
   /** The placed cut-out's alpha on the canvas (plan.w x plan.h, one byte per pixel), the mask the compliance check judged with: a re-check of the delivered JPEG (catalog-smoke --verify-manifest) passes it so the Styli guide is judged on the product, never on a kept shadow. Absent when nothing was drawn. */ foregroundMask?: Buffer }
