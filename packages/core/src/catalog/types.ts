@@ -25,6 +25,8 @@ export const OUTPUT_FLAGS = [
   "provisional",
   // M1 D30 (M1-S6): a follow-up photo that was not added (another batch's live photo has its place, or over the channel limit).
   "not_added",
+  // M1 D45: a code check saw rows of marks on a plain page, so the photo is always judged; only the judge's `chart` view leaves it out.
+  "text_suspected",
 ] as const;
 /** Why the QA triage would hold an output for a person (qa/triage.ts `HoldCause`). */
 export const HOLD_CAUSES = ["wrong_item","collage","unusable","corrupt","unchecked","photo_one","every_photo","not_publishable","code_fault","not_enlarged","visible_defect"] as const;
@@ -339,8 +341,9 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
     "This product looks transparent or glass; the cut-out may need a look. Compare the two images. 'Use as is' keeps it.",
   matte_passthrough: () =>
     "This photo is a close-up that fills the frame, so the whole photo was kept as it is instead of being cut out. Nothing to do.",
+  text_suspected: () => "",
   chart_image: () =>
-    "This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",
+    "The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images. If it is a product photo, tell the technical team.",
   auto_dropped: () =>
     "This photo was left out automatically: it could not be made cleanly and this product has enough other good photos. Nothing to do.",
   upscaled: () => `${UPSCALED_SENTENCE} Nothing to do.`,

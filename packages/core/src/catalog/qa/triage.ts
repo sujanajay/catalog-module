@@ -11,7 +11,7 @@ import { agreedMatte, busyBackgroundHold, encoderFault, OWN_DEFECT_FLAGS, plainP
 export const INFORMATION_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>([
   "low_resolution", "no_shadow_source", "shadow_synthesised", "passthrough", "alpha_source", "qa_sampled_out",
   "numbering_gap", "type_unknown", "cut_in_source", "complete_product", "transparent", "auto_dropped",
-  "matte_passthrough", "upscaled", "provisional",
+  "matte_passthrough", "upscaled", "provisional", "text_suspected",
 ]);
 /** Always held for the operator: a different item confirmed by two judges, or several photos in one. */
 export const HARD_HOLD_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["different_product", "collage"]);
@@ -92,7 +92,8 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) {
       // M1 D40: the judge is what stands behind an agreed cut-out, so one it did not see is never delivered on trust: it is
       // left out when the channel can do without it, otherwise it waits for a person. Any other unseen image follows the `unchecked` rule.
-      if (!agreedMatte(o.compliance)) hold("unchecked");
+      // M1 D45: the same for a photo the text detector sent for a check: an unseen real size chart must never go out.
+      if (!agreedMatte(o.compliance) && !o.flags.includes("text_suspected")) hold("unchecked");
       else if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems});
       else hold("unusable");
       continue;

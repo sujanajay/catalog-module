@@ -389,16 +389,13 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             let p:Awaited<ReturnType<CatalogDeps["prepare"]>>;
             try { p = await deps.prepare(raw.buf,source.originalName,async b=>{try{return await deps.matting.convert(b,trace);}catch(error){conversionFailure=error;throw error;}}); }
             catch(error) { throw conversionFailure ?? error; }
-            // A size chart or text-only photo is not cut out: left out with its note (07 4.0a), never held.
+            // M1 D45: rows of marks on a plain page may be a size chart or a printed pattern. The detector never decides: the
+            // photo takes the normal path, always reaches the judge, and the judge's `chart` view leaves a real chart out (07 4.0a).
             const text = detectTextImage(p);
-            if (text.text) {
-              deps.log("catalog chart left out",{batchId:batch.id,sourceImageId:source.id,glyphs:text.glyphs,lines:text.lines});
-              await underClaim(async tx=>{
-                await tx.update(catalogSourceImages).set({width:p.width,height:p.height,status:"prepared",flags:[...new Set([...source.flags,"chart_image" as const])]}).where(eq(catalogSourceImages.id,source.id));
-                await tx.update(catalogOutputs).set({status:"skipped",flags:["chart_image"],reason:flagReason("chart_image"),updatedAt:deps.now()}).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.status,"pending")));
-                await photoDone(tx);
-              });
-              return;
+            if (text.text && !source.flags.includes("text_suspected")) {
+              deps.log("catalog photo sent for a chart check",{batchId:batch.id,sourceImageId:source.id,glyphs:text.glyphs,lines:text.lines});
+              source.flags = [...source.flags,"text_suspected"];
+              await underClaim(async tx=>{await tx.update(catalogSourceImages).set({flags:source.flags}).where(eq(catalogSourceImages.id,source.id));});
             }
             await underClaim(async()=>{});
             // M3-S5: the first cut-out goes through the image.matte routes (GPU, then the overflow vendor when an admin

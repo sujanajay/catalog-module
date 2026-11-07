@@ -689,7 +689,7 @@ it("judge views: a size chart is left out with its note and never held, even as 
  vi.mocked(w.deps.judgeOutput).mockImplementation(judgeWith((input):JudgePick=>input.n===3 ? {view:"chart",flags:["chart_image"]}:{}));
  expect((await run(w,s)).outcome).toBe("published");
  const chart=(await db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,s.batch.id),eq(catalogOutputs.n,3))))[0]!;
- expect(chart).toMatchObject({status:"skipped",isLive:false,reason:"This photo is a size chart or a text-only image, so it was left out of the marketplace images. Nothing to do.",qaScores:{autoAction:"drop",view:"chart",evidence:{chart_image:{model:"test/judge"}}}});
+ expect(chart).toMatchObject({status:"skipped",isLive:false,reason:"The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images. If it is a product photo, tell the technical team.",qaScores:{autoAction:"drop",view:"chart",evidence:{chart_image:{model:"test/judge"}}}});
  expect(chart.flags).toContain("chart_image");expect(chart.flags).not.toContain("auto_dropped");
  // A chart in first place is left out too; the next photo becomes photo 1 and nothing is held.
  const t=world(),first=await seed(t,"qa-views-chart-first",{shots:["a","b"]});

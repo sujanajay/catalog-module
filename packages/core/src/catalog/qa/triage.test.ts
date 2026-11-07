@@ -9,6 +9,23 @@ const out = (n: number, flags: OutputFlag[] = [], extra: Partial<TriageOutput> =
   ({id:`o${++next}`,n,channel:"noon",status:flags.some(f=>!INFORMATION_FLAGS.has(f)) ? "needs_attention" : "staged",flags,decision:null,stagingUri:"gs://assets/staged.jpg",...extra});
 const action = (outputs: TriageOutput[], target: TriageOutput, kept: {channel: ChannelId; n: number}[] = []) => triageProduct(outputs, kept).get(target.id);
 
+describe("M1 D45: a photo the text detector sent for a check", () => {
+  const row = (id: string, n: number, flags: OutputFlag[], status = "staged"): TriageOutput => ({ id, n, channel: "noon", status, flags, decision: null, stagingUri: `gs://s/${id}` });
+  it("is never delivered unseen: with the judge down it is left out when the channel can do without it, else held", () => {
+    const seen: OutputFlag[] = ["text_suspected", "qa_unavailable"];
+    expect(triageProduct([row("a", 1, []), row("b", 2, []), row("c", 3, []), row("d", 4, seen, "needs_attention")]).get("d")).toMatchObject({ action: "drop" });
+    expect(triageProduct([row("a", 1, seen, "needs_attention")]).get("a")).toMatchObject({ action: "hold", cause: "unusable" });
+    // Any other unseen photo keeps its rule.
+    expect(triageProduct([row("a", 1, ["qa_unavailable"], "needs_attention")]).get("a")).toMatchObject({ action: "hold", cause: "unchecked" });
+  });
+  it("holds nothing by itself once judged clean", () => {
+    expect(triageProduct([row("a", 1, ["text_suspected"])]).get("a")).toMatchObject({ action: "none" });
+  });
+  it("is left out only on the judge's chart verdict", () => {
+    expect(triageProduct([row("a", 1, ["text_suspected", "chart_image"], "needs_attention"), row("b", 2, [])]).get("a")).toMatchObject({ action: "drop" });
+  });
+});
+
 describe("QA triage: an agreed cut-out and the pass-through (M1 D40)", () => {
  const agreed = {compliance:{auto_actions:[{step:"matte_agreement",trigger:["product_removed"],result:"passed",channels:[],rejudged:false}]}};
  it("never delivers an agreed cut-out the judge did not see: left out when the channel can do without it, else held", () => {

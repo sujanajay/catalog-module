@@ -78,7 +78,7 @@ async function looksAt(output: Buffer): Promise<{ edge: number; background: numb
 
 const policy: ResolvedPolicy = { matteModel: "first", matteModelSecond: "second", qaModel: "test/judge", qaModelSecond: "test/second", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" };
 
-function world(opts: { photoScores?: (n: number) => Record<string, number> } = {}) {
+function world(opts: { photoScores?: (n: number) => Record<string, number>; chartAt?: number } = {}) {
   const objects = new Map<string, Buffer>();
   let generation = 1;
   const upload = async (path: string, buf: Buffer) => { objects.set(`gs://assets/${path}`, buf); generation++; return `gs://assets/${path}`; };
@@ -86,7 +86,7 @@ function world(opts: { photoScores?: (n: number) => Record<string, number> } = {
   const judgeOutput = vi.fn<CatalogDeps["judgeOutput"]>(async input => {
     const seen = await looksAt(input.output);
     const scores = { complete_product: 95, same_product: 100, edge_quality: seen.edge, background_clean: seen.background, no_text_or_watermark: 95, orientation_ok: 95, ...opts.photoScores?.(input.n) };
-    return { scores: { ...scores, overall: Math.min(...Object.values(scores)) } as never, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], view: "side", evidence: {}, wrongItem: { first: false, second: null, secondModel: null, confirmed: false } };
+    return { scores: { ...scores, overall: Math.min(...Object.values(scores)) } as never, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], view: input.n === opts.chartAt ? "chart" : "side", evidence: {}, wrongItem: { first: false, second: null, secondModel: null, confirmed: false } };
   });
   const matteFor = vi.fn<CatalogDeps["matteFor"]>(async (p, _client, model) => fakeMatte(p.rgb, model ?? "first"));
   const deps: CatalogDeps = {
@@ -366,15 +366,46 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(cutInSourceNote(busy)).toBe("");
   }, 180_000);
 
-  it("a size chart is not cut out: left out on every channel with its note, never held", async () => {
-    const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), sizeChart], ["noon", "amazon"]);
+  it("M1 D45: a real size chart the detector sent for a check is left out by the judge on every channel, with its note, never held", async () => {
+    const w = world({ chartAt: 2 }), s = await seed(w, "apparel_flat", [block(PLAIN), sizeChart], ["noon", "amazon"]);
     const chart = s.outputs.filter(o => o.n === 2);
     expect(chart).toHaveLength(2);
-    for (const o of chart) expect(o).toMatchObject({ status: "skipped", flags: ["chart_image"], reason: flagReason("chart_image") });
-    // Only photo 1 was matted.
-    expect(w.matteFor).toHaveBeenCalledTimes(1);
+    for (const o of chart) {
+      expect(o).toMatchObject({ status: "skipped", isLive: false, reason: flagReason("chart_image") });
+      expect(o.flags).toEqual(expect.arrayContaining(["chart_image", "text_suspected"]));
+    }
+    expect(vi.mocked(w.deps.judgeOutput).mock.calls.some(([input]) => input.n === 2 && input.chartSuspected === true)).toBe(true);
     expect(s.outputs.filter(o => o.n === 1).every(o => o.status === "staged")).toBe(true);
     expect(s.held).toEqual([]);
+  }, 180_000);
+
+  it("M1 D45: a printed pattern the detector read as text is not lost: the judge sees a product photo, so it goes on like any other", async () => {
+    const w = world(), s = await seed(w, "apparel_flat", [block(PLAIN), sizeChart], ["noon", "amazon"]);
+    const shot = s.outputs.filter(o => o.n === 2);
+    expect(shot).toHaveLength(2);
+    for (const o of shot) {
+      expect(o.status).not.toBe("skipped");
+      expect(o.flags).toContain("text_suspected");
+      expect(o.flags).not.toContain("chart_image");
+      expect(o.qaScores).not.toBeNull();
+    }
+    // Both photos were cut out: the detector no longer stops the normal path.
+    expect(vi.mocked(w.matteFor).mock.calls.length).toBeGreaterThanOrEqual(2);
+  }, 180_000);
+
+  it("M1 D45: a photo sent for a check is judged whatever the sample rate; a plain photo is still sampled out", async () => {
+    const w = world();
+    vi.mocked(w.deps.resolvePolicy).mockImplementation(async () => ({ ...policy, qaSampleRate: 0 }));
+    const s = await seed(w, "apparel_flat", [block(PLAIN), sizeChart], ["noon"]);
+    expect(s.outputs.find(o => o.n === 2)!.qaScores).not.toBeNull();
+    expect(s.outputs.find(o => o.n === 1)!.flags).toContain("qa_sampled_out");
+    expect(vi.mocked(w.deps.judgeOutput).mock.calls.every(([input]) => input.n === 2)).toBe(true);
+  }, 180_000);
+
+  it("M1 D45: the measured cut sides reach the judge", async () => {
+    const w = world(), s = await seed(w, "apparel_flat", [legs(true)], ["noon"]);
+    expect(s.outputs[0]!.status).not.toBe("failed");
+    expect(vi.mocked(w.deps.judgeOutput).mock.calls[0]![0].sourceCut).toContain("left");
   }, 180_000);
 
   it("a chart the classifier saw first is left out and the next photo decides the product type", async () => {

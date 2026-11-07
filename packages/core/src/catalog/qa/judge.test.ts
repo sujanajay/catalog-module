@@ -154,6 +154,41 @@ describe("catalog judge v2", () => {
  });
 });
 /** Quality gate 2 (2026-10-20): the false holds and the missed cut-outs, replayed as judge replies. */
+describe("M1 D45: a cut in the source and the same item with another layer",()=>{
+ const userText = (fetcher: ReturnType<typeof vi.fn>) => (JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).messages[1].content as {type:string;text?:string}[]).filter(part=>part.type==="text").map(part=>part.text);
+ it("the prompt keeps a real loss failing: only what image 1 also lacks is excused",()=>{
+  expect(CATALOG_QA_TEMPLATE).toMatch(/A straight cut that image 1 already has is not a defect of image 2/);
+  expect(CATALOG_QA_TEMPLATE).toMatch(/If image 1 shows more of the product there than image 2.*it is a real loss/);
+  expect(CATALOG_QA_TEMPLATE).toMatch(/it is measured by code and can be wrong, so image 1 decides/);
+  // The loss rule itself stays (controls 529K240_D2, 729M610_649, 76YAP10).
+  expect(CATALOG_QA_TEMPLATE).toMatch(/Score below 40 when the cut-out removed a substantial part of the product/);
+ });
+ it("the prompt names another layer as the same item, and a clearly different item stays wrong",()=>{
+  expect(CATALOG_QA_TEMPLATE).toMatch(/the same item with a different layer or styling: the same shorts with a vest in one photo and a jacket in another/);
+  expect(CATALOG_QA_TEMPLATE).toMatch(/Return true only when image 1 clearly shows a different item: another category of product/);
+ });
+ it("sends the measured cut sides with the images, and says nothing when none were measured",async()=>{
+  const told = vi.fn<typeof fetch>(async()=>response(reply()));
+  await judgeOutput(await input({sourceCut:["top","left"]}),{apiKey:"fake",fetch:told});
+  expect(userText(told)).toContain("Measured by code: image 1 is cut at its own frame edge on these sides: top, left.");
+  const silent = vi.fn<typeof fetch>(async()=>response(reply()));
+  await judgeOutput(await input({sourceCut:[]}),{apiKey:"fake",fetch:silent});
+  expect(userText(silent).join(" ")).not.toMatch(/Measured by code/);
+ });
+ it("a real loss on a measured cut still fails: the verdict is the judge's score, no code excuses it",async()=>{
+  const result = await judgeOutput(await input({sourceCut:["bottom"]}),{apiKey:"fake",fetch:byModel({"first/judge":reply({product_intact:20,evidence:{product_intact:"Only two buttons are left; the shirt around them is gone."}})})});
+  expect(result.flags).toContain("product_removed");
+ });
+ it("tells the judge a code check saw rows of marks, only when it did",async()=>{
+  const told = vi.fn<typeof fetch>(async()=>response(reply()));
+  await judgeOutput(await input({chartSuspected:true}),{apiKey:"fake",fetch:told});
+  expect(userText(told).join(" ")).toMatch(/Use view chart only when the image is mostly text, a table or a diagram/);
+  const silent = vi.fn<typeof fetch>(async()=>response(reply()));
+  await judgeOutput(await input(),{apiKey:"fake",fetch:silent});
+  expect(userText(silent).join(" ")).not.toMatch(/rows of small marks/);
+ });
+});
+
 describe("judge views amendment",()=>{
  it("tells the judge which views are the same product and asks for product_intact on image 2", async () => {
   const fetcher = byModel({"first/judge":reply()});
@@ -193,7 +228,7 @@ describe("judge views amendment",()=>{
   const fetcher = byModel({"first/judge":chart});
   const result = await judgeOutput(await input({n:5}),{apiKey:"fake",fetch:fetcher});
   expect(result).toMatchObject({verdict:"flag",flags:["chart_image"],view:"chart",wrongItem:{first:false,confirmed:false}});
-  expect(result.reasons).toEqual(["This photo is a size chart or a text-only image, so it was left out of the marketplace images."]);
+  expect(result.reasons).toEqual(["The check read this photo as a size chart or a text-only image, so it was left out of the marketplace images."]);
   expect(Object.values(result.scores).every(score => score === 100)).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(1);
  });

@@ -6,7 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, cutSidesOf, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -147,8 +147,9 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
   const first=group[0]!,source=sources.find(s=>s.id===first.sourceImageId)!;
   const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,source.productId));
   if(!product) return;
-  // M1 D40: an agreed cut-out is always judged, whatever the sample rate: the judge is what stands behind it.
-  if(!sampledForQa(product.identifier,policy.qaSampleRate) && !group.some(row=>agreedMatte(row.compliance))) {
+  // M1 D40: an agreed cut-out is always judged, whatever the sample rate: the judge is what stands behind it. So is a photo
+  // the text detector sent for a check (M1 D45): only the judge can say it is a size chart.
+  if(!sampledForQa(product.identifier,policy.qaSampleRate) && !group.some(row=>agreedMatte(row.compliance)) && !source.flags.includes("text_suspected")) {
    await underClaim(async tx=>{for(const row of group) await tx.update(catalogOutputs).set({flags:[...new Set([...row.flags,"qa_sampled_out" as const])],reason:row.reason ?? flagDetails("qa_sampled_out").why,updatedAt:deps.now()}).where(eq(catalogOutputs.id,row.id));await onPhoto(tx);});return;
   }
   try {
@@ -169,7 +170,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
    const judge=async(row:Output,photoChecks:boolean)=>{
     const output=(await deps.storage.downloadBuffer(row.stagingUri!)).buf;
     const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId:product.id,sourceImageId:source.id,outputId:row.id,channel:row.channel,...(chunkId ? {chunkId}:{})},router);
-    const result=await deps.judgeOutput({output,original,...(shotOneBytes ? {shotOne:shotOneBytes}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,threshold:policy.threshold,floor:policy.floor,...(secondModel ? {secondModel}:{}),wrongItemCheck:photoChecks},llm);
+    const result=await deps.judgeOutput({output,original,...(shotOneBytes ? {shotOne:shotOneBytes}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,threshold:policy.threshold,floor:policy.floor,...(secondModel ? {secondModel}:{}),wrongItemCheck:photoChecks,sourceCut:cutSidesOf(row.compliance),chartSuspected:source.flags.includes("text_suspected")},llm);
     llm.assertAvailable();
     return result;
    };
@@ -277,7 +278,7 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
    const llm=catalogLlmDeps(deps,batch,underClaim,{stage:"qa",productId,sourceImageId:source.id,outputId:row.id,channel:row.channel},deps.routes ? await deps.routes():undefined);
    // The same two judges as the first judging, so a leftover background still needs both to agree.
    const model=state.qaUseSecond && policy.qaModelSecond ? policy.qaModelSecond:policy.qaModel,secondModel=model===policy.qaModelSecond ? policy.qaModel:policy.qaModelSecond;
-   const result=await deps.judgeOutput({output:jpeg,original:(await deps.storage.downloadBuffer(source.rawUri)).buf,...(source.n>1 && shotOne ? {shotOne:(await deps.storage.downloadBuffer(shotOne.rawUri)).buf}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,...(secondModel ? {secondModel}:{}),wrongItemCheck:false,threshold:policy.threshold,floor:policy.floor},llm);
+   const result=await deps.judgeOutput({output:jpeg,original:(await deps.storage.downloadBuffer(source.rawUri)).buf,...(source.n>1 && shotOne ? {shotOne:(await deps.storage.downloadBuffer(shotOne.rawUri)).buf}:{}),channel:row.channel,anchor:row.channel==="styli" ? "bottom-centre":"centre",productType:product.productType ?? "other",identifier:product.identifier,n:source.n,model,...(secondModel ? {secondModel}:{}),wrongItemCheck:false,threshold:policy.threshold,floor:policy.floor,sourceCut:cutSidesOf(row.compliance),chartSuspected:source.flags.includes("text_suspected")},llm);
    llm.assertAvailable();
    // The verdict is read from the scores against the policy's lines, as the first judging did.
    const flags=[...new Set<OutputFlag>([...result.flags,...(result.flags.includes("qa_unavailable") ? []:failingDimensions(result.scores,policy.threshold,policy.floor).map(d=>DIMENSION_FLAGS[d]))])];
