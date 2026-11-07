@@ -236,9 +236,9 @@ and the operator decides per photo in `AttentionProductCard.tsx` (Use as is, Rem
   | `visible_defect` (mark on the image, halo, background left in, product removed, after the repair loop, when the photo cannot simply be left out, D40) | `hold`: no link until a person decides | no link for that photo |
   | `photo_one` (image 1 problem with no visible defect) | Deliver image 1 provisional | yes |
   | Image 1 held on every channel | Promote the best-scoring other photo that passed, in a front, on-model or flat view, to image 1; the held photo takes its number and is decided again (D40) | yes, for the promoted photo |
-  | `unchecked` (judge unavailable or capped) | Deliver; queue the judge check later; flag `provisional` | yes |
+  | `unchecked` (judge unavailable or capped) | Deliver; queue the judge check later (not built yet: today nothing re-checks it, and the digest says it was not checked); flag `provisional`. An agreed cut-out or a failed enlargement the judge did not see is not delivered: left out when the channel keeps two good photos, else `hold` as `unusable` | yes, except those two |
   | `code_fault` (encoder or transient) | Retry now (existing), then deliver the plain render; flag `provisional` | yes |
-  | enlargement failed (spec 18) | Deliver the plain (not enlarged) render where the channel's hard minimum allows; else drop the slot | yes, or slot left empty with a reason |
+  | enlargement failed (spec 18) | Judged first (2026-11-07). No other problem: deliver the plain (not enlarged) render where the channel's hard minimum allows; else drop the slot. Any judged problem takes that problem's own row | yes, or slot left empty with a reason |
   | `corrupt` source | Drop the photo; the rest of the set is delivered | no link for that photo |
   | judged `different_product` (wrong item) | Drop the photo (product truth); the rest is delivered | no link for that photo |
 
