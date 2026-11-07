@@ -174,6 +174,8 @@ describe("invariant checks", () => {
     await enlarged("verified", 2.25, ["upscaled"]);
     await enlarged("needs_attention", 2.25, ["enlargement_failed"]);
     await enlarged("verified", 1.5, []);
+    // A pass-through copies the source pixels 1:1: nothing was enlarged, whatever the plan's scale says (French Connection, Noon).
+    await enlarged("verified", 2.25, ["passthrough"]);
     // An older batch (started before the stage) made with the silent fallback is ignored.
     const older = await batch("done"), q = await product(older.id, "new");
     const old = await output(older.id, q, "verified");

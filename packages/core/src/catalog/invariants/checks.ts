@@ -116,11 +116,14 @@ export const CHECKS: readonly InvariantCheck[] = [
     // Spec 18: batches started before the stage (no options.enlargement) kept the old silent fallback and are left as they are.
     // Spec 18 quality: the threshold is the one the batch was started with (options.enlargement.minScale, 1.0 since the
     // change); a batch from before it has none and keeps 1.5. The 1e-6 slack covers the real column's rounding.
+    // R1 exit: a `passthrough` render copies the source pixels 1:1 (the source already has the canvas size), so nothing was
+    // enlarged; `scale` holds the plan's number, not what was drawn. A plain provisional enlargement keeps alerting.
     sql: () => sql`SELECT o.id, o.batch_id FROM catalog_outputs AS o JOIN catalog_batches AS b ON b.id = o.batch_id
       WHERE jsonb_typeof(b.options->'enlargement') = 'object' AND o.status = 'verified'
         AND o.scale > (CASE WHEN jsonb_typeof(b.options->'enlargement'->'minScale') = 'number'
           THEN (b.options->'enlargement'->>'minScale')::real ELSE ${LEGACY_UPSCALE_MIN_SCALE}::real END) + 1e-6
         AND NOT (o.flags @> '["upscaled"]'::jsonb)
+        AND NOT (o.flags @> '["passthrough"]'::jsonb)
         AND NOT (o.decision IS NOT DISTINCT FROM 'use_as_is' AND o.flags @> '["enlargement_failed"]'::jsonb)
         AND NOT (o.flags @> '["provisional", "enlargement_failed"]'::jsonb)`,
   },
