@@ -46,6 +46,8 @@ export interface TriageOutput {
   decision: string | null; stagingUri: string | null;
   /** The row's `compliance` (its `auto_actions` say whether the matte stage held it for a busy background). */
   compliance?: unknown;
+  /** The row's `qa_scores`: empty until the judge's answer, or its failure, is written. */
+  qaScores?: unknown;
 }
 export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: OutputFlag[] }
 
@@ -63,7 +65,9 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
  * `keptLive` lists (channel, n) pairs whose live image stays unchanged in this batch; they count as good.
  * `judgedFailedEnlargement` (an auto-decide batch): nobody will look at a failed enlargement, so the judge did, and only
  * one with no other problem goes to `not_enlarged`. Any other problem takes its normal route (M1 D40). One the judge could
- * not see (`qa_unavailable`, `qa_cap`) is left out when the channel keeps two good photos, otherwise held.
+ * not see (`qa_unavailable`, `qa_cap`) is left out when the channel keeps two good photos, otherwise held. One it has not
+ * reached yet (a sibling photo's chunk triages the whole product) is left as it is: the QA stage decides it later, and if
+ * that never runs the publish drops it, unjudged.
  */
 export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = [], options: {judgedFailedEnlargement?: boolean} = {}): Map<string, TriageDecision> {
   const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
@@ -84,6 +88,7 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : plainPassthrough(o.compliance) ? "note" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
+    if (options.judgedFailedEnlargement && problems.includes("enlargement_failed") && !o.qaScores && !!o.stagingUri && !problems.some(flag => UNCHECKED_FLAGS.has(flag))) { result.set(o.id, {action:"none",flags:problems}); continue; }
     // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
     if (problems.includes("enlargement_failed") && (!options.judgedFailedEnlargement || problems.length === 1)) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.

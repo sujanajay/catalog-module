@@ -62,6 +62,8 @@ export interface AutoDecision {
 export function autoDecide(snapshot: AutoDecideSnapshot, cause: HoldCause, o: AutoDecideTarget & { channel: ChannelId }): AutoDecision {
   const rule = ruleFor(snapshot, cause, o.channel);
   if (rule.action !== "drop" && !deliverable(o)) return { action: "drop", rule, fellBack: true };
+  // M1 D40: only the judge stands behind a failed enlargement, so one it did not see waits for a person, whatever the rule says.
+  if (rule.action === "deliver" && o.flags.includes("enlargement_failed") && (o.flags.includes("qa_unavailable") || o.flags.includes("qa_cap"))) return { action: "hold", rule, fellBack: false };
   return { action: rule.action, rule, fellBack: false };
 }
 

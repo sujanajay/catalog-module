@@ -15,6 +15,7 @@ import { ENLARGEMENT_TOO_LARGE_WHY, PROVISIONAL_IMPROVES_SENTENCE, PROVISIONAL_S
 import { workerCatalogDeps, type CatalogDeps } from "./deps";
 import { currentChunkTask, handleChunkTask } from "./chunk";
 import { handlePublishTask } from "./publish";
+import { applyTriage } from "./qa-stage";
 import { handleFinalizeTask } from "./finalize";
 import { recutProductPhotos } from "./recut";
 import { buildReport } from "@catalog/core/catalog/pipeline/report";
@@ -664,6 +665,69 @@ describe("a failed enlargement in an auto-decide batch is judged before it is de
     expect(outputs[0]).toMatchObject({ n: 1, status: "needs_attention" });
     expect(heldForPerson(outputs[0]!)).toBe(true);
     expect(JSON.stringify(outputs.map(o => o.compliance))).not.toContain("photo_promoted");
+  }, 120_000);
+
+  it("a held photo with no failed enlargement never takes on a flagged render: nothing changes places", async () => {
+    const w = world(), s = await seed(w, "enl-promote-unflagged", { shots: ["m", "b", "c"], auto: true, channels: ["noon"] });
+    // The marked photo renders clean at number 1 and fails its enlargement at any other number.
+    const plain = w.deps.renderAllChannels;
+    w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+      const rendered = await plain(...args);
+      if (args[0].rgb[0] === "m".charCodeAt(0) && args[3]?.shotNumber !== 1) for (const channel of args[2]) rendered[channel] = { ...rendered[channel], flags: ["enlargement_failed" as OutputFlag] } as typeof rendered[typeof channel];
+      return rendered;
+    });
+    vi.mocked(w.deps.judgeOutput).mockImplementation(async input => isMarked(input.original) ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+    await stages(w, s);
+    expect((await promotedAway(s)).n).toBe(1);
+    expect(JSON.stringify((await outputsOf(s.batch.id)).map(o => o.compliance))).not.toContain("photo_promoted");
+  }, 120_000);
+
+  it("a rule table that says deliver still cannot send one the judge did not see", async () => {
+    const w = world(), s = await seed(w, "enl-outage-rule", { shots: ["a"], auto: true, channels: ["noon"] });
+    await db.update(catalogBatches).set({ options: { ...s.batch.options, autoDecide: { rules: [{ id: "unusable:*", cause: "unusable", channel: "*", action: "deliver" }] } } }).where(eq(catalogBatches.id, s.batch.id));
+    failEnlargementOn(w, ["noon"]);
+    judgeSays(w, {}, ["qa_unavailable"]);
+    await stages(w, s);
+    await publish(w, s);
+    expect(w.copy).not.toHaveBeenCalled();
+    const [o] = await outputsOf(s.batch.id);
+    expect([o!.status, o!.isLive]).toEqual(["needs_attention", false]);
+    expect(o!.flags).not.toContain("provisional");
+    expect(o!.reason).toContain("quality check could not read");
+    expect(autoDecideRecordOf(o!.compliance)).toMatchObject({ cause: "unusable", action: "hold" });
+  }, 120_000);
+
+  /** Render done, QA not yet: a sibling photo's chunk triages the whole product at this point. */
+  const triagedBeforeQa = async (name: string) => {
+    const w = world(), s = await seed(w, name, { shots: ["a"], auto: true, channels: ["noon"] });
+    named(w); failEnlargementOn(w, ["noon"]);
+    for (let i = 0; i < 2; i++) await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+    await applyTriage(w.deps, batch!, s.product.id, async write => write(db), await w.deps.resolvePolicy(batch!.brandSlug, "other"));
+    const [o] = await outputsOf(s.batch.id);
+    expect(o!.qaScores).toBeNull();
+    expect(o!.status).toBe("needs_attention");
+    expect(o!.flags).not.toContain("provisional");
+    expect(autoDecideRecordOf(o!.compliance)).toBeNull();
+    return { w, s };
+  };
+  it("triaged before its judge, it waits: the QA stage then judges and delivers it", async () => {
+    const { w, s } = await triagedBeforeQa("enl-early-judged");
+    expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    expect(w.deps.judgeOutput).toHaveBeenCalledTimes(1);
+    expect(await publish(w, s)).toBe("published");
+    const [o] = await outputsOf(s.batch.id);
+    expect([o!.status, o!.isLive, o!.qaModel]).toEqual(["verified", true, "judge-under-test"]);
+  }, 120_000);
+  it("triaged before its judge and the chunk then fails for good: it never goes live", async () => {
+    const { w, s } = await triagedBeforeQa("enl-early-failed");
+    await db.update(catalogChunks).set({ status: "failed" }).where(eq(catalogChunks.id, s.chunk.id));
+    await publish(w, s);
+    expect(w.deps.judgeOutput).not.toHaveBeenCalled();
+    expect(w.copy).not.toHaveBeenCalled();
+    const [o] = await outputsOf(s.batch.id);
+    expect(o!.isLive).toBe(false);
+    expect(o!.flags).not.toContain("provisional");
   }, 120_000);
 
   it("a judge outage never delivers it unjudged: the only photo is held, a spare one is left out, and neither claims a later check", async () => {

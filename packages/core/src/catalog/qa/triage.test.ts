@@ -123,7 +123,8 @@ describe("QA triage: hard holds only", () => {
 });
 
 describe("QA triage: a failed enlargement (spec 18, M1 D40)", () => {
- const judged = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs, [], {judgedFailedEnlargement:true}).get(target.id);
+ const judged = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs.map(o => ({qaScores:{overall:90},...o})), [], {judgedFailedEnlargement:true}).get(target.id);
+ const early = (outputs: TriageOutput[], target: TriageOutput) => triageProduct(outputs, [], {judgedFailedEnlargement:true}).get(target.id);
  it("without the judge first (no auto-decide rules) it always holds as not enlarged, whatever else it carries", () => {
   for (const flags of [["enlargement_failed"], ["enlargement_failed", "small_source"], ["enlargement_failed", "fallback_matte"]] as OutputFlag[][]) {
    const o = out(2, flags);
@@ -156,6 +157,19 @@ describe("QA triage: a failed enlargement (spec 18, M1 D40)", () => {
    const plain = out(1, [flag]);
    expect(judged([plain], plain)).toMatchObject({action:"hold",cause:"unchecked"});
   }
+ });
+ it("one the judge has not reached yet is left for the QA stage: not delivered, held or left out", () => {
+  for (const flags of [["enlargement_failed"], ["enlargement_failed", "fallback_matte"]] as OutputFlag[][]) {
+   const spare = out(3, flags), first = out(1, flags);
+   expect(early([out(1), out(2), spare], spare)).toMatchObject({action:"none"});
+   expect(early([first], first)).toMatchObject({action:"none"});
+  }
+ });
+ it("no scores does not mean not reached: a capped row and a row with no staged image are still decided", () => {
+  const capped = out(1, ["enlargement_failed", "qa_cap"]);
+  expect(early([capped], capped)).toMatchObject({action:"hold",cause:"unusable"});
+  const notMade = out(1, ["enlargement_failed"], {stagingUri:null});
+  expect(early([notMade], notMade)).toMatchObject({action:"hold",cause:"not_enlarged"});
  });
  it("a wrong item and a collage come first, with or without the judge", () => {
   const wrong = out(1, ["enlargement_failed", "different_product"]), collage = out(1, ["enlargement_failed", "collage"]);

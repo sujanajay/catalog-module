@@ -48,6 +48,8 @@ describe("M1-F3-R1 auto-decide rules", () => {
     expect(INFORMATION_FLAGS.has("provisional")).toBe(true);
     expect(autoDecideNote("deliver", "This photo could not be checked")).toBe(`This photo could not be checked. ${PROVISIONAL_SENTENCE}`);
     expect(PROVISIONAL_SENTENCE).not.toMatch(/later|improved/);
+    // Nothing rewrites this on the row when the tries end, so it must read true then too (IMPROVE_WINDOW_MS is 72 hours).
+    expect(PROVISIONAL_IMPROVES_SENTENCE).toBe("Delivered now with the best image we have. We retry the enlargement for up to 3 days; if it works, a better image replaces this one at the same link. Nothing to do.");
     expect(autoDecideNote("deliver", "Not enlarged", true, true)).toBe(`Not enlarged. ${PROVISIONAL_IMPROVES_SENTENCE}`);
     expect(autoDecideNote("drop", null)).toMatch(/^Left out automatically/);
   });
