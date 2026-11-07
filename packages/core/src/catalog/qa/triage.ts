@@ -83,14 +83,19 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     // M1 D45: a photo the text detector sent for a check is never delivered without a verdict, whatever else is wrong with it. An
     // enlargement rule delivers without looking, so this comes before it: the real size chart must not reach a link unseen.
     if (o.flags.includes("text_suspected") && (!o.qaScores || problems.some(flag => UNCHECKED_FLAGS.has(flag)))) {
-      if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
+      // One the judge has not reached yet (a sibling photo's chunk triages the whole product) waits for the QA stage: a drop could never
+      // be judged again. If that stage never runs, the publish leaves it out, unjudged.
+      if (!o.qaScores && !!o.stagingUri && !problems.some(flag => UNCHECKED_FLAGS.has(flag) || flag === "failed_compliance")) result.set(o.id, {action:"none",flags:problems});
+      else if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems});
+      else hold("unusable");
       continue;
     }
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : plainPassthrough(o.compliance) ? "note" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
-    // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted.
-    if (problems.includes("enlargement_failed")) { hold("not_enlarged"); continue; }
+    // Spec 18 owner decision 1: an enlargement that failed holds the product with its reason; never dropped or noted. A visible defect
+    // the judge found on it takes the visible-defect path below instead: the rule for this hold delivers, and such a defect is never delivered with a warning (M1 D40).
+    if (problems.includes("enlargement_failed") && !(o.qaScores && problems.some(flag => VISIBLE_DEFECT_FLAGS.has(flag)))) { hold("not_enlarged"); continue; }
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
     // M1 D40: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) {

@@ -3,7 +3,7 @@
 // photo while the product's other photos get links, never makes a product `pending_attention`, and releases every lock
 // at finalize. The same input in a batch started before M1-S3 (no options.autoDecide) still holds, as on main.
 import { FIXTURE_CHANNEL_RULES } from "@catalog/core/catalog/channel-rules";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { createTestDb } from "@catalog/core/db/testing";
@@ -22,6 +22,8 @@ import { applyDecision } from "@catalog/core/catalog/decisions";
 import { listAttention } from "@catalog/core/catalog/attention";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { enqueueFinalize } from "./deps";
+import { applyTriage } from "./qa-stage";
+import { flagDetails } from "@catalog/core/catalog/qa/reasons";
 
 let db: Db, close: () => Promise<void>;
 const bucketEnv = { BUCKET: process.env.BUCKET, PUBLIC_BUCKET: process.env.PUBLIC_BUCKET };
@@ -517,6 +519,80 @@ for (const [name, judge, expected] of [
   expect(output!.qaScores).not.toBeNull();
   if (expected.live) expect(output!.status).toBe("verified"); else expect(w.deps.storage.stageCopyToPublic).not.toHaveBeenCalled();
 }, 240_000);
+
+// M1 D45, through the real entry points: now the judge sees these rows, what it finds counts. A visible defect is never delivered with a warning (M1 D40).
+for (const [flag, scores] of [
+  ["text_or_watermark", { no_text_or_watermark: 20 }],
+  ["halo", { edge_quality: 20 }],
+  ["product_removed", { product_intact: 10 }],
+] as const) it(`M1 D45: ${flag} found on a suspected photo with its enlargement failed never goes live, and the note names the defect`, async () => {
+  const w = world(), s = await seed(w, `d45-defect-${flag}`, { shots: ["a"], auto: true });
+  await db.update(catalogSourceImages).set({ flags: ["text_suspected"] }).where(eq(catalogSourceImages.productId, s.product.id));
+  vi.mocked(w.deps.resolvePolicy).mockImplementation(async () => ({ matteModel: "fixture", qaModel: "judge-under-test", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" }));
+  const plain = w.deps.renderAllChannels;
+  w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+    const rendered = await plain(...args);
+    for (const channel of args[2]) rendered[channel] = { ...rendered[channel], flags: ["enlargement_failed"] } as never;
+    return rendered;
+  });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => ({ scores: { ...PASS, ...scores }, verdict: "flag", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [flag] }) as never);
+  await stages(w, s);
+  await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+  const outputs = await outputsOf(s.batch.id);
+  expect(outputs.length).toBeGreaterThan(0);
+  for (const output of outputs) {
+    expect(output.isLive).toBe(false);
+    expect(output.flags).toContain(flag);
+    expect(output.flags).not.toContain("provisional");
+    expect(output.status).toBe("needs_attention");
+    expect(autoDecideRecordOf(output.compliance)).toMatchObject({ cause: "visible_defect", action: "hold" });
+    expect(output.reason).toContain(flagDetails(flag).why);
+  }
+  expect(w.deps.storage.stageCopyToPublic).not.toHaveBeenCalled();
+}, 240_000);
+
+describe("M1 D45: a sibling photo's chunk triages the product before the judge reaches a suspected photo", () => {
+  /** Render done, QA not yet, with photos 1-3 good and photo 4 suspected. */
+  const triagedBeforeQa = async (name: string) => {
+    const w = world(), s = await seed(w, name, { shots: ["a", "b", "c", "d"], auto: true });
+    vi.mocked(w.deps.resolvePolicy).mockImplementation(async () => ({ matteModel: "fixture", qaModel: "judge-under-test", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" }));
+    await db.update(catalogSourceImages).set({ flags: ["text_suspected"] }).where(and(eq(catalogSourceImages.productId, s.product.id), eq(catalogSourceImages.n, 4)));
+    for (let i = 0; i < 2; i++) await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+    const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, s.batch.id));
+    await applyTriage(w.deps, batch!, s.product.id, async write => write(db), await w.deps.resolvePolicy(batch!.brandSlug, "other"));
+    const suspected = (await outputsOf(s.batch.id)).filter(o => o.n === 4);
+    expect(suspected.length).toBeGreaterThan(0);
+    for (const o of suspected) {
+      expect(o.qaScores).toBeNull();
+      expect(o.status).toBe("staged");
+      expect(o.flags).not.toContain("auto_dropped");
+    }
+    return { w, s };
+  };
+  it("it waits: the judge then passes a printed pattern and it goes live", async () => {
+    const { w, s } = await triagedBeforeQa("d45-early-pass");
+    expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+    for (const o of (await outputsOf(s.batch.id)).filter(o => o.n === 4)) expect([o.status, o.isLive, o.qaScores === null]).toEqual(["verified", true, false]);
+  }, 240_000);
+  it("it waits: the judge then says chart and it is left out", async () => {
+    const { w, s } = await triagedBeforeQa("d45-early-chart");
+    vi.mocked(w.deps.judgeOutput).mockImplementation(async input => ({ scores: PASS, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], ...(input.n === 4 ? { view: "chart" } : {}) }) as never);
+    expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+    for (const o of (await outputsOf(s.batch.id)).filter(o => o.n === 4)) {
+      expect(o.isLive).toBe(false);
+      expect(o.flags).toContain("chart_image");
+    }
+  }, 240_000);
+  it("its chunk then fails for good: it never goes live unseen", async () => {
+    const { w, s } = await triagedBeforeQa("d45-early-failed");
+    await db.update(catalogChunks).set({ status: "failed" }).where(eq(catalogChunks.id, s.chunk.id));
+    await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+    expect(w.deps.judgeOutput).not.toHaveBeenCalled();
+    for (const o of (await outputsOf(s.batch.id)).filter(o => o.n === 4)) expect(o.isLive).toBe(false);
+  }, 240_000);
+});
 
 it("D40: a product re-sent after a promotion keeps its delivered order: image 1 and image 2 never show one photo", async () => {
   const w = world(), s = await seed(w, "auto-promoted-resend", { shots: ["m", "b"], auto: true });

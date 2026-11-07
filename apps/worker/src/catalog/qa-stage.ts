@@ -348,7 +348,9 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
    const cause=causeOf(o);
    if(o.status==="failed" && !cause) continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
-   const plain=plainPassthrough(o.compliance),lead=leadFlag(o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
+   // Auto-decide: a judged problem on a failed enlargement is what the note names; the rule that decides it is that problem's.
+   const others=auto ? o.flags.filter(flag=>flag!=="enlargement_failed"):o.flags;
+   const plain=plainPassthrough(o.compliance),lead=leadFlag(problemFlags(others).length ? others:o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
    const tried=lead && OWN_DEFECT_FLAGS.has(lead) && !ctx.busy ? triedSentence(actionsOn(o.compliance,o.channel).filter(a=>a.result!=="skipped").map(a=>a.step)):"";
    const why=lead ? [flagDetails(lead,ctx).why,tried].filter(Boolean).join(" "):null;
    // Hard holds first, then the worst problem, so the card and the note cite the main problem.
