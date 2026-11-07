@@ -118,6 +118,8 @@ const OWN_OUTPUT_FLAGS = new Set<OutputFlag>(OUTPUT_DIMENSIONS.map(d => DIMENSIO
 /** Outputs that never get a (new) judge call: no verdict can change them, or one is already recorded. */
 // Spec 18 lifecycle 3.7: an output held for its enlargement is not judged (its hold cannot change by a verdict).
 const NOT_JUDGED = new Set<OutputFlag>(["failed_compliance", "qa_cap", "qa_unavailable", "enlargement_failed"]);
+// M1 D45: except a photo the text detector sent for a check: only the judge can tell a real size chart from a printed pattern.
+const skipsJudge = (flags: readonly OutputFlag[]) => flags.some(flag => NOT_JUDGED.has(flag) && !(flag === "enlargement_failed" && flags.includes("text_suspected")));
 /** A judge sentence reaches the report and the attention card only when it names no model. */
 const clean = (sentence: string | undefined, fallback: string) => sentence && !MODEL_TEXT.test(sentence) ? sentence : fallback;
 
@@ -139,7 +141,7 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
  const router=deps.routes ? await deps.routes():undefined;
  const candidates=await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),inArray(catalogOutputs.sourceImageId,sources.map(s=>s.id)),inArray(catalogOutputs.status,["staged","needs_attention"]),isNull(catalogOutputs.qaScores),isNull(catalogOutputs.decision)));
  // A needs_attention output from render (small_source) is judged too, so a note never publishes an unseen image.
- const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !row.flags.some(flag=>NOT_JUDGED.has(flag))));
+ const rows=candidates.filter(row=>row.status==="staged" || (!!row.stagingUri && !skipsJudge(row.flags)));
  const groups=sources.map(source=>rows.filter(row=>row.sourceImageId===source.id)).filter(group=>group.length);
  // A stop between groups: the continuation judges only rows without scores, then triages.
  const notStarted=await eachLimit(groups,options.photoConcurrency ?? 1,async group=>{
@@ -266,7 +268,8 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
    rows=await photo();
   }
   const flush=rows.some(o=>tried(o,"flush_cut","passed"));
-  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
+  // Spec 18 lifecycle 3.7: a re-render of a failed enlargement is never accepted (auto-resolve `ok`), so a defect it shares with its photo's other channels is not a target.
+  const failing=rows.filter(o=>!o.flags.includes("enlargement_failed") && o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
   if(!failing.length) continue;
   const rejudge=stopOn(error=>error instanceof CatalogQaCapError,async(row,jpeg)=>{
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});

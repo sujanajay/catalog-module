@@ -492,6 +492,32 @@ it("D42: a re-cut of image 1 held by the judge keeps the live image 1 until a pe
   expect(vi.mocked(w.deps.storage.deletePublicObject).mock.calls.map(c => c[0])).toEqual([one!.objectPath]);
 }, 180_000);
 
+// M1 D45, through the real entry points: an enlargement rule delivers with nobody looking, so a photo the text detector sent for a check must meet a judge first.
+for (const [name, judge, expected] of [
+  ["a real chart is judged and left out", { view: "chart" }, { live: false, flags: ["chart_image", "text_suspected"] }],
+  ["with the judge down it stays off the link", { flags: ["qa_unavailable"] }, { live: false, flags: ["text_suspected", "qa_unavailable"] }],
+  ["a pattern the judge passes goes on as any failed enlargement does, with a verdict on it", {}, { live: true, flags: ["text_suspected", "enlargement_failed", "provisional"] }],
+] as const) it(`M1 D45: a suspected photo with its enlargement failed: ${name}`, async () => {
+  const w = world(), s = await seed(w, `d45-suspected-${name.split(" ")[1]}`, { shots: ["a"], auto: true });
+  await db.update(catalogSourceImages).set({ flags: ["text_suspected"] }).where(eq(catalogSourceImages.productId, s.product.id));
+  vi.mocked(w.deps.resolvePolicy).mockImplementation(async () => ({ matteModel: "fixture", qaModel: "judge-under-test", threshold: 75, floor: 60, qaMode: "per_source", qaSampleRate: 1, source: "default" }));
+  const plain = w.deps.renderAllChannels;
+  w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+    const rendered = await plain(...args);
+    for (const channel of args[2]) rendered[channel] = { ...rendered[channel], flags: ["enlargement_failed"] } as never;
+    return rendered;
+  });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => ({ scores: PASS, verdict: "pass", reasons: [], isCollage: false, costUsd: 0, calls: 1, usage: {}, model: input.model, flags: [], ...judge }) as never);
+  await stages(w, s);
+  expect(w.deps.judgeOutput).toHaveBeenCalled();
+  await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+  const [output] = await outputsOf(s.batch.id);
+  expect(output!.isLive).toBe(expected.live);
+  expect(output!.flags).toEqual(expect.arrayContaining([...expected.flags]));
+  expect(output!.qaScores).not.toBeNull();
+  if (expected.live) expect(output!.status).toBe("verified"); else expect(w.deps.storage.stageCopyToPublic).not.toHaveBeenCalled();
+}, 240_000);
+
 it("D40: a product re-sent after a promotion keeps its delivered order: image 1 and image 2 never show one photo", async () => {
   const w = world(), s = await seed(w, "auto-promoted-resend", { shots: ["m", "b"], auto: true });
   const shaOf = async (batchId: string, n: number) => (await db.select({ sha: catalogSourceImages.sha256 }).from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, batchId), eq(catalogSourceImages.n, n))))[0]!.sha;

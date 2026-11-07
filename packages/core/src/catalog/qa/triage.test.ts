@@ -10,7 +10,19 @@ const out = (n: number, flags: OutputFlag[] = [], extra: Partial<TriageOutput> =
 const action = (outputs: TriageOutput[], target: TriageOutput, kept: {channel: ChannelId; n: number}[] = []) => triageProduct(outputs, kept).get(target.id);
 
 describe("M1 D45: a photo the text detector sent for a check", () => {
-  const row = (id: string, n: number, flags: OutputFlag[], status = "staged"): TriageOutput => ({ id, n, channel: "noon", status, flags, decision: null, stagingUri: `gs://s/${id}` });
+  const row = (id: string, n: number, flags: OutputFlag[], status = "staged"): TriageOutput => ({ id, n, channel: "noon", status, flags, decision: null, stagingUri: `gs://s/${id}`, qaScores: { verdict: "pass" } });
+  it("is never delivered unseen when its enlargement failed: no rule delivers it before a judge has seen it", () => {
+    const unseen = (id: string, n: number, flags: OutputFlag[]) => ({ ...row(id, n, flags, "needs_attention"), qaScores: null });
+    const failed: OutputFlag[] = ["text_suspected", "enlargement_failed"];
+    expect(triageProduct([unseen("a", 1, failed)]).get("a")).toMatchObject({ action: "hold", cause: "unusable" });
+    expect(triageProduct([row("a", 1, []), row("b", 2, []), row("c", 3, []), unseen("d", 4, failed)]).get("d")).toMatchObject({ action: "drop" });
+    expect(triageProduct([row("a", 1, [...failed, "qa_unavailable"], "needs_attention")]).get("a")).toMatchObject({ action: "hold", cause: "unusable" });
+    expect(triageProduct([unseen("a", 1, ["text_suspected"])]).get("a")).toMatchObject({ action: "hold", cause: "unusable" });
+    // Judged clean, it follows the enlargement rule like any other photo: the judge has seen it.
+    expect(triageProduct([row("a", 1, failed, "needs_attention")]).get("a")).toMatchObject({ action: "hold", cause: "not_enlarged" });
+    // A photo no detector suspected is not touched by this.
+    expect(triageProduct([{ ...row("a", 1, ["enlargement_failed"], "needs_attention"), qaScores: null }]).get("a")).toMatchObject({ action: "hold", cause: "not_enlarged" });
+  });
   it("is never delivered unseen: with the judge down it is left out when the channel can do without it, else held", () => {
     const seen: OutputFlag[] = ["text_suspected", "qa_unavailable"];
     expect(triageProduct([row("a", 1, []), row("b", 2, []), row("c", 3, []), row("d", 4, seen, "needs_attention")]).get("d")).toMatchObject({ action: "drop" });

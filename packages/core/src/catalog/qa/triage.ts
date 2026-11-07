@@ -46,8 +46,16 @@ export interface TriageOutput {
   decision: string | null; stagingUri: string | null;
   /** The row's `compliance` (its `auto_actions` say whether the matte stage held it for a busy background). */
   compliance?: unknown;
+  /** The judge's record; none means no judge saw this row. */
+  qaScores?: unknown;
 }
 export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: OutputFlag[] }
+
+/** Photo 1 of a product: its lowest photo that is not a size chart or a text-only image, counting the places that stay live. */
+export function photoOneOf(outputs: readonly Pick<TriageOutput, "n" | "flags">[], keptLive: readonly {n: number}[] = []): number {
+  const shots = [...new Set([...outputs.filter(o => !o.flags.some(flag => LEFT_OUT_FLAGS.has(flag))).map(o => o.n), ...keptLive.map(k => k.n)])];
+  return shots.length ? Math.min(...shots) : 1;
+}
 
 /**
  * Turns the problems of one product's outputs in this batch into automatic actions (07 4.1 v2).
@@ -64,8 +72,7 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
  */
 export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = []): Map<string, TriageDecision> {
   const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
-  const shots = [...new Set([...outputs.filter(o => !leftOut(o)).map(o => o.n), ...keptLive.map(k => k.n)])];
-  const photoOne = shots.length ? Math.min(...shots) : 1;
+  const photoOne = photoOneOf(outputs, keptLive);
   const good = (o: TriageOutput) => o.decision === "use_as_is" || ((o.status === "staged" || o.status === "verified") && o.decision === null && !problemFlags(o.flags).length);
   const goodShots = (channel: ChannelId, except: number) => new Set([
     ...outputs.filter(o => o.channel === channel && o.n !== except && good(o)).map(o => o.n),
@@ -78,6 +85,12 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     const hold = (cause: HoldCause) => result.set(o.id, {action:"hold",cause,flags:problems});
     if (o.status === "failed") { hold("corrupt"); continue; }
     if (leftOut(o)) { result.set(o.id, {action:"drop",flags:problems}); continue; }
+    // M1 D45: a photo the text detector sent for a check is never delivered without a verdict, whatever else is wrong with it. An
+    // enlargement rule delivers without looking, so this comes before it: the real size chart must not reach a link unseen.
+    if (o.flags.includes("text_suspected") && (!o.qaScores || problems.some(flag => UNCHECKED_FLAGS.has(flag)))) {
+      if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
+      continue;
+    }
     if (!problems.length) { result.set(o.id, {action:o.status === "needs_attention" ? "hold" : plainPassthrough(o.compliance) ? "note" : "none",flags:[]}); continue; }
     if (problems.includes("different_product")) { hold("wrong_item"); continue; }
     if (problems.includes("collage")) { hold("collage"); continue; }
@@ -92,8 +105,7 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     if (problems.some(flag => UNCHECKED_FLAGS.has(flag))) {
       // M1 D40: the judge is what stands behind an agreed cut-out, so one it did not see is never delivered on trust: it is
       // left out when the channel can do without it, otherwise it waits for a person. Any other unseen image follows the `unchecked` rule.
-      // M1 D45: the same for a photo the text detector sent for a check: an unseen real size chart must never go out.
-      if (!agreedMatte(o.compliance) && !o.flags.includes("text_suspected")) hold("unchecked");
+      if (!agreedMatte(o.compliance)) hold("unchecked");
       else if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems});
       else hold("unusable");
       continue;
