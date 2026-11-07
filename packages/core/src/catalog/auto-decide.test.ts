@@ -56,5 +56,7 @@ describe("M1-F3-R1 auto-decide rules", () => {
     expect(autoDecideNote("hold", "The edge is rough")).toBe(`The edge is rough. ${HOLD_SENTENCE}`);
     expect(HOLD_SENTENCE).toContain("other photos are delivered");
     expect(autoDecideNote("hold", "The edge is rough", false)).toBe("The edge is rough. It has no link yet. Replace it, use it as it is, or remove it.");
+    expect(autoDecideNote("drop", "The edge is rough")).toContain("the product's other photos are delivered");
+    expect(autoDecideNote("drop", "The edge is rough", false)).toBe("The edge is rough. Left out automatically; this photo gets no link here.");
   });
 });

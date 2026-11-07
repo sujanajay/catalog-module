@@ -24,9 +24,10 @@ const PG_MESSAGES = new Set([
 const SOCKET_CODES = new Set(["ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN", "ENOTFOUND", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH"]);
 /**
  * 57P01 admin_shutdown, 57P02 crash_shutdown, 57P03 cannot_connect_now, 57P05 idle_session_timeout, 53300
- * too_many_connections, 25P03 idle_in_transaction_session_timeout. Class 08 is checked by its prefix.
+ * too_many_connections, 25P03 idle_in_transaction_session_timeout, 57014 query_canceled (the worker's pool sets a
+ * statement_timeout, client.ts, so a database too busy to answer ends here). Class 08 is checked by its prefix.
  */
-const SQLSTATES = new Set(["57P01", "57P02", "57P03", "57P05", "53300", "25P03"]);
+const SQLSTATES = new Set(["57P01", "57P02", "57P03", "57P05", "53300", "25P03", "57014"]);
 const MAX_DEPTH = 5;
 
 export function isConnectionError(error: unknown, depth = 0): boolean {

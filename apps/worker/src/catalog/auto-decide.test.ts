@@ -253,6 +253,36 @@ it.each([
   }
 }, 120_000);
 
+it("a dropped photo of a product with no other photo does not say the product's other photos are delivered", async () => {
+  const w = world(), s = await seed(w, "auto-drop-single", { shots: ["m"], auto: true });
+  vi.mocked(w.deps.renderAllChannels).mockRejectedValueOnce(new Error("Input buffer has corrupt header"));
+  await stages(w, s);
+  const [only] = await outputsOf(s.batch.id);
+  expect(autoDecideRecordOf(only!.compliance)).toMatchObject({ action: "drop" });
+  expect(only!.reason).toContain("Left out automatically; this photo gets no link here.");
+  expect(only!.reason).not.toContain("other photos");
+}, 120_000);
+
+it("publish: a staged photo the judge never saw (its chunk failed) names the other photos only when one is delivered", async () => {
+  const w = world(), s = await seed(w, "auto-drop-unjudged", { shots: ["a", "m"], auto: true });
+  for (let i = 0; i < 2; i++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+  await db.update(catalogChunks).set({ status: "failed" }).where(eq(catalogChunks.id, s.chunk.id));
+  await db.update(catalogOutputs).set({ qaScores: PASS }).where(and(eq(catalogOutputs.batchId, s.batch.id), eq(catalogOutputs.n, 1)));
+  await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id });
+  const [, two] = await outputsOf(s.batch.id);
+  expect(two).toMatchObject({ status: "skipped" });
+  expect(two!.reason).toContain("the product's other photos are delivered");
+
+  const none = world(), lone = await seed(none, "auto-drop-unjudged-all", { shots: ["a", "m"], auto: true });
+  for (let i = 0; i < 2; i++) expect((await handleChunkTask(none.deps, await currentChunkTask(db, lone.chunk.id))).httpStatus).toBe(200);
+  await db.update(catalogChunks).set({ status: "failed" }).where(eq(catalogChunks.id, lone.chunk.id));
+  await handlePublishTask(none.deps, { batchId: lone.batch.id, productId: lone.product.id });
+  for (const o of await outputsOf(lone.batch.id)) {
+    expect(o).toMatchObject({ status: "skipped" });
+    expect(o.reason).not.toContain("other photos");
+  }
+}, 120_000);
+
 it("D40: a product with every photo held has no link and still reaches a person: in the needs-you count and the list the page shows", async () => {
   const w = world(), s = await seed(w, "auto-all-held", { shots: ["m", "n"], auto: true });
   vi.mocked(w.deps.judgeOutput).mockImplementation(async input => FLAGGED(input, ["text_or_watermark"]));
