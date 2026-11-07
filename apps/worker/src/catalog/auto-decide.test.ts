@@ -20,6 +20,7 @@ import { recutProductPhotos } from "./recut";
 import { buildReport } from "@catalog/core/catalog/pipeline/report";
 import { applyDecision } from "@catalog/core/catalog/decisions";
 import { listAttention } from "@catalog/core/catalog/attention";
+import { enlargementOutlooks } from "@catalog/core/catalog/improve";
 import { deriveBatchState } from "@catalog/core/catalog/pipeline/status";
 import { enqueueFinalize } from "./deps";
 
@@ -528,7 +529,7 @@ describe("a failed enlargement in an auto-decide batch is judged before it is de
   const publish = async (w: ReturnType<typeof world>, s: Awaited<ReturnType<typeof seed>>) => (await handlePublishTask(w.deps, { batchId: s.batch.id, productId: s.product.id })).outcome;
   const byChannel = (outputs: Awaited<ReturnType<typeof outputsOf>>, channel: ChannelId) => outputs.find(o => o.channel === channel)!;
   const sourceOf = async (productId: string) => (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.productId, productId)))[0]!;
-  const enlargementRow = (s: Awaited<ReturnType<typeof seed>>, sourceImageId: string, route: "none" | "direct") => db.insert(catalogEnlargements).values({ batchId: s.batch.id, productId: s.product.id, sourceImageId, upscaler: "u@h", factor: 2, scale: 1.3, outW: 2, outH: 2, route, pixelHash: "p", identityHash: route, status: "failed", errorKind: route === "none" ? "no_route" : "bad_input" });
+  const enlargementRow = (s: Awaited<ReturnType<typeof seed>>, sourceImageId: string, route: "none" | "direct", extra: { wanted?: boolean } = {}) => db.insert(catalogEnlargements).values({ batchId: s.batch.id, productId: s.product.id, sourceImageId, upscaler: "u@h", factor: 2, scale: 1.3, outW: 2, outH: 2, route, pixelHash: "p", identityHash: route, status: "failed", errorKind: route === "none" ? "no_route" : "bad_input", ...extra });
 
   it("every channel flagged (the French Connection shape): one real judge call on the strictest channel, and a clean one is delivered provisional, judged", async () => {
     const w = world(), s = await seed(w, "enl-all-clean", { shots: ["a"], auto: true, channels: ["styli", "amazon", "noon"] });
@@ -586,16 +587,23 @@ describe("a failed enlargement in an auto-decide batch is judged before it is de
   it("a defect the judged channel shows is looked at on the stretched channel too, is not re-rendered there, and is not delivered there", async () => {
     const w = world(), s = await seed(w, "enl-mixed-defect", { shots: ["a"], auto: true, channels: ["styli", "noon"] });
     named(w); failEnlargementOn(w, ["noon"]);
-    judgeSays(w, { edge_quality: 10, overall: 70 }, ["halo"]);
-    const repaired: ChannelId[] = [];
+    judgeSays(w, { background_clean: 10, overall: 70 }, ["leftover_background"]);
+    // A drawn shadow on every channel, so the repair loop has a step for this defect: it takes the shadow off, one channel at a time.
+    const flagged = w.deps.renderAllChannels;
+    w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+      const rendered = await flagged(...args);
+      for (const channel of args[2]) rendered[channel] = { ...rendered[channel], compliance: { ...rendered[channel]!.compliance, measured: { shadow: "synthesised" } } } as typeof rendered[typeof channel];
+      return rendered;
+    });
     await stages(w, s);
-    for (const [, , channels, options] of vi.mocked(w.deps.renderAllChannels).mock.calls) if (options?.fitScale !== undefined || options?.synthesiseShadow === false) repaired.push(...channels);
+    const repaired = vi.mocked(w.deps.renderAllChannels).mock.calls.flatMap(([, , channels, options]) => options?.synthesiseShadow === false ? channels : []);
     expect(vi.mocked(w.deps.judgeOutput).mock.calls.map(([input]) => input.channel).slice(0, 2).sort()).toEqual(["noon", "styli"]);
+    expect(repaired).toContain("styli");
     expect(repaired).not.toContain("noon");
     await publish(w, s);
     const noon = byChannel(await outputsOf(s.batch.id), "noon");
     expect(noon.isLive).toBe(false);
-    expect(noon.flags).toContain("halo");
+    expect(noon.flags).toContain("leftover_background");
     expect(noon.flags).not.toContain("provisional");
   }, 120_000);
 
@@ -606,6 +614,110 @@ describe("a failed enlargement in an auto-decide batch is judged before it is de
     await stages(w, s);
     expect(w.deps.judgeOutput).toHaveBeenCalledTimes(1);
     expect((await outputsOf(s.batch.id))[0]!.flags).not.toContain("qa_sampled_out");
+  }, 120_000);
+
+  /** The judge reads the marked photo by its raw byte, whatever number it has. */
+  const isMarked = (buf: { [index: number]: number | undefined }) => buf[3] === "m".charCodeAt(0);
+  /** A failed enlargement on the marked photo only, whatever number it has. */
+  const failEnlargementOnMarked = (w: ReturnType<typeof world>) => {
+    const plain = w.deps.renderAllChannels;
+    w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+      const rendered = await plain(...args);
+      if (args[0].rgb[0] === "m".charCodeAt(0)) for (const channel of args[2]) rendered[channel] = { ...rendered[channel], flags: ["enlargement_failed" as OutputFlag] } as typeof rendered[typeof channel];
+      return rendered;
+    });
+  };
+  const promotedAway = async (s: Awaited<ReturnType<typeof seed>>) => (await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, s.batch.id), eq(catalogSourceImages.sha256, "m"))))[0]!;
+
+  it("image 1 with a failed enlargement and a visible defect: a good photo takes image 1, and the held photo is decided again at its new number", async () => {
+    const w = world(), s = await seed(w, "enl-promote", { shots: ["m", "b", "c"], auto: true, channels: ["noon"] });
+    failEnlargementOnMarked(w);
+    vi.mocked(w.deps.judgeOutput).mockImplementation(async input => isMarked(input.original) ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+    await stages(w, s);
+    const held = await promotedAway(s);
+    expect(held.n).toBeGreaterThan(1);
+    expect(await publish(w, s)).toBe("published");
+    const outputs = await outputsOf(s.batch.id), first = outputs.find(o => o.n === 1)!;
+    expect(first).toMatchObject({ status: "verified", isLive: true });
+    expect(first.sourceImageId).not.toBe(held.id);
+    expect(first.flags).not.toContain("enlargement_failed");
+    expect((first.compliance as { auto_actions?: { step: string }[] }).auto_actions?.map(a => a.step)).toContain("photo_promoted");
+    const left = outputs.find(o => o.sourceImageId === held.id)!;
+    expect(left).toMatchObject({ status: "skipped", isLive: false });
+    expect(left.flags).toEqual(expect.arrayContaining(["enlargement_failed", "auto_dropped"]));
+  }, 120_000);
+
+  it("the promoted photo never takes image 1 with a failed enlargement: nothing changes places", async () => {
+    const w = world(), s = await seed(w, "enl-promote-refused", { shots: ["m", "b", "c"], auto: true, channels: ["noon"] });
+    failEnlargementOnMarked(w);
+    // The good photo renders clean at its own number and fails its enlargement at number 1.
+    const marked = w.deps.renderAllChannels;
+    w.deps.renderAllChannels = vi.fn<CatalogDeps["renderAllChannels"]>(async (...args) => {
+      const rendered = await marked(...args);
+      if (args[0].rgb[0] !== "m".charCodeAt(0) && args[3]?.shotNumber === 1) for (const channel of args[2]) rendered[channel] = { ...rendered[channel], flags: ["enlargement_failed" as OutputFlag] } as typeof rendered[typeof channel];
+      return rendered;
+    });
+    vi.mocked(w.deps.judgeOutput).mockImplementation(async input => isMarked(input.original) ? FLAGGED(input, ["text_or_watermark"]) : GOOD(input));
+    await stages(w, s);
+    expect((await promotedAway(s)).n).toBe(1);
+    const outputs = await outputsOf(s.batch.id);
+    expect(outputs[0]).toMatchObject({ n: 1, status: "needs_attention" });
+    expect(heldForPerson(outputs[0]!)).toBe(true);
+    expect(JSON.stringify(outputs.map(o => o.compliance))).not.toContain("photo_promoted");
+  }, 120_000);
+
+  it("a judge outage never delivers it unjudged: the only photo is held, a spare one is left out, and neither claims a later check", async () => {
+    const only = world(), a = await seed(only, "enl-outage-only", { shots: ["a"], auto: true, channels: ["noon", "styli"] });
+    failEnlargementOn(only, ["noon", "styli"]);
+    judgeSays(only, {}, ["qa_unavailable"]);
+    await stages(only, a);
+    await publish(only, a);
+    expect(only.copy).not.toHaveBeenCalled();
+    for (const o of await outputsOf(a.batch.id)) {
+      expect([o.status, o.isLive]).toEqual(["needs_attention", false]);
+      expect(heldForPerson(o)).toBe(true);
+      expect(autoDecideRecordOf(o.compliance)).toMatchObject({ cause: "unusable", action: "hold" });
+      expect(o.flags).not.toContain("provisional");
+      expect(o.reason).toContain("quality check could not read");
+      expect(o.reason).not.toMatch(/later|busy|background/i);
+    }
+    const spare = world(), b = await seed(spare, "enl-outage-spare", { shots: ["b", "c", "m"], auto: true, channels: ["noon"] });
+    failEnlargementOnMarked(spare);
+    vi.mocked(spare.deps.judgeOutput).mockImplementation(async input => isMarked(input.original) ? { ...GOOD(input), flags: ["qa_unavailable"] as never } : GOOD(input));
+    await stages(spare, b);
+    expect(await publish(spare, b)).toBe("published");
+    const outputs = await outputsOf(b.batch.id);
+    expect(outputs.map(o => [o.n, o.status, o.isLive])).toEqual([[1, "verified", true], [2, "verified", true], [3, "skipped", false]]);
+    expect(outputs[2]!.flags).not.toContain("provisional");
+  }, 120_000);
+
+  it("a spending cap never delivers it unjudged either", async () => {
+    const w = world(), s = await seed(w, "enl-cap", { shots: ["a"], auto: true, channels: ["noon"] });
+    failEnlargementOn(w, ["noon"]);
+    for (let i = 0; i < 2; i++) await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id));
+    vi.stubEnv("DAILY_SPEND_CAP_USD", "0");
+    try { expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
+    await publish(w, s);
+    expect(w.deps.judgeOutput).not.toHaveBeenCalled();
+    const [o] = await outputsOf(s.batch.id);
+    expect(o!.flags).toContain("qa_cap");
+    expect(o!.flags).not.toContain("provisional");
+    expect([o!.status, o!.isLive]).toEqual(["needs_attention", false]);
+    expect(autoDecideRecordOf(o!.compliance)).toMatchObject({ cause: "unusable", action: "hold" });
+  }, 120_000);
+
+  it("what can still happen to a photo: a retry wins over a size refusal in any order, and a row the batch no longer wants does not count", async () => {
+    const w = world(), s = await seed(w, "enl-outlooks", { shots: ["a", "b", "c", "d"], auto: true, channels: ["noon"] });
+    const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, s.batch.id)), of = (sha: string) => sources.find(x => x.sha256 === sha)!.id;
+    await enlargementRow(s, of("a"), "direct");
+    await enlargementRow(s, of("a"), "none");
+    await enlargementRow(s, of("b"), "none");
+    await enlargementRow(s, of("b"), "direct");
+    await enlargementRow(s, of("c"), "none");
+    await enlargementRow(s, of("c"), "direct", { wanted: false });
+    await enlargementRow(s, of("d"), "none", { wanted: false });
+    const outlooks = await enlargementOutlooks(db, s.batch.id);
+    expect(Object.fromEntries(sources.map(x => [x.sha256, outlooks.get(x.id) ?? null]))).toEqual({ a: "retry", b: "retry", c: "too_large", d: null });
   }, 120_000);
 
   it("a size refusal says so and promises no later improvement; a failure a call can retry may promise it", async () => {

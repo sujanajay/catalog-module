@@ -62,7 +62,8 @@ export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: 
  * photo 1 is the lowest photo that is not one.
  * `keptLive` lists (channel, n) pairs whose live image stays unchanged in this batch; they count as good.
  * `judgedFailedEnlargement` (an auto-decide batch): nobody will look at a failed enlargement, so the judge did, and only
- * one with no other problem goes to `not_enlarged`. Any other problem takes its normal route (M1 D40).
+ * one with no other problem goes to `not_enlarged`. Any other problem takes its normal route (M1 D40). One the judge could
+ * not see (`qa_unavailable`, `qa_cap`) is left out when the channel keeps two good photos, otherwise held.
  */
 export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = [], options: {judgedFailedEnlargement?: boolean} = {}): Map<string, TriageDecision> {
   const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
@@ -88,6 +89,11 @@ export function triageProduct(outputs: readonly TriageOutput[], keptLive: readon
     // The background could not be removed (code-detected `leftover_background`, busyBackgroundHold): a hard hold.
     // M1 D40: as for any other defect, a photo the channel can do without is left out; a person is asked only when it cannot.
     if (problems.includes("leftover_background") && busyBackgroundHold(o.compliance)) {
+      if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
+      continue;
+    }
+    // M1 D40: only the judge stands behind a failed enlargement, so one it did not see (judge down or capped) is never delivered on trust.
+    if (problems.includes("enlargement_failed") && problems.some(flag => UNCHECKED_FLAGS.has(flag))) {
       if (o.n !== photoOne && goodShots(o.channel, o.n) >= 2) result.set(o.id, {action:"drop",flags:problems}); else hold("unusable");
       continue;
     }
