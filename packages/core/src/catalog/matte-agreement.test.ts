@@ -1,9 +1,6 @@
 // M1 D40. The main risk of matte_agreement is two models agreeing on the same wrong cut, so these run the real rule on real
 // golden photos and the real cut-outs the deployed models made for them (fixtures, no model is called). "Same wrong cut" hands one
 // real wrong cut-out in as two models of different families, which is the worst case: real models disagree far more.
-import { agreedMatte } from "./auto-resolve";
-import { triageProduct, type TriageOutput } from "./qa/triage";
-import type { OutputFlag } from "./types";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
@@ -55,23 +52,15 @@ describe("matte agreement on real photos", () => {
   }, 60_000);
 
   // The families do agree here (every outline on a real edge), and both keep orange court and a piece of the net post inside
-  // the rackets, seen at full size: the same class spec 05 rejects. No bar here sees it, so the judge has to: an agreed cut-out is always judged, and one it flags is never published.
-  it("the tennis-court photo: the families agree on a cut with court inside the rackets, and only the judge stands between it and the channel", async () => {
+  // the rackets, seen at full size: the same class spec 05 rejects. So agreement is vetoed for a photo shot in a scene.
+  it("the tennis-court photo: the families agree on a cut with court inside the rackets, and the scene vetoes it", async () => {
     const { p, matte, region } = await photo("ZEE79259BBFD83FFA1DB0Z_5");
     expect(matteAgreement(p, [await matte(BRIA), await matte(GENERAL)], region).matte).not.toBeNull();
     const r = await resolved("ZEE79259BBFD83FFA1DB0Z_5");
-    expect(r.steps).toContain("matte_agreement:passed");
-    // The policy's two models are of one family here, so the third model was asked: one more cut-out call.
-    expect(r.asked).toContain("third");
-    expect(r.busyBackground).toBe(false);
-    expect(agreedMatte({ auto_actions: r.actions })).toBe(true);
-    const row = (flags: OutputFlag[]): TriageOutput => ({ id: "court", n: 5, channel: "noon", status: "needs_attention", flags, decision: null, stagingUri: "gs://assets/staged.jpg", compliance: { auto_actions: r.actions } });
-    // Flagged by the judge: never published, whatever the other photos are.
-    const lone = row(["leftover_background"]), photos = [1, 2, 3].map(n => ({ ...row([]), id: `o${n}`, n, status: "staged" as const }));
-    expect(triageProduct([lone, photos[0]!], []).get("court")).toMatchObject({ action: "hold" });
-    expect(triageProduct([lone, ...photos], []).get("court")).toMatchObject({ action: "drop" });
-    // Not seen by the judge at all: the same.
-    expect(triageProduct([row(["qa_unavailable"]), photos[0]!], []).get("court")).toMatchObject({ action: "hold", cause: "unusable" });
+    expect(r.steps).toContain("matte_agreement:failed");
+    expect(r.actions.find(a => a.step === "matte_agreement")!.detail).toMatch(/busy scene/);
+    expect(r.asked).not.toContain("third");
+    expect(r.busyBackground).toBe(true);
   }, 60_000);
 
   it("ghost, Penti ZBE55F7B86F158FEA0EB9Z shot 5: a frame-filling photo never reaches agreement and spends no third call", async () => {
