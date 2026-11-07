@@ -123,5 +123,5 @@ export interface RepairCandidate { outputId: string; sourceImageId: string; chan
  * staged bytes, flags and `qa_scores` and returns the ids it fixed; the QA stage re-reads the rows,
  * so a fixed output counts as a good photo. The default fixes nothing.
  */
-export type RepairOwnDefects<Context = unknown> = (candidates: readonly RepairCandidate[], context: Context) => Promise<ReadonlySet<string>>;
+export type RepairOwnDefects<Context = unknown> = (candidates: readonly RepairCandidate[], context: Context) => Promise<ReadonlySet<string> & { waiting?: boolean }>;
 export const noRepair: RepairOwnDefects = async () => new Set<string>();

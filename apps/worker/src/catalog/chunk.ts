@@ -351,6 +351,8 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       if(chunk.stage==="qa") {
         const qa=await runQaStage(deps,batch,sources,productPolicy,underClaim,chunk.id,{shouldStop:()=>!budgetLeft(),onPhoto:photoDone,photoConcurrency:photoLimit});
         if(!qa.complete) { stopAt = index; break; }
+        // A repair queued the enlargement it needs: the chunk parks at this stage and judges nothing twice when it comes back.
+        if(qa.waiting) waitingProducts.push(index);
         continue;
       }
       if(chunk.stage==="matte") {
@@ -587,7 +589,7 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
       if (!handed) return answer(200,"lost");
       await dispatchNext(handed,{fromProduct:Math.min(stopAt,...waitingProducts)});
       outcome = "handed_off";
-    } else if (chunk.stage === "render" && waitingProducts.length) {
+    } else if ((chunk.stage === "render" || chunk.stage === "qa") && waitingProducts.length) {
       // Spec 18 lifecycle 3.8: products wait for their enlargements. The chunk parks at the render stage (no task, no
       // window slot; dispatched_at set so an older dispatch never sends it) under its own lock, the lock every settle
       // takes first; when the rows settled meanwhile it goes on at once with the next step.

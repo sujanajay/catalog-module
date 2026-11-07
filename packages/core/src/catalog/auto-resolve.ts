@@ -135,6 +135,10 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
 }
 
 /** Every step a record may carry: the repairs, the matte stage's integrity ladder (`matte_check`, `padded_matte`), `flush_cut`, `matte_retry`, and the retired ladder's `smaller_fit` and `apply` on old rows. */
+/** The detail of the step a repair parks on: it needs an enlargement that is now queued, and runs again once that has settled. */
+export const ENLARGEMENT_WAIT_DETAIL = "waiting for the enlargement";
+/** A photo parks a chunk at most this often (an x2 and an x4 image): past it the step is recorded skipped and the hold stands. */
+export const MAX_ENLARGEMENT_WAITS = 2;
 export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte" | "matte_agreement" | "photo_promoted";
 /** One entry of an output's `auto_actions` list (kept in `catalog_outputs.compliance`, no schema change). */
 export interface AutoAction {
@@ -170,6 +174,10 @@ export function autoActionsOf(compliance: unknown): AutoAction[] {
  */
 export function actionsOn(compliance: unknown, channel: ChannelId): AutoAction[] {
   return autoActionsOf(compliance).filter(action => !Array.isArray(action.channels) || action.channels.includes(channel));
+}
+/** The repair of this output parked for an enlargement and has not run again yet. */
+export function waitingForEnlargement(compliance: unknown): boolean {
+  return autoActionsOf(compliance).at(-1)?.detail === ENLARGEMENT_WAIT_DETAIL;
 }
 /** The compliance measurement recorded on an output (null on rows made before it existed). */
 export function measuredOf(compliance: unknown): RenderMeasured | null {

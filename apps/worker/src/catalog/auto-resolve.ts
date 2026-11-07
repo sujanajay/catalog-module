@@ -6,12 +6,12 @@ import { imageAsset, recordOutputVersion } from "@catalog/core/graph/write-path"
 import { shotGeometry, type Matte, type Prepared, type RenderInput, type RenderMeasured, type RenderOutput } from "@catalog/core/catalog/render";
 import { heldForPerson } from "@catalog/core/catalog/auto-decide";
 import { catalogSlotPatch, pickPromotion } from "@catalog/core/catalog/promote";
-import { actionsOn, autoActionsOf, diagnoseOutput, failuresOf, LadderStopped, MATTE_STEPS, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, autoActionsOf, diagnoseOutput, ENLARGEMENT_WAIT_DETAIL, failuresOf, LadderStopped, MATTE_STEPS, MAX_ENLARGEMENT_WAITS, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed, strictestChannel } from "@catalog/core/catalog/qa/policy";
 import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX, wholeFrameMatte, wholeFrameRoute } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
-import { batchEnlargement, primeReadiness, wantedRowsOfPixels } from "./enlarge";
+import { batchEnlargement, primeReadiness, reconcileEnlargements, wantedRows, wantedRowsOfPixels } from "./enlarge";
 import { pixelHashOf } from "@catalog/core/catalog/pipeline/enlargement";
 import { EnlargementNotReadyError } from "@catalog/core/catalog/upscale";
 import { renderKey, rerenderedKey } from "@catalog/core/catalog/pipeline/publish";
@@ -47,7 +47,8 @@ export interface ResolvePhotoInput {
   /** Keeps a flush cut placed by `flushCutPhoto` (the judge-relaxed cut detector) in every step. */
   judgedCut?: boolean;
 }
-export interface ResolveResult { actions: AutoAction[]; fixed: Set<string> }
+/** `waiting`: a step needs an enlargement that is now queued; the steps so far are recorded and the repair runs again once it has settled. */
+export interface ResolveResult { actions: AutoAction[]; fixed: Set<string>; waiting?: boolean }
 
 /**
  * Spec 18 lifecycle 3.3: a photo prepared again gets its readiness set from the batch's rows (primeReadiness), so a
@@ -95,7 +96,8 @@ interface OutputState { o: Output; variant: RenderVariant; render: RenderOutput 
  * photo's and re-renders every channel, each with its own repairs so far, and re-checks each. When the
  * judge flagged the photo it looks again after each round, at most MAX_REJUDGES_PER_PHOTO times. An output
  * that passes is written; one that does not keeps its first image. Every step is appended to
- * `compliance.auto_actions` with the channel it changed. Returns the output ids it fixed.
+ * `compliance.auto_actions` with the channel it changed. Returns the output ids it fixed. A step that needs an enlargement
+ * the batch did not make queues it and the repair stops with `waiting`, to run again once it settled.
  */
 export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput): Promise<ResolveResult> {
   const {product,source,underClaim,trigger} = input;
@@ -134,8 +136,9 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   const wholeFor = () => whole ??= wholeFrameMatte(p);
   const view = input.outputs.map(o=>(o.qaScores as {view?: string | null} | null)?.view).find(Boolean);
   const contextFor = input.contextFor ?? rowContext;
+  const matteOf = async (v: RenderVariant): Promise<Matte> => v.matte === "second" ? (await secondMatte())! : v.matte === "passthrough" ? passthroughFor() : v.matte === "whole" ? wholeFor() : first;
   const render = async (o: Output, v: RenderVariant): Promise<RenderOutput> => {
-    const matte = v.matte === "second" ? (await secondMatte())! : v.matte === "passthrough" ? passthroughFor() : v.matte === "whole" ? wholeFor() : first;
+    const matte = await matteOf(v);
     await underClaim(async()=>{});
     return (await deps.renderAllChannels(p,matte,[o.channel],{shotNumber:source.n,productType:product.productType ?? "other",identifier:product.identifier,publicObjectPath:o.objectPath,...contextFor(o),...variantOptions(v,input.shadowAllowed),...(input.judgedCut ? {judgedCut:true}:{}),...route,trace}))[o.channel];
   };
@@ -148,12 +151,21 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   // The flags the planner answers: the trigger, then whatever the judge still sees after a round.
   let currentTrigger: OutputFlag[] = [...trigger];
   let verdict = null as RejudgeVerdict | null, judgedChannel = null as ChannelId | null, rejudges = 0, changedSinceJudge = true, stopped = false;
-  // Spec 18 lifecycle F8b, F52: a variant that needs an enlargement the batch did not make (not ready) ends the ladder;
-  // the step is recorded skipped, no matte is persisted and every output keeps its first image and hold.
-  let notReady = false;
+  // Spec 18 lifecycle F8b, F52: a variant that needs an enlargement the batch did not make (not ready) queues it and the repair
+  // waits (`waiting`: the chunk parks as a render's does, under the rows' own limits; no matte persisted, the photo undecided). The steps so far stay
+  // on the record, so their judge calls are not made again. Without a batch route, past MAX_ENLARGEMENT_WAITS, or with nothing to
+  // queue, the step is recorded skipped and every output keeps its first image and hold.
+  let notReady = false, waiting = false;
+  const waitsSoFar = autoActionsOf(input.outputs[0]?.compliance).filter(a=>a.detail === ENLARGEMENT_WAIT_DETAIL).length;
   const tryRender = async (o: Output, v: RenderVariant, step: AutoActionKind, channels: ChannelId[]): Promise<RenderOutput | null> => {
     try { return await render(o,v); }
-    catch (error) { if (!(error instanceof EnlargementNotReadyError)) throw error; record(step,"skipped",channels,"enlargement not ready"); notReady = stopped = true; return null; }
+    catch (error) {
+      if (!(error instanceof EnlargementNotReadyError)) throw error;
+      const queued = waitsSoFar < MAX_ENLARGEMENT_WAITS ? await queueEnlargementOf(deps,input,p,await matteOf(v),contextFor) : "none";
+      if (queued === "queued") { record(step,"skipped",channels,ENLARGEMENT_WAIT_DETAIL); waiting = stopped = true; return null; }
+      if (queued === "ready") { try { return await render(o,v); } catch (again) { if (!(again instanceof EnlargementNotReadyError)) throw again; } }
+      record(step,"skipped",channels,"enlargement not ready"); notReady = stopped = true; return null;
+    }
   };
   // Compliance failing: the latest render (or the row, before any) breaks a channel rule.
   const failing = (st: OutputState) => st.render ? !ok(st.render) : st.failures.length > 0 || st.o.flags.includes("failed_compliance");
@@ -230,6 +242,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     if (!(await matteRound())) break;
     if (stopped) break;
   }
+  if (waiting) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set(),waiting:true}; }
   if (notReady) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
   const written = [...states.values()].filter(st=>st.render && ok(st.render) && !judgePending());
   if (!written.length) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
@@ -256,10 +269,27 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   return {actions,fixed};
 }
 
+/**
+ * Queues the enlargement a repair's cut-out needs on the canvases its outputs already have (3.5 reconcile, for this photo
+ * and this matte alone; the rows the photo has stay wanted): "queued" when a row is on its way (the repair waits), "ready" when the row was
+ * made already or is terminal and the readiness is primed (the render holds a terminal one), "none" without a batch route or with nothing to make.
+ */
+async function queueEnlargementOf(deps: CatalogDeps, input: ResolvePhotoInput, p: Prepared, matte: Matte, contextFor: (o: Output) => Partial<RenderInput>): Promise<"queued" | "ready" | "none"> {
+  const {batch,product,source,underClaim} = input, be = batchEnlargement(deps,batch);
+  if (!be) return "none";
+  const canvases = new Map(input.outputs.map(o=>[o.channel,contextFor(o).canvas])), canvasOf = (id: ChannelId) => canvases.get(id);
+  const shots = [{source,p,alpha:matte.alpha,matteModel:matte.model}], wanted = new Set([source.id]);
+  if (!wantedRows(deps,be,batch,product,shots,wanted,await deps.channelRules(batch.rulesetVersion),process.env,canvasOf).length) return "none";
+  const reconciled = await reconcileEnlargements(deps,{be,batch,product,shots,scope:[],wanted,mode:"queue",write:underClaim,canvasOf});
+  if (reconciled.queued) return "queued";
+  const rows = await wantedRowsOfPixels(deps.db,batch.id,source.id,pixelHashOf(p.rgb,p.width,p.height));
+  return (await primeReadiness(deps,{be,batch,photos:[{source,p}],rows,write:underClaim})).queued ? "queued":"ready";
+}
+
 /** The steps an output has had: its channel's, and the matte stage's own ladder (no channels), whose verdict stands: a cut-out the guard refused is not tried again. */
 function triedSteps(o: Output): AutoActionKind[] {
   const stage = autoActionsOf(o.compliance).filter(a=>Array.isArray(a.channels) && !a.channels.length && (MATTE_STEPS as readonly string[]).includes(a.step));
-  return [...actionsOn(o.compliance,o.channel),...stage].map(a=>a.step);
+  return [...actionsOn(o.compliance,o.channel),...stage].filter(a=>a.detail !== ENLARGEMENT_WAIT_DETAIL).map(a=>a.step);
 }
 
 /** Appends the record to outputs that keep their image. */

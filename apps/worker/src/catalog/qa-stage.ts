@@ -6,7 +6,7 @@ import { sampledForQa, strictestChannel } from "@catalog/core/catalog/qa/policy"
 import { autoActionNote, bySeverity, flagDetails, plainFailures, triedSentence } from "@catalog/core/catalog/qa/reasons";
 import { CHART_VIEW, DIMENSION_FLAGS, OUTPUT_DIMENSIONS, PHOTO_DIMENSIONS, QA_DIMENSIONS, dimensionThresholds, failingDimensions, scoreOf, withOverall, type JudgeResult, type QaDimension } from "@catalog/core/catalog/qa/judge";
 import { HARD_HOLD_FLAGS, INFORMATION_FLAGS, LEFT_OUT_FLAGS, problemFlags, triageProduct, type RepairOwnDefects } from "@catalog/core/catalog/qa/triage";
-import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough } from "@catalog/core/catalog/auto-resolve";
+import { actionsOn, agreedMatte, autoActionsOf, busyBackgroundHold, failuresOf, judgeSawSourceCut, OWN_DEFECT_FLAGS, ownDefects, plainPassthrough, waitingForEnlargement } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed } from "@catalog/core/catalog/qa/policy";
 import { promoteOverHeldPhoto, flushCutPhoto, resolvePhoto, stopOn } from "./auto-resolve";
 import { recordCost } from "@catalog/core/spend";
@@ -133,7 +133,7 @@ const clean = (sentence: string | undefined, fallback: string) => sentence && !M
  * Spec 16: `photoConcurrency` photo groups are judged at once (default 1); started groups finish after a stop.
  */
 export interface QaStageOptions { shouldStop?: ()=>boolean; onPhoto?: (tx:CatalogDeps["db"])=>Promise<void>; photoConcurrency?: number }
-export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string,options:QaStageOptions={}):Promise<{complete:boolean}> {
+export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],policy:ResolvedPolicy,underClaim:UnderClaim,chunkId?:string,options:QaStageOptions={}):Promise<{complete:boolean;waiting?:boolean}> {
  if(!sources.length) return {complete:true};
  const onPhoto=options.onPhoto ?? (async()=>{});
  const router=deps.routes ? await deps.routes():undefined;
@@ -228,8 +228,9 @@ export async function runQaStage(deps:CatalogDeps,batch:Batch,sources:Source[],p
   }
  },()=>!!options.shouldStop?.());
  if(notStarted!==null) return {complete:false};
- for(const productId of new Set(sources.map(source=>source.productId))) await applyTriage(deps,batch,productId,underClaim,policy);
- return {complete:true};
+ let waiting=false;
+ for(const productId of new Set(sources.map(source=>source.productId))) if(await applyTriage(deps,batch,productId,underClaim,policy)) waiting=true;
+ return {complete:true,waiting};
 }
 
 /** Judge flags the ladder resolves in the QA stage (code-checked placement fails compliance at render). */
@@ -248,7 +249,7 @@ export interface QaRepairContext { deps: CatalogDeps; batch: Batch; policy: Reso
 // Spec 18 lifecycle 3.7: nor is one held for its enlargement (no ladder churn on a hold the ladder cannot change).
 export const repairable=(o:Output)=>o.decision===null && (o.status==="staged" || o.status==="needs_attention") && !busyBackgroundHold(o.compliance) && !o.flags.includes("enlargement_failed") && (o.flags.some(flag=>OWN_DEFECT_FLAGS.has(flag)) || judgeSawSourceCut(o.flags,o.qaScores));
 export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates,{deps,batch,policy,productId,underClaim})=>{
- const fixed=new Set<string>();
+ const fixed=new Set<string>() as Set<string>&{waiting?:boolean};
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));
  const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
  if(!product) return fixed;
@@ -266,7 +267,7 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
   }
   const flush=rows.some(o=>tried(o,"flush_cut","passed"));
   // The matte stage's own ladder (no channels, before anything was judged) is no answer to the judge (529K240_D2 reached its verdict with only a matte-stage step on it).
-  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && !autoActionsOf(o.compliance).some(action=>(!Array.isArray(action.channels) || action.channels.length>0) && action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag))));
+  const failing=rows.filter(o=>o.flags.some(flag=>JUDGE_TRIGGERS.has(flag)) && (waitingForEnlargement(o.compliance) || !autoActionsOf(o.compliance).some(action=>(!Array.isArray(action.channels) || action.channels.length>0) && action.trigger.some(flag=>JUDGE_TRIGGERS.has(flag)))));
   if(!failing.length) continue;
   const rejudge=stopOn(error=>error instanceof CatalogQaCapError,async(row,jpeg)=>{
    const cap=await checkCatalogCaps(deps.db,{batchId:batch.id,now:deps.now()});
@@ -286,6 +287,7 @@ export const repairOwnDefects:RepairOwnDefects<QaRepairContext>=async(candidates
   });
   const result=await resolvePhoto(deps,{batch,product,source,policy,underClaim,outputs:rows,failing,trigger:ownDefects(failing.flatMap(o=>o.flags)),shadowAllowed,statusFor,rejudge,...(flush ? {judgedCut:true}:{})});
   for(const id of result.fixed) fixed.add(id);
+  if(result.waiting) fixed.waiting=true;
  }
  return fixed;
 };
@@ -299,21 +301,24 @@ function leadFlag(flags:readonly OutputFlag[]):OutputFlag|undefined {
  * judged output's `qa_scores` (`autoAction`, `holdCause`, `finalStatus`) for the report and evals.
  * The re-render loop (`repairOwnDefects`) has already run, so a re-made output counts as a good photo.
  */
-export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,policy:ResolvedPolicy):Promise<void> {
+export async function applyTriage(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,policy:ResolvedPolicy):Promise<boolean> {
  const read=()=>deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.batchId,batch.id),eq(catalogOutputs.productId,productId)));
  let outputs=await read();
  const candidates=outputs.filter(repairable);
  if(candidates.length && deps.repairOwnDefects) {
   await underClaim(async()=>{});
-  await deps.repairOwnDefects(candidates.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})),{deps,batch,policy,productId,underClaim});
+  const repaired=await deps.repairOwnDefects(candidates.map(o=>({outputId:o.id,sourceImageId:o.sourceImageId,channel:o.channel,n:o.n,flags:o.flags})),{deps,batch,policy,productId,underClaim});
+  // A repair waits for its enlargement: nothing is decided for this product yet, the chunk parks and the repair runs again.
+  if(repaired.waiting) return true;
   outputs=await read();
  }
  await decideOutputs(deps,batch,productId,underClaim,outputs);
  // M1 D40: image 1 held on every channel and another photo passed: that photo becomes image 1 and the held photo, at its
  // new number, is decided again (with enough good photos left it is simply left out, and nobody has to look at it).
- if(!autoDecideOf(batch.options)) return;
+ if(!autoDecideOf(batch.options)) return false;
  const [product]=await deps.db.select().from(catalogProducts).where(eq(catalogProducts.id,productId));
  if(product && await promoteOverHeldPhoto(deps,{batch,product,policy,underClaim})) await decideOutputs(deps,batch,productId,underClaim,await read());
+ return false;
 }
 /** Triage and the auto-decide rules over one product's outputs, as read. */
 async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,underClaim:UnderClaim,outputs:Output[]):Promise<void> {

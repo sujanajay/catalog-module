@@ -610,12 +610,13 @@ export interface EnlargementNeed { factor: UpscaleFactor; maxScale: number; chan
  * superset of the render's decision as enlargementFactors, which reads it.
  */
 /** `rules`: the channel values the render will use (M3-S1); absent is the channels.ts fixture. */
-export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">): EnlargementNeed[][] {
+/** `canvasOf`: the canvas an output of this channel already has (a repair re-makes it on that canvas), instead of the product's planned one. */
+export function enlargementPlan(channels: readonly ChannelId[], shots: readonly EnlargementShot[], productType: ProductType | null | undefined, minScale: number, x4: boolean, rules?: Pick<ChannelRules, "spec">, canvasOf?: (id: ChannelId) => Size | undefined): EnlargementNeed[][] {
   const geometry = (s: EnlargementShot, judgedCut: boolean) => shotGeometry(s.alpha, s.width, s.height, { rgb: s.rgb, judgedCut, ...trimRules(productType, s) });
   const plain = shots.map((s) => geometry(s, false)), judged = shots.map((s) => geometry(s, true));
   const found = plain.filter((g): g is ShotGeometry => g !== null);
   const specOf = (id: ChannelId) => rules?.spec(id) ?? channel(id);
-  const canvases = channels.map((id) => ({ id, spec: specOf(id), canvas: found.length ? planProduct(specOf(id), found).canvas : undefined }));
+  const canvases = channels.map((id) => ({ id, spec: specOf(id), canvas: canvasOf?.(id) ?? (found.length ? planProduct(specOf(id), found).canvas : undefined) }));
   return shots.map((s, i) => {
     const needs = new Map<UpscaleFactor, EnlargementNeed>();
     for (const { id, spec, canvas } of canvases) for (const g of [plain[i], judged[i]]) {
