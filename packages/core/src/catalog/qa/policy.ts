@@ -5,9 +5,9 @@ import { modelPolicy } from "../../db/schema";
 import { CHANNELS, CHANNEL_ORDER } from "../channels";
 import type { ChannelId, OutputFlag, ProductType, ResolvedPolicy } from "../types";
 import { QA_DEFAULT_FLOOR, QA_DEFAULT_THRESHOLD } from "./judge";
-import { CATALOG_QA_DEFAULT_MODEL } from "./classify";
+import { CATALOG_QA_DEFAULT_MODEL, CATALOG_QA_SECOND_MODEL } from "./classify";
 type Category = Exclude<ProductType,"auto">;
-const common = {qaModel:CATALOG_QA_DEFAULT_MODEL,qaModelSecond:"anthropic/claude-haiku-5.5",threshold:QA_DEFAULT_THRESHOLD,floor:QA_DEFAULT_FLOOR,qaMode:"per_source",qaSampleRate:1,source:"default"} as const;
+const common = {qaModel:CATALOG_QA_DEFAULT_MODEL,qaModelSecond:CATALOG_QA_SECOND_MODEL,threshold:QA_DEFAULT_THRESHOLD,floor:QA_DEFAULT_FLOOR,qaMode:"per_source",qaSampleRate:1,source:"default"} as const;
 // Every first and second matte model is one the matting services serve (DEPLOYED_MATTE_MODELS in
 // matte.ts). The ids that were never deployed (birefnet-hr-matting, birefnet-dynamic-matting) are
 // replaced by birefnet-general, or birefnet-general-lite where birefnet-general is already first.

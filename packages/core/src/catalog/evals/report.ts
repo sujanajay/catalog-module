@@ -19,6 +19,8 @@ export interface EvalReport {
   attention: { identifier: string; detail: string }[];
   /** One row per flag raised, held or not. `model` is engineering data for this JSON only. */
   flags: FlagRow[];
+  /** M1 D43: how many outputs each judge model gave its verdict on. */
+  judges: Record<string, number>;
   batches: string[];
   results?: CheckResult[];
 }
@@ -31,6 +33,18 @@ export interface ReportInput {
   run: string; startedAt: Date; finishedAt: Date; mode: string; golden: EvalReport["golden"]; results: CheckResult[];
   attention: { attentionProducts: number; attentionRate: number; expectedAttention: number; falseHoldRate: number | null; useAsIsRate: number | null; plantedCaught: number; plantedTotal: number };
   flags: FlagRow[]; batches: string[]; includeAll?: boolean;
+  /** M1 D43: how many outputs each judge model gave its verdict on. A result names who produced it. */
+  judges?: Record<string, number>;
+}
+/** How many outputs each judge model gave its verdict on, from the stored outputs. */
+export function judgeTally(rows: readonly { qaModel?: string | null }[]): Record<string, number> {
+  const tally: Record<string, number> = {};
+  for (const row of rows) { const key = row.qaModel ?? "not judged"; tally[key] = (tally[key] ?? 0) + 1; }
+  return tally;
+}
+/** The line for logs and reports. */
+export function judgesLine(judges: Record<string, number> = {}): string {
+  return `Judged by: ${Object.entries(judges).map(([model, outputs]) => `${model} on ${outputs} outputs`).join(", ") || "no judge"}.`;
 }
 export function buildReport(input: ReportInput): EvalReport {
   const groups: CheckGroup[] = ["completeness", "geometry", "shadow", "cutout", "cut_edge", "attention", "overwrite"];
@@ -49,7 +63,7 @@ export function buildReport(input: ReportInput): EvalReport {
     summary: { checks, passed, failed, notRun, information, attentionProducts: a.attentionProducts, attentionRate: a.attentionRate, expectedAttention: a.expectedAttention, falseHoldRate: a.falseHoldRate, useAsIsRate: a.useAsIsRate, planted: { caught: a.plantedCaught, total: a.plantedTotal }, line: summaryLine(passed, checks, a.attentionProducts), passedAll: failed === 0 && a.attentionProducts === 0 },
     byGroup, byCheck, failures, notRun: input.results.filter(r => r.status === "not_run"), information: input.results.filter(r => r.status === "info"),
     attention: input.results.filter(r => r.id === "attention.not_held" && !r.ok).map(r => ({ identifier: r.subject.identifier, detail: r.detail })),
-    flags: input.flags, batches: input.batches, ...(input.includeAll ? { results: input.results } : {}),
+    flags: input.flags, batches: input.batches, judges: input.judges ?? {}, ...(input.includeAll ? { results: input.results } : {}),
   };
 }
 
@@ -85,6 +99,7 @@ export async function reportHtml(report: EvalReport, thumbs: ReportThumb[]): Pro
   return `<!doctype html><meta charset="utf-8"><title>Output-quality eval ${esc(report.run)}</title><style>body{font-family:sans-serif;margin:16px}table{border-collapse:collapse;margin:8px 0}td,th{border:1px solid #ccc;padding:4px 6px;font-size:13px;vertical-align:top}img{margin:2px;border:1px solid #999}.ok{color:#1a7f37}.bad{color:#b31d28}</style>
 <h1>Output-quality eval ${esc(report.run)}</h1>
 <p class="${report.summary.passedAll ? "ok" : "bad"}"><b>${esc(report.summary.line)}</b></p>
+<p>${esc(judgesLine(report.judges))}</p>
 <p>Mode: ${esc(report.mode)}. Golden set: ${report.golden.products} products, ${report.golden.photos} photos. Attention rate ${(report.summary.attentionRate * 100).toFixed(2)}% (target 0). False-hold rate ${report.summary.falseHoldRate === null ? "no holds" : `${(report.summary.falseHoldRate * 100).toFixed(1)}%`} (target 0). Planted wrong items caught: ${report.summary.planted.caught} of ${report.summary.planted.total}. Expected attention products: ${report.summary.expectedAttention}. Checks not run: ${report.summary.notRun}. Recorded as information: ${report.summary.information}.</p>
 <h2>By group</h2><table><thead><tr><th>Group</th><th>Checks</th><th>Passed</th><th>Failed</th><th>Not run</th><th>Information</th></tr></thead><tbody>${groupRows}</tbody></table>
 <h2>By check</h2><table><thead><tr><th>Check</th><th>Runs</th><th>Failed</th></tr></thead><tbody>${checkRows}</tbody></table>

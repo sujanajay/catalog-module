@@ -92,25 +92,26 @@ describe("catalog cost",()=>{
   expect(deploy).toContain(`COMPUTE_USD_PER_VCPU_SECOND=\${COMPUTE_USD_PER_VCPU_SECOND:-${DEFAULT_COMPUTE_USD_PER_VCPU_SECOND}}`);
  });
  it("uses the measured judge price and compute per output (batch b489e466)",()=>{
-  expect(QA_USD_PER_CHECK_ESTIMATE).toBe(0.0003);
-  expect(QA_USD_PER_CHECK_ESTIMATE).toBeGreaterThanOrEqual(2*0.0072398/52);
+  expect(QA_USD_PER_CHECK_ESTIMATE).toBe(0.001);
+  expect(QA_USD_PER_CHECK_ESTIMATE).toBeGreaterThanOrEqual(1.368/1442);
   expect(COMPUTE_VCPU_SECONDS_PER_OUTPUT_ESTIMATE).toBeCloseTo(2023/468,1);
  });
  it("uses the documented default compute rate when COMPUTE_USD_PER_VCPU_SECOND is unset",()=>{
-  expect(estimateCost({outputs:100,sources:20},{INR_PER_USD:"80"})?.usd).toBeCloseTo(20*0.0003+100*4.3*0.0000265,12);
+  expect(estimateCost({outputs:100,sources:20},{INR_PER_USD:"80"})?.usd).toBeCloseTo(20*0.001+100*4.3*0.0000265,12);
  });
  it("estimates the measured batch close to what it really cost",()=>{
-  // b489e466: 468 outputs, 52 checks; real spend USD 0.0072 judge + 2023 vCPU-s compute.
-  const est=estimateCost({outputs:468,sources:52},{INR_PER_USD:"84"})!;
-  expect(est.usd).toBeCloseTo(52*0.0003+468*4.3*0.0000265,12);
-  const real=0.0072398+2023*DEFAULT_COMPUTE_USD_PER_VCPU_SECOND;
+  // 84a5a30a, live on 2026-11-06: 1,442 photos, USD 1.368 for the first judge and its second opinions (M1 D43).
+  // Compute as measured on b489e466: 468 outputs, 2023 vCPU-s, so per output.
+  const est=estimateCost({outputs:8533,sources:1442},{INR_PER_USD:"84"})!;
+  expect(est.usd).toBeCloseTo(1442*0.001+8533*4.3*0.0000265,12);
+  const real=1.368+8533*(2023/468)*DEFAULT_COMPUTE_USD_PER_VCPU_SECOND;
   expect(est.usd).toBeGreaterThan(real);
   expect(est.usd).toBeLessThan(real*1.5);
  });
  it("estimates output compute and sampled QA plus classifier calls; no INR means no estimate",()=>{
   const counts={outputs:100,sources:20,untypedProducts:3,qaSampleRate:.5,qaMode:"per_source" as const,styliSkips:4,unchangedPairs:6};
   expect(estimateCost(counts,{})).toBeNull();
-  expect(estimateCost(counts,{INR_PER_USD:"80",COMPUTE_USD_PER_VCPU_SECOND:"0.00002"})).toMatchObject({images:90,qaChecks:13,usd:13*0.0003+90*4.3*0.00002,inr:(13*0.0003+90*4.3*0.00002)*80});
+  expect(estimateCost(counts,{INR_PER_USD:"80",COMPUTE_USD_PER_VCPU_SECOND:"0.00002"})).toMatchObject({images:90,qaChecks:13,usd:13*0.001+90*4.3*0.00002,inr:(13*0.001+90*4.3*0.00002)*80});
   expect(estimateCost({...counts,qaMode:"per_output"},{INR_PER_USD:"80"})?.qaChecks).toBe(48);
  });
  it("shows a real sub-cent spend per style instead of 0.00 (batch b489e466: 52 checks, USD 0.0072398, 12 styles)",()=>{

@@ -527,7 +527,7 @@ test('deploy.sh: every step is timed and DEPLOY_OK is the last thing it prints',
   const deploy = read('infra/deploy.sh');
   const at = (s) => { const i = deploy.indexOf(s); assert.ok(i >= 0, s); return i; };
   const order = ['deploy_step pre-flight', 'deploy_step build', 'deploy_step migrate', 'deploy_step queues', 'gate_group "${GROUP[@]}"',
-    'deploy_step "$SERVICE"', 'deploy_step "IAP and CORS"', 'deploy_step jobs', 'deploy_step monitoring', 'deploy_report "$TAG"'].map(at);
+    'deploy_step "$SERVICE"', 'deploy_step "IAP and CORS"', 'deploy_step jobs', 'deploy_step monitoring', 'deploy_step "judge exam"', 'deploy_report "$TAG"'].map(at);
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.equal(deploy.trimEnd().split('\n').pop(), 'deploy_report "$TAG"');
 });

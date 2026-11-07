@@ -30,7 +30,7 @@ edge_quality: clean edges, no halo, no eroded fringe, and no small parts of the 
 background_clean: only the flat background colour remains around the product, with at most a soft natural shadow under it; no leftover scene, props, blocks or stray shadow patches. Score below 75 only when you can point to the leftover: say where it is in image 2.
 Do not judge where the product sits in the frame or how big it is; that is checked separately.
 5. evidence: for wrong_item true, is_collage true and every score below 80, one short plain sentence a non-technical person understands, naming the thing seen and where it is, such as "the model's hand is cut off at the bottom edge", "a grey block remains to the left of the shoe" or "only the gold logo is left; the orange leather around it is gone". Never mention model names or technical identifiers.
-Return only this JSON object: {"view":"front","wrong_item":false,"complete_product":100,"no_text_or_watermark":100,"orientation_ok":100,"is_collage":false,"product_intact":100,"edge_quality":100,"background_clean":100,"evidence":{}}, where evidence maps a check name to its sentence.`;
+Return only this JSON object: {"view":"<one of the views above>","wrong_item":true or false,"complete_product":0-100,"no_text_or_watermark":0-100,"orientation_ok":0-100,"is_collage":true or false,"product_intact":0-100,"edge_quality":0-100,"background_clean":0-100,"evidence":{}}, where evidence maps a check name to its sentence.`;
 
 /** Plain words for the product type line of the judge prompt. */
 export const PRODUCT_TYPE_WORDS: Record<string, string> = {

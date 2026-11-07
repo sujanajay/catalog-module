@@ -17,6 +17,10 @@
 #                                                        # line of its job log ("Run id: evals-..."); sets already
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
+#   bash infra/catalog-output-evals.sh exam              # M1 D43: the judge exam: the live judges on the pinned defects and clean images.
+#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.3). Exit 0: passed. Exit 1: a judge
+#                                                        # failed a bar. Exit 3: it could not run, which is no judge result. Non-zero under its
+#                                                        # bars. infra/deploy.sh runs it as its last step; proof runs it first.
 #   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D40: the matte agreement on the 19 real photos and 8 controls.
 #                                                        # Always LIVE_SMOKE=1 for that one execution (spends credit); run
 #                                                        # with "run --live" for the golden set. Writes only under catalog-test/.
@@ -40,6 +44,9 @@ source infra/lib/labels.sh
 JOB_LABELS=$(catalog_labels "$JOB" test)
 # cli_args: the --args value for "gcloud run jobs execute" (unique tokens, "^|^" separator).
 source infra/lib/cli-args.sh
+# gcloud_retry, gcloud_job_run: a network drop during the wait is not a result.
+# shellcheck source=lib/gcloud-retry.sh
+source infra/lib/gcloud-retry.sh
 
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 ASSETS_BUCKET=image-links-agent-assets
@@ -113,11 +120,41 @@ execute_cli() {
   MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
 }
 
+# The judge exam, through the wrapper that judges from the execution's final state. Its exit code says which of three things happened.
+exam() {
+  local listed joined out state verdict
+  if ! listed=$(gcloud_retry gcloud run jobs list --region="$REGION" --filter="metadata.name=$JOB" --format='value(metadata.name)'); then
+    echo "JUDGE EXAM COULD NOT RUN: could not read the job list; this is not a judge result." >&2; return 3
+  fi
+  [ -n "${listed//$'\r'/}" ] || { echo "JUDGE EXAM COULD NOT RUN: $JOB does not exist yet; run bash infra/deploy.sh first." >&2; return 3; }
+  joined=$(cli_args exam) || return 3
+  GCLOUD_JOB_EXECUTE_FLAGS=("--args=$joined" --update-env-vars=LIVE_SMOKE=1)
+  out=$(mktemp) || { echo "JUDGE EXAM COULD NOT RUN: no temp file on this laptop (is the disk full?); this is not a judge result." >&2; return 3; }
+  echo "==> $JOB: EXECUTE exam (LIVE_SMOKE=1, live judge calls)"
+  # The result is the execution's own state: the job exits 1 on a judge below a bar and 3 on no result. The log is only detail: it can lag or be cut.
+  MSYS2_ARG_CONV_EXCL='--args=' GCLOUD_JOB_STATE_FILE="$out.state" GCLOUD_JOB_LOG_LIMIT=3000 gcloud_job_run "$JOB" "$REGION" 0 | tee "$out" || true
+  unset GCLOUD_JOB_EXECUTE_FLAGS
+  state=$(cat "$out.state" 2>/dev/null) || state=""
+  verdict=$(grep -m1 'JUDGE EXAM FAIL:' "$out" 2>/dev/null) || verdict=""
+  rm -f "$out" "$out.state"
+  case "$state" in
+    succeeded)
+      echo "JUDGE EXAM PASSED: the judges met every bar."
+      return 0 ;;
+    *"exit code: 1 "*)
+      echo "JUDGE EXAM FAILED: ${verdict:-the job exited 1, a judge below a bar. Its log is not readable yet, so it cannot be named here: read the log as printed above.}" >&2
+      return 1 ;;
+  esac
+  echo "JUDGE EXAM COULD NOT RUN: the execution gave no judge result (${state:-its state could not be read; see the errors above}). This is not a judge result." >&2
+  return 3
+}
+
 case "${1:-}" in
   deploy) deploy ;;
+  exam) shift; exam ;;
   proof) shift; execute_cli --live proof "$@" ;;
   recut) shift; execute_cli recut "$@" ;;
   upload) shift; upload "$@" ;;
   run) shift; run "$@" ;;
-  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...] | proof [--limit n] | recut --batch <id> --photos <identifier_n,...>" >&2; exit 2 ;;
+  *) echo "Usage: bash infra/catalog-output-evals.sh deploy | upload | run [--live] [cli flags...] | exam | proof [--limit n] | recut --batch <id> --photos <identifier_n,...>" >&2; exit 2 ;;
 esac

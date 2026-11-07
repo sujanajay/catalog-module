@@ -13,7 +13,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "@catalog/core/db/client";
 import { catalogBatches, type VendorRouteRow } from "@catalog/core/db/schema";
-import { CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
+import { CATALOG_CLASSIFIER_MODEL, CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
 import { resolvePolicy } from "@catalog/core/catalog/qa/policy";
 import { CircuitBreakers } from "@catalog/core/vendor/circuit";
 import { endDrill, loadRouteRows, loadRoutes, RouteChangeError, setRoute, startDrill } from "@catalog/core/vendor/route-table";
@@ -107,12 +107,13 @@ const finished = (status: string | null) => status !== null && (FINISHED_BATCH_S
 async function preferredModels(db: Db, capability: Capability, batchId: string | undefined, env: NodeJS.ProcessEnv): Promise<{ models: string[]; source: string }> {
   const defaultModel = env.CATALOG_QA_DEFAULT_MODEL?.trim() || CATALOG_QA_DEFAULT_MODEL;
   if (capability !== "judge.render" && capability !== "vision.read") return { models: [], source: "route order" };
-  if (!batchId) return { models: [defaultModel], source: "the built-in first model" };
+  const classifierModel = env.CATALOG_CLASSIFIER_MODEL?.trim() || CATALOG_CLASSIFIER_MODEL;
+  if (!batchId) return { models: [capability === "vision.read" ? classifierModel : defaultModel], source: "the built-in first model" };
   const [batch] = await db.select().from(catalogBatches).where(eq(catalogBatches.id, batchId));
   if (!batch) throw new RouteChangeError(`No batch ${batchId}.`);
   const resolved = batch.options.policy ?? await resolvePolicy(db, batch.brandSlug, batch.productType === "auto" ? "*" : batch.productType);
   const policy = !batch.options.policy && resolved.source === "default" ? { ...resolved, qaModel: defaultModel } : resolved;
-  if (capability === "vision.read") return { models: [defaultModel, policy.qaModelSecond ?? ""].filter(Boolean), source: `batch ${batchId}'s classifier model` };
+  if (capability === "vision.read") return { models: [classifierModel, policy.qaModelSecond ?? ""].filter(Boolean), source: `batch ${batchId}'s classifier model` };
   const useSecond = !!(batch.counts as { qaUseSecond?: boolean }).qaUseSecond && !!policy.qaModelSecond;
   const first = useSecond ? policy.qaModelSecond! : policy.qaModel, second = useSecond ? policy.qaModel : policy.qaModelSecond;
   return { models: [first, second ?? ""].filter(Boolean), source: `batch ${batchId}'s ${batch.options.policy ? "pinned" : "current"} policy judge${useSecond ? " (switched to its second)" : ""}` };

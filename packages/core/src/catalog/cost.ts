@@ -1,16 +1,16 @@
 import type { CostBasis } from "./digest-types";
 import type { BatchCost, QaMode } from "./types";
 /**
- * Wizard step 4 estimate of one quality check or classifier call: measured USD 0.00014 per check on
- * 2026-10-20 with the default judge (batch b489e466: 52 calls, USD 0.0072398), doubled.
+ * Wizard step 4 estimate of one quality check or classifier call: measured USD 0.00095 per photo on 2026-11-06 with the
+ * first judge and its second opinions (batch 84a5a30a: 1,442 photos, USD 1.368), rounded up. M1 D43.
  */
-export const QA_USD_PER_CHECK_ESTIMATE = 0.0003;
+export const QA_USD_PER_CHECK_ESTIMATE = 0.001;
 /**
  * What a billed completion is recorded at when OpenRouter returns no usable `usage.cost`. Kept at the
- * dearest candidate judge's list price (spec 07: up to about USD 0.0013 per check) so a missing cost
+ * dearest judge's measured price (M1 D43: Flash 3.8, about USD 0.00556 per check) so a missing cost
  * never under-records spend against the daily cap, whichever judge the policy picked.
  */
-export const QA_USD_PER_CHECK_FALLBACK = 0.0013;
+export const QA_USD_PER_CHECK_FALLBACK = 0.0056;
 /**
  * vCPU-seconds the worker spends per planned output, for the estimate: measured on batch b489e466
  * on 2026-10-20 (2023 vCPU-seconds recorded in cost.computeVcpuSeconds for 468 planned outputs,

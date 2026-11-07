@@ -158,6 +158,14 @@ export async function buildGolden(build: GoldenBuild, writeDerived: (name: strin
  * batch's n=6 while n=7 of the planted copy is the planted photo), falling back to the shot number when no entry of the
  * product has the shot's bytes. Keyed by `identifier|n` of the batch's numbering.
  */
+/**
+ * How many sources a delivery of `<identifier>_<n>.<ext>` files makes: one per distinct bytes per product, because ingest merges
+ * copies (ingest/group.ts mergeSameFiles). The same bytes in two products stay two sources.
+ */
+export function expectedSourceCount(files: readonly { path: string; data: Buffer }[]): number {
+  return new Set(files.map(f => `${f.path.replace(/_\d+\.\w+$/, "")}|${sha256(f.data)}`)).size;
+}
+
 export function mapShotsBySha(entries: readonly GoldenEntry[], shots: readonly { identifier: string; n: number; sha256: string }[]): Map<string, GoldenEntry> {
   const out = new Map<string, GoldenEntry>();
   for (const s of shots) {

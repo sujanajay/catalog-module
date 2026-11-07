@@ -250,8 +250,10 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
   // judging is not asked again, so a dead route 1 never stands in for the second model (M7-F2-R4).
   const failedIds = new Set(answer.tried.filter(t => t.failure).map(t => t.route.id));
   const secondPlan = plan.filter(route => route.model !== judgeModel && !failedIds.has(route.id));
-  /** True when the plan had a second judge at all (configured), healthy or not. */
-  const secondConfigured = plan.some(route => route.model !== judgeModel);
+  // M1 D43: with a route table a second opinion is always required, whatever state the other route is in: `plan` has already
+  // dropped a route that is off or whose circuit is open, and reading that as "no second judge" turned both checks off in silence.
+  // Only a call without a table (the eval job's one-model plan) can have none.
+  const secondRequired = !!deps.router || plan.some(route => route.model !== judgeModel);
   const opinion = readOpinion(first.value, judgeModel, hasReference, names);
   const opinions: JudgeOpinion[] = [opinion];
   // A size chart or text-only image is left out with a note: no product check applies to it.
@@ -275,10 +277,10 @@ export async function judgeOutput(input: JudgeInput, deps: CatalogLlmDeps = {}):
     if (reply.output && reply.route) { otherModel = reply.route.model; other = readOpinion(reply.output, otherModel, hasReference, names); opinions.push(other); }
     else otherModel = secondPlan[0]!.model;
   }
-  // A second judge was configured but none could answer: the check is unavailable, which is never a pass (M7-F2-R4).
-  // Without any second judge (a one-model plan, as in the eval job) neither check counts, as before.
-  if (needSecond && secondConfigured && !other) {
-    (deps.log ?? console.warn)("catalog_qa: no second judge could answer; the photo is held as unchecked", {severity:"WARNING", model:judgeModel, route:judgeRoute.id, wrongItem:wrongFirst, leftover:located, calls});
+  // No second judge could answer: the check is unavailable, which is never a pass (M7-F2-R4). Without a table and without a
+  // second model (a one-model plan, as in the eval job) neither check counts, as before.
+  if (needSecond && secondRequired && !other) {
+    (deps.log ?? console.warn)("catalog_qa: no second judge could answer; the photo is held as unchecked", {severity:"WARNING", model:judgeModel, route:judgeRoute.id, wrongItem:wrongFirst, leftover:located, calls, secondJudge:secondPlan.length ? "failed on this call" : "switched off, circuit open or failed earlier"});
     return {scores:opinion.scores,verdict:"flag",reasons:[flagDetails("qa_unavailable").why],isCollage:opinion.isCollage,usage:sumUsage(usages),costUsd,calls,model:judgeModel,route:judgeRoute.id,flags:["qa_unavailable"],view:opinion.view,thresholds,
       wrongItem:{first:wrongFirst,second:null,secondModel:otherModel ?? null,confirmed:false},leftover:{first:leftoverFirst,second:null,secondModel:otherModel ?? null,confirmed:false,located},opinions};
   }

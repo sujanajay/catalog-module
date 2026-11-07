@@ -22,7 +22,7 @@ runs. `apps/worker/src/catalog-eval-sh.test.ts` checks this against a fake gclou
    Candidates the services cannot serve are printed as "not run: ..." with the reason.
 3. Label: open each printed `/catalog/<batchId>` page; eval mode shows every output with Pass / Flag.
 4. Judge (live, costs credit; set the budget from the printed estimate):
-   `EVAL_BUDGET_USD=2 bash infra/catalog-eval.sh exec --live judges --batch <id> --models google/gemini-2.5-flash-lite,anthropic/claude-haiku-5.5,qwen/qwen3-vl-30b-a3b-instruct`
+   `EVAL_BUDGET_USD=2 bash infra/catalog-eval.sh exec --live judges --batch <id> --models anthropic/claude-haiku-5.5,google/gemini-3.8-flash`
 5. Look: `contact-sheet --batch <id>` prints a signed URL. Signing needs
    `roles/iam.serviceAccountTokenCreator` for `catalog-worker@` on itself (granted by
    `infra/bootstrap.sh`). The originals and staged cut-outs are in the private bucket, so the sheet
@@ -39,3 +39,17 @@ passed, over judge passed; gate 97%), recall (human flagged and the judge flagge
 gate 90%), every `n`, the swept threshold, cost and ms per check; per matte model the compliance rate,
 human edge flags, judge edge disagreements and ms per image on CPU and L4. A gate with no labels is
 `no_labels`; a policy row with `gates.met = false` keeps QA per output until the next bake-off.
+
+## The judge exam (M1 D43)
+
+`bash infra/catalog-output-evals.sh exam` runs the live judge (`LIVE_SMOKE=1`) on a fixed set: 25 known defects (7 of them wrong items, shown against shot one) and 155 known-good
+outputs, pinned by sha256 in `packages/core/test-fixtures/catalog/evals/judge-exam-set.json`, the images under
+`catalog-test/evals/judge-exam/v1/`. Each judge a verdict can come from sits it: the first with its second opinion, and the fallback
+with the first switched off. It writes `report.json` and `verdict.txt` under `catalog-test/evals/<run>/judge-exam/` and exits 1 when a
+bar in `JUDGE_EXAM_BARS` fails. `proof` runs it first, and `infra/deploy.sh` runs it after a production deploy, where a failure fails
+the deploy report (no DEPLOY_OK). It does not roll back or block new batches by itself. It costs about USD 1.3 and takes about 10 minutes. Exit 0 and "JUDGE EXAM PASSED" is a pass, also on a re-run of the exam alone; exit 1 is a judge below a bar; exit 3 is an exam that could not run, which is no judge result. The job exits with these codes itself and the script reads them from the execution's condition message, so the result does not depend on the log. More no-answers than the bar allows, with no failure proven by the answers there are, is exit 3 (a vendor outage or rate limit), never a pass. Re-run a judge failure once at most, never until it passes: a second failure is a real failure. The images have no customTime, so the bucket's lifecycle rule cannot expire them; keep it that way, or every deploy's exam fails. It
+only reads the pinned images and writes under `catalog-test/`, but it shares the model provider's rate limit with a running batch.
+
+A rule for every proof, eval and exit report: name the judge model that produced each result. "The judge passed it" without the model
+is not evidence: the old first judge passed all 14 known defects in the 2026-11-06 comparison. `proof`, `catalog-output-evals` and `catalog-qa-check` print and
+store the tally per model.

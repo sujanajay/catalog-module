@@ -4,7 +4,12 @@ import { PRODUCT_TYPES, type ProductType, type OutputFlag } from "../types";
 import { backoffRetry, callCatalogJson, qaImage, type CatalogLlmDeps } from "./judge";
 import { callRoutes, fallbackLogFields, planRoutes } from "../../vendor/router";
 import { PRODUCT_TYPE_TEMPLATE } from "./templates";
-export const CATALOG_QA_DEFAULT_MODEL = "google/gemini-2.5-flash-lite";
+/** M1 D43: the first judge. Evidence: the judge exam (evals/judge-exam.ts), run at every deploy. */
+export const CATALOG_QA_DEFAULT_MODEL = "anthropic/claude-haiku-5.5";
+/** M1 D43: the second judge, and the next route when the first is down. */
+export const CATALOG_QA_SECOND_MODEL = "google/gemini-3.8-flash";
+/** The classifier (`vision.read`) reads a product type from one photo. It is not a judge and has its own setting (M1 D43). */
+export const CATALOG_CLASSIFIER_MODEL = "google/gemini-2.5-flash-lite";
 export interface ClassifierDeps extends CatalogLlmDeps {
   model?: string; env?: NodeJS.ProcessEnv;
   /**
@@ -36,7 +41,7 @@ export interface ProductTypeResult {
 }
 type ClassifierReply = Record<string, unknown>;
 export async function classifyProductType(image: Buffer, deps: ClassifierDeps = {}): Promise<ProductTypeResult> {
-  const model = deps.model ?? (deps.env ?? process.env).CATALOG_QA_DEFAULT_MODEL ?? CATALOG_QA_DEFAULT_MODEL;
+  const model = deps.model ?? (deps.env ?? process.env).CATALOG_CLASSIFIER_MODEL ?? CATALOG_CLASSIFIER_MODEL;
   const messages: LlmMessage[] = [{role:"system",content:PRODUCT_TYPE_TEMPLATE},{role:"user",content:[textPart("Classify the product in this photo."),...imageParts([await qaImage(image)])]}];
   const validate = (obj: ClassifierReply) => {
     if (typeof obj.type !== "string") throw new LlmJsonError("Product type missing", JSON.stringify(obj));

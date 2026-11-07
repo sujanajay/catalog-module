@@ -88,7 +88,7 @@ test('gcloud_job_run: a real probe failure fails at once, with its message and l
   assert.equal(r.status, 1);
   assert.equal(count(r.calls, 'run jobs execute'), 1);
   assert.equal(count(r.calls, 'run jobs executions describe'), 2);
-  assert.match(r.err, /execution probe-job-ab12c: failed: Task probe-job-ab12c-task0 failed with exit code: 1; this does not pass/);
+  assert.match(r.err, /execution probe-job-ab12c: failed: Task probe-job-ab12c-task0 failed with exit code: 1 and message: The container exited with an error\.; this does not pass/);
   assert.match(r.out, /probe passed/, 'the log is printed for the operator');
 });
 
@@ -269,6 +269,51 @@ test('gcloud_retry wraps the deploy reads: pre-flight, the image check, the gate
     const s = read(f).replace(/^\s*#.*$/gm, '');
     assert.ok(!/jobs execute/.test(s) && !/--wait/.test(s), `${f} never waits on a local gcloud pipe`);
     assert.match(s, /gcloud_job_run /);
+  }
+});
+
+// M1 D43: the judge exam goes through the wrapper, and its exit code tells a judge result from no result.
+const exam = 'bash infra/catalog-output-evals.sh exam';
+test('the exam: a network blip during the wait is no failure; it runs one execution with LIVE_SMOKE=1 and a pass reads as a pass', () => {
+  const r = run(exam, {POLL_SEQ: 'running,dns,dns,running,succeeded'});
+  assert.equal(r.status, 0, r.err);
+  assert.match(r.out, /JUDGE EXAM PASSED/);
+  assert.equal(count(r.calls, 'run jobs execute'), 1);
+  const start = r.calls.find((c) => c.startsWith('run jobs execute'));
+  assert.match(start, /--update-env-vars=LIVE_SMOKE=1/);
+  assert.match(start, /--args=.*exam/);
+});
+test('the exam: the job exiting 1 is a judge below a bar, and the fail message names the judge', () => {
+  const r = run(exam, {POLL_SEQ: 'failed', FAKE_JOB_LOG: 'JUDGE EXAM FAIL: the/judge below a bar; set v2, run exam-x.'});
+  assert.equal(r.status, 1, r.err);
+  assert.match(r.err, /JUDGE EXAM FAILED: JUDGE EXAM FAIL: the\/judge below a bar/);
+  assert.doesNotMatch(r.out + r.err, /JUDGE EXAM PASSED|COULD NOT RUN/);
+});
+test('the exam: the result does not depend on the log: exit 1 with no readable log is still a judge failure', () => {
+  const r = run(exam, {POLL_SEQ: 'failed', FAKE_LOG_UNREADABLE: '1'});
+  assert.equal(r.status, 1, r.err);
+  assert.match(r.err, /JUDGE EXAM FAILED: the job exited 1/);
+  assert.doesNotMatch(r.out + r.err, /COULD NOT RUN/);
+});
+test('the exam: a clean pass says nothing about an earlier failed deploy', () => {
+  const r = run(exam, {POLL_SEQ: 'succeeded'});
+  assert.equal(r.status, 0, r.err);
+  assert.doesNotMatch(r.out + r.err, /deploy whose exam failed/);
+});
+test('the exam: the job exiting 3, a killed or cancelled job, a lost network and a failed start all exit 3, no judge result', () => {
+  for (const [label, env] of [
+    ['exit 3', {POLL_SEQ: 'failed3', FAKE_JOB_LOG: 'JUDGE EXAM COULD NOT RUN: not serving: x. This is not a judge result.'}],
+    ['exit 3 with no readable log', {POLL_SEQ: 'failed3', FAKE_LOG_UNREADABLE: '1'}],
+    ['exit 3 whatever the log says', {POLL_SEQ: 'failed3', FAKE_JOB_LOG: 'JUDGE EXAM FAIL: the/judge below a bar; set v2, run exam-x.'}],
+    ['exit 137 is not exit 1', {POLL_SEQ: 'failed137'}],
+    ['cancelled', {POLL_SEQ: 'cancelled'}],
+    ['network', {POLL_SEQ: 'running,dns', GCLOUD_POLL_OUTAGE_S: '0'}],
+    ['start refused', {EXEC_SEQ: 'denied'}],
+    ['list refused', {READ_SEQ: 'denied'}],
+  ]) {
+    const r = run(exam, env);
+    assert.equal(r.status, 3, label + ': ' + r.err);
+    assert.match(r.err, /JUDGE EXAM COULD NOT RUN/, label);
   }
 });
 

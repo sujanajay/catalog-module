@@ -8,14 +8,14 @@ const SERVING = SEED_ROUTES.map(r => ({...r, state: "serving" as const, noTraini
 const judgeRoutes = () => SERVING.filter(r => r.capability === "judge.render");
 const off = (routes: readonly RouteDef[], rank: number) => routes.map(r => r.rank === rank ? {...r, state: "off" as const} : r);
 const models = (plan: PlannedRoute[]) => plan.map(r => r.model);
-const [FIRST, SECOND, THIRD] = judgeRoutes().map(r => r.model) as [string, string, string];
+const [FIRST, SECOND] = judgeRoutes().map(r => r.model) as [string, string];
 
 describe("M7-F2 route plan", () => {
-  it("seeds at least two ranked routes and a fallback of different providers for the judge and the reader (R2)", () => {
-    for (const capability of ["judge.render", "vision.read"] as const) {
+  it("seeds ranked routes of different providers for the judge (two, M1 D43) and the reader (three) (R2)", () => {
+    for (const [capability, count] of [["judge.render", 2], ["vision.read", 3]] as const) {
       const rows = SEED_ROUTES.filter(r => r.capability === capability);
-      expect(rows.map(r => r.rank)).toEqual([1, 2, 3]);
-      expect(new Set(rows.map(r => r.model.split("/")[0])).size).toBe(3);
+      expect(rows.map(r => r.rank)).toEqual(Array.from({length: count}, (_, i) => i + 1));
+      expect(new Set(rows.map(r => r.model.split("/")[0])).size).toBe(count);
       expect(rows.every(r => r.id === routeId(capability, r.adapter, r.model))).toBe(true);
       // R7: the owner's recorded position (OpenRouter's provider data policy, 2026-11-03) is on file, so the seeds serve.
       expect(rows.every(r => r.state === "serving" && r.noTrainingTerms === OPENROUTER_NO_TRAINING_POSITION)).toBe(true);
@@ -27,25 +27,27 @@ describe("M7-F2 route plan", () => {
     expect(OPENROUTER_NO_TRAINING_POSITION).toMatch(/^OpenRouter provider data policy .*https:\/\/openrouter\.ai\/docs\/guides\/privacy\/data-collection.*; owner decision 2026-11-03$/);
   });
   it("R7: a serving route without a written no-training position is never planned for a brand-photo capability", () => {
-    const pending = judgeRoutes().map(r => r.rank === 1 ? {...r, noTrainingTerms: NO_TRAINING_PENDING} : r.rank === 2 ? {...r, noTrainingTerms: null} : r);
-    expect(models(planRoutes(createRouter(pending), "judge.render", [FIRST, SECOND]))).toEqual([THIRD]);
+    for (const blank of [NO_TRAINING_PENDING, null]) {
+      const pending = judgeRoutes().map(r => r.rank === 1 ? {...r, noTrainingTerms: blank} : r);
+      expect(models(planRoutes(createRouter(pending), "judge.render", [FIRST, SECOND]))).toEqual([SECOND]);
+    }
   });
   it("puts the policy's models first, then the other serving routes by rank", () => {
     const router = createRouter(SERVING);
-    expect(models(planRoutes(router, "judge.render", [SECOND, FIRST]))).toEqual([SECOND, FIRST, THIRD]);
+    expect(models(planRoutes(router, "judge.render", [SECOND, FIRST]))).toEqual([SECOND, FIRST]);
     // With a table, a policy model without a row has no recorded position, so it is not asked (R7); without a table
     // (unit tests, the eval job) the policy's models are the plan, on the OpenRouter adapter.
-    expect(models(planRoutes(router, "judge.render", ["test/judge", undefined]))).toEqual([FIRST, SECOND, THIRD]);
+    expect(models(planRoutes(router, "judge.render", ["test/judge", undefined]))).toEqual([FIRST, SECOND]);
     expect(planRoutes(undefined, "judge.render", ["test/judge"])[0]).toMatchObject({id: "judge.render:openrouter:test/judge", fromTable: false});
   });
   it("never plans a switched-off route, even when the policy prefers it (the kill switch, R5)", () => {
     const router = createRouter(off(judgeRoutes(), 1));
-    expect(models(planRoutes(router, "judge.render", [FIRST, SECOND]))).toEqual([SECOND, THIRD]);
+    expect(models(planRoutes(router, "judge.render", [FIRST, SECOND]))).toEqual([SECOND]);
   });
   it("leaves out a route whose circuit is open, and plans the preferred models alone without a router", () => {
     const circuits = new CircuitBreakers({now: () => 0});
     for (let i = 0; i < 5; i++) circuits.failure(judgeRoutes()[1]!.id);
-    expect(models(planRoutes(createRouter(SERVING, circuits), "judge.render", [FIRST, SECOND]))).toEqual([FIRST, THIRD]);
+    expect(models(planRoutes(createRouter(SERVING, circuits), "judge.render", [FIRST, SECOND]))).toEqual([FIRST]);
     expect(models(planRoutes(undefined, "judge.render", [FIRST, SECOND, FIRST, null]))).toEqual([FIRST, SECOND]);
   });
 });

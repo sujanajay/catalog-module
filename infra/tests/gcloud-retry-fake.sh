@@ -16,7 +16,10 @@ gcloud() {
       case "$step" in
         running) echo '{"status":{"conditions":[{"type":"Started","status":"True"}]}}' ;;
         succeeded) echo '{"status":{"conditions":[{"type":"Completed","status":"True"}],"succeededCount":1}}' ;;
-        failed) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"NonZeroExitCode","message":"Task probe-job-ab12c-task0 failed with exit code: 1"}],"failedCount":1}}' ;;
+        failed) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"NonZeroExitCode","message":"Task probe-job-ab12c-task0 failed with exit code: 1 and message: The container exited with an error."}],"failedCount":1}}' ;;
+        failed3) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"NonZeroExitCode","message":"Task probe-job-ab12c-task0 failed with exit code: 3 and message: The container exited with an error."}],"failedCount":1}}' ;;
+        failed137) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"NonZeroExitCode","message":"Task probe-job-ab12c-task0 failed with exit code: 137 and message: The container exited with an error."}],"failedCount":1}}' ;;
+        cancelled) echo '{"status":{"conditions":[{"type":"Completed","status":"False","reason":"Cancelled","message":"Cancelled by user."}]}}' ;;
         garbage) echo 'not json' ;;
         partial) echo '{"status":{"conditions":[{"type":"Completed","status":"True"}],"succeededCount":1,"failedCount":1}}' ;;
         busy) echo "ERROR: (gcloud.run.jobs.executions.describe) UNAVAILABLE: The service is currently unavailable." >&2; return 1 ;;
@@ -25,7 +28,7 @@ gcloud() {
         nospace) echo "ERROR: gcloud failed to load: [Errno 28] No space left on device" >&2; return 1 ;;
       esac ;;
     "run jobs executions cancel "*) echo "cancelled" ;;
-    "logging read "*) printf '| model | size |\nprobe passed\n' ;;
+    "logging read "*) [ -z "${FAKE_LOG_UNREADABLE:-}" ] || return 1; printf '%s\n' "${FAKE_JOB_LOG:-| model | size |}" "probe passed" ;;
     *)
       step=$(next read "${READ_SEQ:-ok}")
       case "$step" in

@@ -1,4 +1,4 @@
-import { CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
+import { CATALOG_CLASSIFIER_MODEL, CATALOG_QA_DEFAULT_MODEL } from "@catalog/core/catalog/qa/classify";
 import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 
 // Spec 07: no model or provider name in any page, API response or export. The chosen models stay
@@ -8,7 +8,7 @@ import { DEFAULT_POLICIES } from "@catalog/core/catalog/qa/policy";
 /** Model families and providers (spec 07 section 8), plus every candidate id the default policy names. */
 const FAMILIES = /birefnet|rmbg|bria|inspyre|ben_custom|esrgan|swinir|gemini|claude|qwen|llama|mistral|openrouter|gpt-|openai\/|anthropic\/|google\//;
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const CANDIDATE_IDS = [...new Set([CATALOG_QA_DEFAULT_MODEL, ...Object.values(DEFAULT_POLICIES).flatMap(p => [p.matteModel, p.matteModelSecond, p.qaModel, p.qaModelSecond])])]
+const CANDIDATE_IDS = [...new Set([CATALOG_QA_DEFAULT_MODEL, CATALOG_CLASSIFIER_MODEL, ...Object.values(DEFAULT_POLICIES).flatMap(p => [p.matteModel, p.matteModelSecond, p.qaModel, p.qaModelSecond])])]
   .filter((id): id is string => !!id).map(escape);
 const NAME = [FAMILIES.source, ...CANDIDATE_IDS].join("|");
 /** True when the text names a model or a model provider. */

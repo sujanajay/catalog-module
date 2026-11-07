@@ -893,7 +893,7 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
   const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model==="test/second" ? second():limited();});
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
   w.deps.classifyProductType=classifyProductType;w.deps.log=log;w.deps.sleep=async ms=>{waits.push(ms);};
-  vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_QA_DEFAULT_MODEL","test/classifier");
+  vi.stubEnv("OPENROUTER_API_KEY","test-key");vi.stubEnv("CATALOG_CLASSIFIER_MODEL","test/classifier");
   try { expect((await handleChunkTask(w.deps,await currentChunkTask(db,s.chunk.id))).httpStatus).toBe(200); } finally { vi.unstubAllEnvs(); }
   const [product]=await db.select().from(catalogProducts).where(eq(catalogProducts.id,s.product.id));
   const sources=await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId,s.batch.id));
@@ -922,6 +922,8 @@ describe("spec07 the classifier backs off on rate limits and then asks the secon
 });
 describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the reader is killed or dead, and the batch completes",()=>{
  const [FIRST,SECOND]=SEED_ROUTES.filter(r=>r.capability==="judge.render").map(r=>r.model) as [string,string];
+ // The reader has its own chain: its route 2 is the judge's route 1 (M1 D43), so route 1 is down per capability.
+ const [READ_FIRST,READ_SECOND]=SEED_ROUTES.filter(r=>r.capability==="vision.read").map(r=>r.model) as [string,string];
  /**
   * One product, 3 photos on 2 channels (CI size; 4.2.9 test 1 names a 50-product batch, run as the monthly drill).
   * The owner's no-training positions are recorded first (data), as they must be before any route serves (R7).
@@ -933,7 +935,7 @@ describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the r
   for(const route of SEED_ROUTES) await setRoute(db,route.id,{noTrainingTerms:"test: written position on file",state:"serving",changedBy:"test@opptra.com",reason:"CI"});
   if(route1==="killed") {
    expect(await killPrimary(db,"judge.render","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
-   expect(await killPrimary(db,"vision.read","test@opptra.com","CI kill-the-primary")).toMatchObject({model:FIRST});
+   expect(await killPrimary(db,"vision.read","test@opptra.com","CI kill-the-primary")).toMatchObject({model:READ_FIRST});
   }
   w.deps.routes=()=>routerFor(db);
   vi.mocked(w.deps.resolvePolicy).mockResolvedValue({matteModel:"fixture",qaModel:FIRST,qaModelSecond:SECOND,threshold:75,floor:60,qaMode:"per_source",qaSampleRate:1,source:"default"});
@@ -942,10 +944,10 @@ describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the r
   for(const [uri,obj] of w.objects) if(uri.includes(s.batch.id)) w.objects.set(uri,{...obj,buf:real,crc32c:real.toString("base64")});
   const render=w.deps.renderAllChannels;
   w.deps.renderAllChannels=(async(...args:Parameters<typeof render>)=>Object.fromEntries(Object.entries(await render(...args)).map(([channel,out])=>[channel,{...out,jpeg:real,bytes:real.length}]))) as typeof render;
-  const publicFetch=w.deps.fetch,models:string[]=[];
+  const publicFetch=w.deps.fetch,models:string[]=[],readerModels:string[]=[];
   // Route 1 answers 503 whenever it is asked; every other route answers for both the reader and the judge.
   const answer=JSON.stringify({type:"footwear",confidence:.9,...JSON.parse(passScores),view:"front",wrong_item:false,evidence:{}});
-  const llm=vi.fn(async(init?:RequestInit)=>{const model=String((JSON.parse(String(init?.body)) as {model:string}).model);models.push(model);return model===FIRST ? new Response("upstream error",{status:503}):new Response(JSON.stringify(openRouterReply(answer)));});
+  const llm=vi.fn(async(init?:RequestInit)=>{const body=String(init?.body),model=String((JSON.parse(body) as {model:string}).model),judging=body.includes("You check one product photo");(judging?models:readerModels).push(model);return model===(judging?FIRST:READ_FIRST) ? new Response("upstream error",{status:503}):new Response(JSON.stringify(openRouterReply(answer)));});
   w.deps.fetch=vi.fn<typeof globalThis.fetch>(async(url,init)=>String(url).startsWith("https://openrouter.ai/")?llm(init):publicFetch(url,init));
   w.deps.judgeOutput=judgeOutput;w.deps.classifyProductType=classifyProductType;w.deps.log=log;
   vi.stubEnv("OPENROUTER_API_KEY","test-key");
@@ -959,21 +961,21 @@ describe("M7-S2 acceptance (4.2.9 tests 1 and 3): route 1 of the judge and the r
   const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
   const judgements=outputs.flatMap(o=>((o.qaScores as {judgements?:{route:string|null;model:string}[]} | null)?.judgements ?? []));
   const readings=log.mock.calls.filter(([message])=>message==="catalog_classify: product type").map(([,fields])=>fields as {route:string|null;type:string});
-  return {models,product:product!,outputs,batch:batch!,judgements,readings};
+  return {models,readerModels,product:product!,outputs,batch:batch!,judgements,readings};
  }
  const completedOnRoute2=(r:Awaited<ReturnType<typeof routedBatch>>)=>{
   expect(r.product.productType).toBe("footwear");
   expect(r.outputs).toHaveLength(6);
   expect(r.outputs.every(o=>o.isLive && !o.flags.includes("qa_unavailable"))).toBe(true);
   // Every reading and every judgement names route 2 (M7-F2-R6), for the harness; the operator never sees it.
-  expect(r.readings).toEqual([expect.objectContaining({type:"footwear",route:`vision.read:openrouter:${SECOND}`})]);
+  expect(r.readings).toEqual([expect.objectContaining({type:"footwear",route:`vision.read:openrouter:${READ_SECOND}`})]);
   expect(r.judgements.length).toBeGreaterThan(0);
   expect(r.judgements.every(j=>j.route===`judge.render:openrouter:${SECOND}` && j.model===SECOND)).toBe(true);
   expect(deriveBatchState(r.batch).state).toBe("ready");
  };
  it("route 1 switched off: it is never asked, and the batch completes on route 2",async()=>{
   const r=await routedBatch("kill-primary","killed");
-  expect(r.models.length).toBeGreaterThan(0);expect(r.models).not.toContain(FIRST);
+  expect(r.models.length).toBeGreaterThan(0);expect(r.models).not.toContain(FIRST);expect(r.readerModels).not.toContain(READ_FIRST);
   completedOnRoute2(r);
  },120_000);
  it("route 1 still serving but down (503 every time): the batch completes on route 2, and route 1's circuit stops further calls",async()=>{

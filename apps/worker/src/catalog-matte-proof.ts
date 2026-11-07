@@ -1,6 +1,6 @@
 // M1 D40, D42: the live proof of matte_agreement, and the job that sends the re-cuts. Both are subcommands of the Cloud Run job
 // catalog-output-evals (infra/catalog-output-evals.sh proof | recut). `proof` calls the live judge, so it refuses to run without
-// LIVE_SMOKE=1; it reads production sources, writes images and its report only under catalog-test/evals/<run>/, and in the
+// LIVE_SMOKE=1; it first runs the judge exam (M1 D43); it reads production sources, writes images and its report only under catalog-test/evals/<run>/, and in the
 // database only one cost ledger row per judging, with no batch. It ends with a verdict a person can read: PROOF PASS or PROOF
 // FAIL in the job's log, and verdict.txt and report.html (every image, its result and why) beside the images.
 // Model ids appear in the JSON report and the console only, never in operator copy.
@@ -17,6 +17,7 @@ import type { ChannelId, ProductType } from "@catalog/core/catalog/types";
 import { EVALS_PREFIX } from "@catalog/core/catalog/evals/progress";
 import { recordCostEvent } from "@catalog/core/cost-events";
 import * as gcs from "@catalog/core/storage";
+import { runJudgeExam } from "./catalog-judge-exam";
 import { workerCatalogDeps } from "./catalog/deps";
 import { liveQaEnabled } from "./catalog/qa-mock";
 import { recutProductPhotos } from "./catalog/recut";
@@ -55,15 +56,17 @@ const PROOF_CHANNELS: readonly { channel: ChannelId; first: boolean }[] = [{ cha
 
 export type ProofGroup = "real" | "marked" | "control" | "backstop";
 export type ProofResult = "pass" | "fail" | "look";
-export interface ProofImage { channel: string; path: string; thumb: string; verdict: string; flags: string[]; scores: unknown }
+/** `judgeModel` is the model that gave this verdict and `calls` its model calls: a result that names no judge proves nothing (M1 D43). */
+export interface ProofImage { channel: string; path: string; thumb: string; verdict: string; flags: string[]; scores: unknown; judgeModel: string; calls: number }
 export interface ProofRow { photo: string; group: ProofGroup; why?: string; steps: string[]; model: string; agreed: boolean; busy: boolean; passthrough: boolean; images: ProofImage[]; result: ProofResult; note: string }
 
 /**
  * What counts as passing. A real photo must end as a cut-out the judge has no visible defect to report on. The marked photo must have
  * its mark named. A control must not agree; it then passes held or with the judge naming a defect, and is left for a person to look at
- * when no check objected. The backstop passes only when the judge names a defect on the cut it was shown.
+ * when no check objected. The backstop passes only when the judge names a defect on the cut it was shown. A judge that says nothing
+ * proves nothing by itself (M1 D43): a real photo passes on its silence only when that judge passed its exam in this run.
  */
-export function proofVerdict(row: Pick<ProofRow, "group" | "agreed" | "busy" | "passthrough"> & { flags: readonly string[]; judged: boolean }): { result: ProofResult; note: string } {
+export function proofVerdict(row: Pick<ProofRow, "group" | "agreed" | "busy" | "passthrough"> & { flags: readonly string[]; judged: boolean; judgeProven: boolean }): { result: ProofResult; note: string } {
   const defects = row.flags.filter(f => VISIBLE_DEFECTS.includes(f));
   if (row.flags.includes("qa_unavailable")) return { result: "fail", note: "the judge gave no answer" };
   if (row.group === "control" && row.agreed) return { result: "fail", note: "agreed on a photo the guard rightly caught" };
@@ -72,7 +75,15 @@ export function proofVerdict(row: Pick<ProofRow, "group" | "agreed" | "busy" | "
   if (row.group === "marked") return row.busy || defects.includes("text_or_watermark") ? { result: "pass", note: "the mark stays on the garment and is named, so this photo is left out or held" } : { result: "fail", note: "the mark was not named" };
   if (row.busy || row.passthrough) return { result: "fail", note: "held or passed through" };
   if (!row.judged) return { result: "fail", note: "no image was made" };
-  return defects.length ? { result: "fail", note: `judge: ${defects.join(", ")}` } : { result: "pass", note: "" };
+  if (defects.length) return { result: "fail", note: `judge: ${defects.join(", ")}` };
+  return row.judgeProven ? { result: "pass", note: "" } : { result: "fail", note: "the judge said nothing and has not passed its exam in this run" };
+}
+
+/** Which models gave the proof's verdicts, and on how many images (M1 D43). */
+export function proofJudges(rows: readonly Pick<ProofRow, "images">[]): string {
+  const count = new Map<string, number>();
+  for (const image of rows.flatMap(r => r.images)) count.set(image.judgeModel, (count.get(image.judgeModel) ?? 0) + 1);
+  return `JUDGED BY: ${[...count].map(([model, images]) => `${model} on ${images} images`).join(", ") || "no judge"}.`;
 }
 
 /** The verdict in plain lines: the overall result first, then each photo that did not simply pass. Any failure fails the proof. */
@@ -114,6 +125,8 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
   if (!liveQaEnabled()) { console.error("proof calls the live judge: run it through bash infra/catalog-output-evals.sh proof (LIVE_SMOKE=1)"); process.exitCode = 2; return; }
   const deps = workerCatalogDeps(db), run = `proof-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`, prefix = `${EVALS_PREFIX}/${run}/matte-proof`;
   console.info(`Run id: ${run}`);
+  // M1 D43: the judge sits its exam first, in this run. A failed exam fails the proof, whatever the photos then show.
+  const exam = await runJudgeExam(db, deps, { run });
   const health = await deps.matting.health(), served = health.models.map(m => m.id), rows: ProofRow[] = [];
   // The route switches apply, as in a batch: a switched-off route is not asked.
   const router = deps.routes ? await deps.routes() : undefined;
@@ -132,7 +145,7 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
       await recordCostEvent(db, { batchId: null, brandSlug: null, isTest: true, stage: "qa", kind: "llm_call", engine: verdict.model, usd: verdict.costUsd, channel, outcome: "ok" }, deps.log);
       for (const flag of verdict.flags) seen.add(flag);
       const thumb = (await sharp(rendered.jpeg).resize({ width: 420, withoutEnlargement: true }).jpeg({ quality: 70 }).toBuffer()).toString("base64");
-      images.push({ channel, path, thumb, verdict: verdict.verdict, flags: verdict.flags, scores: verdict.scores });
+      images.push({ channel, path, thumb, verdict: verdict.verdict, flags: verdict.flags, scores: verdict.scores, judgeModel: verdict.model, calls: verdict.calls });
     }
     return { images, flags: [...seen] };
   };
@@ -149,7 +162,7 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
     const agreed = agreedMatte({ auto_actions: resolved.actions });
     const { images, flags } = await judgeAndKeep(photo, source, p, resolved.matte, agreed);
     const row: ProofRow = { photo, group, ...(why ? { why } : {}), steps: resolved.actions.map(a => `${a.step}:${a.result} ${a.detail}`), model: resolved.matte.model, agreed, busy: resolved.busyBackground, passthrough: resolved.passthrough, images, result: "fail", note: "" };
-    Object.assign(row, proofVerdict({ group, agreed, busy: row.busy, passthrough: row.passthrough, flags, judged: images.length > 0 }));
+    Object.assign(row, proofVerdict({ group, agreed, busy: row.busy, passthrough: row.passthrough, flags, judged: images.length > 0 && images.every(i => i.calls > 0), judgeProven: exam.pass }));
     rows.push(row);
     console.info(JSON.stringify({ photo, group, agreed, busy: row.busy, passthrough: row.passthrough, flags, result: row.result, note: row.note }));
     if (source.name !== PROOF_BACKSTOP.split("/").pop()) return;
@@ -159,7 +172,7 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
     const cut = matteAgreement(p, asked, backgroundRegion(p));
     const shown = cut.matte ? await judgeAndKeep(`${photo}.agreed-cut`, source, p, cut.matte, true) : { images: [], flags: [] as string[] };
     const check: ProofRow = { photo: `${photo}.agreed-cut`, group: "backstop", why: "the judge on a cut the veto stops", steps: [cut.detail], model: cut.matte?.model ?? "", agreed: !!cut.matte, busy: false, passthrough: false, images: shown.images, result: "fail", note: "" };
-    Object.assign(check, proofVerdict({ group: "backstop", agreed: check.agreed, busy: false, passthrough: false, flags: shown.flags, judged: shown.images.length > 0 }));
+    Object.assign(check, proofVerdict({ group: "backstop", agreed: check.agreed, busy: false, passthrough: false, flags: shown.flags, judged: shown.images.length > 0, judgeProven: exam.pass }));
     rows.push(check);
     console.info(JSON.stringify({ photo: check.photo, group: check.group, flags: shown.flags, result: check.result, note: check.note }));
   };
@@ -179,9 +192,10 @@ export async function matteProofCommand(db: Db, flags: Record<string, string | s
   } catch (error) {
     stopped = error instanceof Error ? error.message : String(error);
   }
-  const summary = proofSummary(rows, stopped), { pass } = summary, holds = proofHolds(rows), lines = [summary.lines[0]!, holds.line, ...summary.lines.slice(1)], bucket = gcs.getBucketName();
+  const summary = proofSummary(rows, stopped), pass = summary.pass && exam.pass, holds = proofHolds(rows), bucket = gcs.getBucketName();
+  const lines = [`PROOF ${pass ? "PASS" : "FAIL"}: ${summary.lines[0]!.replace(/^PROOF \w+: /, "")}`, proofJudges(rows), ...exam.lines, holds.line, ...summary.lines.slice(1)];
   const write = async (name: string, body: string, mime: string) => { const path = `${prefix}/${name}`; assertTestPrefix(path); await gcs.uploadBuffer(path, Buffer.from(body), mime); return `gs://${bucket}/${path}`; };
-  await write("report.json", JSON.stringify({ run, pass, judgeUsd, holds: { real: holds.real, controls: holds.controls }, rows: rows.map(r => ({ ...r, images: r.images.map(({ thumb: _thumb, ...image }) => image) })) }, null, 1), "application/json");
+  await write("report.json", JSON.stringify({ run, pass, judgeUsd, exam: { pass: exam.pass, reportUri: exam.reportUri, lines: exam.lines }, holds: { real: holds.real, controls: holds.controls }, rows: rows.map(r => ({ ...r, images: r.images.map(({ thumb: _thumb, ...image }) => image) })) }, null, 1), "application/json");
   await write("verdict.txt", `${lines.join("\n")}\n`, "text/plain");
   const page = await write("report.html", proofHtml(run, rows, lines), "text/html");
   for (const line of lines) console.info(line);

@@ -37,11 +37,12 @@ import { assertLocked, checkAttention, checkCompleteness, checkIdentical, checkO
 import { sourceKey } from "@catalog/core/catalog/evals/completeness";
 import { checkMatte, consensusMetrics } from "@catalog/core/catalog/evals/cutout";
 import { sheetNotes } from "@catalog/core/catalog/evals/sheet-notes";
-import { buildGolden, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
+import { buildGolden, expectedSourceCount, GOLDEN_MANIFEST_PATH, goldenCounts, goldenSourcePath, mapShotsBySha, parseGolden, readGoldenBytes, serializeGolden, sha256, uniqueSources, type GoldenBuild, type GoldenEntry, type GoldenManifest } from "@catalog/core/catalog/evals/golden";
 import { bakeoffPolicy } from "@catalog/core/catalog/evals/matte-bakeoff";
 import { keptChannelConsistency, keptComparedPixels } from "@catalog/core/catalog/evals/shadow";
 import { EVALS_PREFIX, EvidenceBudget, evidencePath, parseSetRecord, parseSetsFlag, RUN_ID_PATTERN, SAMPLE_CHANNEL, samplePath, selectSets, serializeSetRecord, setId, setRecordPath, setsPrefix, withEvalRetry, type SetRecord } from "@catalog/core/catalog/evals/progress";
-import { buildReport, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
+import { buildReport, judgesLine, judgeTally, reportHtml, type ReportThumb } from "@catalog/core/catalog/evals/report";
+import { releaseLocks } from "@catalog/core/catalog/pipeline/publish";
 import { buildZip } from "../../../packages/core/test-fixtures/catalog/ingest-a/builders";
 import { workerCatalogDeps, type CatalogDeps } from "./catalog/deps";
 import { deliverChunkToEnd } from "./catalog/chunk";
@@ -52,9 +53,11 @@ import { cannedQa, liveQaEnabled } from "./catalog/qa-mock";
 import { changeOnePixel } from "./catalog-real-fixtures";
 import { parseArgs } from "./catalog-output-evals-args";
 import { recordJobRun } from "@catalog/core/job-cost";
+import { judgeExamCommand } from "./catalog-judge-exam";
 import { matteProofCommand, recutCommand } from "./catalog-matte-proof";
 
 const USAGE = `Usage: catalog:output-evals <command>
+  exam                     (M1 D43: the live judge on the pinned defects and clean images, fails under the bars; only with LIVE_SMOKE=1)
   proof [--limit <n>]      (M1 D40: the matte agreement on the 19 real photos and 8 controls, live judge; only with LIVE_SMOKE=1)
   recut --batch <id> --photos <identifier_n,...>      (M1 D42: cuts delivered photos out again, through the worker)
   build-golden [--build <golden-build.json>] [--out <golden-manifest.json>] [--root name=path ...]
@@ -131,7 +134,8 @@ async function runBatch(db: Db, deps: CatalogDeps, run: string, group: Group, fi
     assert(!["failed", "not_found"].includes(result.outcome), `Ingest failed: ${result.outcome}`);
   }
   const sources = await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.batchId, b.id));
-  assert.equal(sources.length, files.length, "Every golden photo must be collected.");
+  // Ingest keeps one file per photo: copies with the same bytes in one product are one source (group.ts mergeSameFiles).
+  assert.equal(sources.length, expectedSourceCount(files), "Every golden photo must be collected.");
   const productIds = [...new Set(sources.map(s => s.productId))];
   assertLocked(await lockProducts(db, b.id, productIds));
   await db.update(catalogBatches).set({ status: "matting", startedAt: new Date(), counts: { ...b.counts, products: productIds.length, sources: sources.length, outputs: sources.length * channels.length } }).where(eq(catalogBatches.id, b.id));
@@ -431,7 +435,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   results.push(...attention.results);
   const counts = goldenCounts(manifest);
   const startedAt = new Date(Math.min(Date.now(), ...records.map(r => Date.parse(r.startedAt))));
-  const report = buildReport({ run, startedAt, finishedAt: new Date(), mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", golden: { products: counts.products, photos: counts.photos, brands: counts.brands, categories: counts.categories, tags: counts.tags }, results, attention, flags: flagRows(attentionRows, QA_DEFAULT_THRESHOLD), batches: batchIds, includeAll: true });
+  const report = buildReport({ run, startedAt, finishedAt: new Date(), mode: live ? "live judge" : "mocked judge (LIVE_SMOKE is not 1)", golden: { products: counts.products, photos: counts.photos, brands: counts.brands, categories: counts.categories, tags: counts.tags }, results, attention, flags: flagRows(attentionRows, QA_DEFAULT_THRESHOLD), batches: batchIds, judges: judgeTally(attentionRows), includeAll: true });
   const sets = records.map(r => ({ set: r.set, status: r.status, error: r.error, photos: r.photos, products: r.products, checks: r.results.length, overwriteRan: r.overwriteRan, startedAt: r.startedAt, finishedAt: r.finishedAt }));
   const full = { ...report, sets, matteBakeoff: { trials: trials.length, winners, policyRows: written.map(w => ({ brand: w.row.brandSlug, category: w.row.category, matteModel: w.row.matteModel, matteModelSecond: w.row.matteModelSecond ?? null, outcome: flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})` })) } };
   const html = await reportHtml(report, thumbs) + setsHtml(sets) + bakeoffHtml(winners, flags["write-policy"] === true);
@@ -439,6 +443,7 @@ async function runCommand(db: Db, flags: Record<string, string | string[] | true
   await writeFile(path.join(out, "report.html"), html);
   for (const [name, body, mime] of [["report.json", JSON.stringify(full), "application/json"], ["report.html", html, "text/html"]] as const) { const objectPath = `${EVALS_PREFIX}/${run}/${name}`; assertTestPrefix(objectPath); await gcs.uploadBuffer(objectPath, Buffer.from(body), mime); }
   console.info(report.summary.line);
+  console.info(judgesLine(report.judges));
   console.info(`Report: gs://${storage.getBucketName()}/${EVALS_PREFIX}/${run}/report.html (also ${out})`);
   for (const w of winners) console.info(`matte bake-off ${w.brand}/${w.category}: ${w.winner ? `${w.winner.model} (composite ${w.winner.composite.toFixed(4)}, fail rate ${(w.winner.failRate * 100).toFixed(0)}%)` : "no trials"}${w.runnerUp ? `, runner-up ${w.runnerUp.model} (written as the second matte model), margin ${w.margin}` : ""} over ${w.sources} sources`);
   for (const w of written) console.info(`policy row ${w.row.brandSlug}/${w.row.category}: ${w.row.matteModel}, second ${w.row.matteModelSecond ?? "none"}: ${flags["write-policy"] === true ? w.outcome : `dry run (${w.outcome})`}`);
@@ -486,6 +491,9 @@ async function overwritePasses(db: Db, deps: CatalogDeps, run: string, first: Ba
   const identical = await runBatch(db, deps, run, first.group, files().map(f => ({ path: f.path, data: f.data })), [...CHANNEL_IDS], "identical");
   batchIds.push(identical.id);
   results.push(...checkIdentical({ before, after: await liveRows(productIds), changes: await changes(identical.id), work: { matte: work.matte - beforeWork.matte, render: work.render - beforeWork.render, copy: work.copy - beforeWork.copy }, events: await events(identical.id) }));
+
+  // Finalize keeps the lock of a product still held for attention, and the identical pass can hold what the first pass released (anta.footwear, bd-152637502S-3). No one decides on a test batch, so its locks go here; a kept one would fail the changed pass.
+  await releaseLocks(db, identical.id, { everyProduct: true });
 
   const selected: ChannelId[] = CHANNEL_IDS.filter(c => c !== "amazon");
   const delivery = await Promise.all(files({ alteredId: changed.id, removedId: removed.id, selected }).map(async f => ({ path: f.path, data: f.altered ? await changeOnePixel(f.data) : f.data })));
@@ -556,6 +564,7 @@ async function checkFolderCommand(flags: Record<string, string | string[] | true
   if (!report.summary.passedAll) process.exitCode = 1;
 }
 
+let crashExit = 1;
 async function main() {
   const { words, flags } = parseArgs(process.argv.slice(2));
   const command = words.join(" ");
@@ -563,14 +572,16 @@ async function main() {
   if (command === "build-golden") return buildGoldenCommand(flags);
   if (command === "upload") return uploadCommand(flags);
   if (command === "check-folder") return checkFolderCommand(flags);
-  if (command !== "run" && command !== "proof" && command !== "recut") { print(USAGE); process.exitCode = 2; return; }
+  if (command !== "run" && command !== "proof" && command !== "recut" && command !== "exam") { print(USAGE); process.exitCode = 2; return; }
+  // A crash in the exam is no judge result: exit 1 there means a judge is below a bar (M1 D43).
+  if (command === "exam") crashExit = 3;
   const db = getDb(), startedAt = Date.now();
   let outcome: "ok" | "failed" = "failed";
-  try { await (command === "proof" ? matteProofCommand : command === "recut" ? recutCommand : runCommand)(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
+  try { await (command === "exam" ? judgeExamCommand : command === "proof" ? matteProofCommand : command === "recut" ? recutCommand : runCommand)(db, flags); outcome = process.exitCode ? "failed" : "ok"; } finally {
     // M6-F1-R3: this run's billable seconds as one cost ledger row (on Cloud Run only; a test run, reported apart).
     await recordJobRun(db, { startedAt, outcome, isTest: true });
     await closeDb();
   }
 }
-main().catch(error => { console.error(error instanceof Error ? error.stack ?? error.message : String(error)); process.exitCode = 1; });
+main().catch(error => { console.error(error instanceof Error ? error.stack ?? error.message : String(error)); process.exitCode = process.exitCode || crashExit; });
 export { sha256 };
