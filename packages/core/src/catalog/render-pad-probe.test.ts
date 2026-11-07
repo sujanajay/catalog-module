@@ -32,6 +32,32 @@ describe("the pad probe reads the band's end beside the product (M1 D43, Z46B n5
   });
 });
 
+describe("a contact shadow under a hem is not a cut at any ordinary garment width (M1 D43, second review P2-1)", () => {
+  /** A clean photo, one colour to every edge, with a shadow as wide as the garment under its hem. */
+  function hem(w: number, h: number, widthPercent: number, shadowBeyond = 0, x = Math.round((w - w * widthPercent / 100) / 2)) {
+    const width = Math.round(w * widthPercent / 100), top = Math.round(h * 0.1), bottom = h - top, rgb = Buffer.alloc(w * h * 3, CLEAN), alpha = Buffer.alloc(w * h);
+    for (let py = top; py < bottom + 8; py++) for (let px = 0; px < w; px++) {
+      const i = py * w + px;
+      if (py < bottom && px >= x && px < x + width) { alpha[i] = 255; rgb.fill(60, i * 3, i * 3 + 3); }
+      else if (py >= bottom && px >= x - shadowBeyond && px < x + width + shadowBeyond) rgb.fill(200, i * 3, i * 3 + 3);
+    }
+    return { rgb, alpha, w, h };
+  }
+  const widths = [40, 46, 49, 50, 52, 55, 58, 61, 64, 65, 70, 76, 79];
+  it.each(widths)("1000x1250, a garment %i percent of the frame wide", (percent) => {
+    const { rgb, alpha, w, h } = hem(1000, 1250, percent);
+    expect(shotGeometry(alpha, w, h, { rgb })!.cut.bottom).toBe(false);
+  });
+  it.each(widths)("1600x800, a garment %i percent of the frame wide", (percent) => {
+    const { rgb, alpha, w, h } = hem(1600, 800, percent);
+    expect(shotGeometry(alpha, w, h, { rgb })!.cut.bottom).toBe(false);
+  });
+  it.each([[141, 660], [141, 659], [140, 660], [142, 658], [160, 640]])("the Z46B shape, box %i-%i: moving it a pixel changes nothing", (x0, x1) => {
+    const { rgb, alpha } = photo({ x0, x1, y0: 170, y1: 930 }, (x, y) => (y >= 930 && y < 938 && x >= x0 - 11 && x < x1 + 11 ? 200 : null));
+    expect(shotGeometry(alpha, W, H, { rgb })!.cut.bottom).toBe(false);
+  });
+});
+
 describe("a garment cut at the edge of a narrow photo inside side pads stays cut (M1 D43, review P2-1)", () => {
   /** White pads around a grey photo; the garment reaches the photo's bottom edge, cut flat there. */
   function padded(w: number, h: number, photoX: [number, number], garment: [number, number], background: number) {
@@ -52,5 +78,10 @@ describe("a garment cut at the edge of a narrow photo inside side pads stays cut
   ];
   it.each(cases)("%s", (_name, { rgb, alpha, w, h }, cut) => {
     expect(shotGeometry(alpha, w, h, { rgb })!.cut.bottom).toBe(cut);
+  });
+
+  it.each([[20, 60], [25, 60], [30, 80], [35, 80], [18, 60], [25, 120]])("side pads of %i percent, past the 15 percent cap, gap %i: the probe reads beside the garment inside the photo, not the pad", (pad, gap) => {
+    const left = pad * 10, { rgb, alpha, w, h } = padded(1000, 1000, [left, 1000 - left], [left + gap, 1000 - left - gap], 200);
+    expect(shotGeometry(alpha, w, h, { rgb })!.cut.bottom).toBe(true);
   });
 });

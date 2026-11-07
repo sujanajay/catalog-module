@@ -163,7 +163,7 @@ function lineIndex(side: Side, d: number, i: number, width: number, height: numb
  * not uniform at all: the band's inner edge is then the real photo's frame edge.
  */
 export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: number): Record<Side, { depth: number; photoEdge: boolean }> {
-  const depths = {} as Record<Side, { depth: number; colour: number[] | null; max: number }>;
+  const depths = {} as Record<Side, { depth: number; colour: number[] | null; max: number; reach: number }>;
   for (const side of SIDES) {
     const horizontal = side === "top" || side === "bottom", length = horizontal ? width : height, max = Math.floor((horizontal ? height : width) * CUT_EDGE_PAD_MAX_FRACTION);
     const lineStats = (d: number) => {
@@ -173,10 +173,14 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
       return { mean, stdev: Math.sqrt(Math.max(0, variance)) };
     };
     const outer = lineStats(0);
-    if (outer.stdev > CUT_EDGE_PAD_STDEV) { depths[side] = { depth: 0, colour: null, max }; continue; }
+    if (outer.stdev > CUT_EDGE_PAD_STDEV) { depths[side] = { depth: 0, colour: null, max, reach: 0 }; continue; }
+    const uniform = (d: number) => { const line = lineStats(d); return !(line.stdev > CUT_EDGE_PAD_STDEV || line.mean.some((v, c) => Math.abs(v - outer.mean[c]!) > CUT_EDGE_PAD_TOLERANCE)); };
     let depth = 1;
-    for (; depth <= max; depth++) { const line = lineStats(depth); if (line.stdev > CUT_EDGE_PAD_STDEV || line.mean.some((v, c) => Math.abs(v - outer.mean[c]!) > CUT_EDGE_PAD_TOLERANCE)) break; }
-    depths[side] = { depth, colour: outer.mean, max };
+    for (; depth <= max; depth++) if (!uniform(depth)) break;
+    // The band's own rule stops at `max`; where it really ends is what the other sides' probes need to know (M1 D43).
+    let reach = depth;
+    if (depth > max) for (const limit = horizontal ? height : width; reach < limit; reach++) if (!uniform(reach)) break;
+    depths[side] = { depth, colour: outer.mean, max, reach };
   }
   const result = {} as Record<Side, { depth: number; photoEdge: boolean }>, tight = bbox(alpha, width, height) ?? { x: 0, y: 0, w: 0, h: 0 };
   for (const side of SIDES) {
@@ -194,7 +198,7 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
     // perpendicular band that ends well short of the product is a real pad with the photo starting after it, and its pixels would
     // read a garment cut at the photo's edge as not cut. A band that ends at the product is the photo's own clean background.
     const clear = horizontal ? [tight.x, tight.x + tight.w] : [tight.y, tight.y + tight.h], margin = Math.ceil(length * CUT_EDGE_PROBE_MARGIN_FRACTION), beside = [0, 0, 0];
-    const photoFrom = clear[0]! - a.depth >= margin / 2 ? a.depth : 0, photoTo = length - b.depth - clear[1]! >= margin / 2 ? length - b.depth : length;
+    const photoFrom = clear[0]! - a.reach >= margin / 2 ? a.reach : 0, photoTo = length - b.reach - clear[1]! >= margin / 2 ? length - b.reach : length;
     let count = 0, besideCount = 0;
     for (let i = from; i < to; i++) {
       const k = lineIndex(side, probe, i, width, height);
