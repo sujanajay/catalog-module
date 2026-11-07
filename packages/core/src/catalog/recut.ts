@@ -5,8 +5,7 @@
 // asserts the held product's prefix (assertWithinProduct) and the batch's channels, and writes only with ifGenerationMatch.
 // The old object stays live until the new image is copied over it. A result left out, or held for a person, takes the old
 // image down (planPublish `removes`), so a bad image does not stay online; except image 1, which stays until the person
-// decides, because a listing with no first image is worse than the image it had. A full batch does the same to an older batch's
-// image when it rejects the photo for what the image shows (M1 D45).
+// decides, because a listing with no first image is worse than the image it had.
 import { and, eq, inArray, isNotNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogBatches, catalogChunks, catalogImprovements, catalogOutputs, catalogProducts, catalogSourceImages } from "../db/schema";

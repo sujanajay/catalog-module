@@ -6,8 +6,6 @@
 import { asc, eq } from "drizzle-orm";
 import type { Db } from "../db/client";
 import { catalogAutoDecideRules } from "../db/schema";
-import { autoActionsOf } from "./auto-resolve";
-import { problemFlags } from "./qa/triage";
 import { HOLD_CAUSES, PROVISIONAL_SENTENCE, type AutoDecideAction, type BatchOptions, type ChannelId, type HoldCause, type OutputFlag, type OutputStatus } from "./types";
 
 export type AutoDecideSnapshot = NonNullable<BatchOptions["autoDecide"]>;
@@ -83,32 +81,6 @@ export const HOLD_SENTENCE = "It has no link yet and the product's other photos 
 export function heldForPerson(o: { status: string; decision?: string | null; compliance: unknown }): boolean {
   return o.status === "needs_attention" && !o.decision && autoDecideRecordOf(o.compliance)?.action === "hold";
 }
-
-/** M1 D45: the only verdicts that may take an older live image down. Both are about the source photo, not about this run's render. */
-export type TakeDownVerdict = "text_or_watermark" | "different_product";
-const TAKE_DOWN_FLAGS: ReadonlySet<OutputFlag> = new Set<OutputFlag>(["text_or_watermark", "different_product"]);
-interface VerdictScores { verdict?: string; autoAction?: string | null; finalStatus?: string; no_text_or_watermark?: number; thresholds?: { no_text_or_watermark?: number }; evidence?: { text_or_watermark?: unknown }; wrongItem?: { confirmed?: boolean } | null }
-/**
- * M1 D45: the verdict on this output that may take down an older image of the same photo, or null. A mark the judge confirmed, or a different
- * item two judges agree on, and nothing else on the row. Never a render verdict (`product_removed`, `halo`, `leftover_background`), a collage,
- * a chart, or any other problem beside it, such as a failed enlargement, a broken channel rule or an unchecked photo. Never a person's decision. The
- * triage must have decided the row (a crash, cap or outage before it leaves no `finalStatus`), and no repair step may have touched it.
- */
-export function takeDownVerdict(o: { status: string; decision?: string | null; flags: readonly OutputFlag[]; compliance: unknown; qaScores?: unknown }): TakeDownVerdict | null {
-  if (o.decision || !(heldForPerson(o) || (o.status === "skipped" && o.flags.includes("auto_dropped")))) return null;
-  const problems = problemFlags(o.flags);
-  if (!problems.length || problems.some(flag => !TAKE_DOWN_FLAGS.has(flag)) || autoActionsOf(o.compliance).length) return null;
-  const scores = o.qaScores as VerdictScores | null | undefined;
-  if (scores?.verdict !== "flag" || (scores.autoAction !== "drop" && scores.autoAction !== "hold") || scores.finalStatus !== o.status) return null;
-  if (problems.includes("different_product")) return scores.wrongItem?.confirmed === true ? "different_product" : null;
-  const { no_text_or_watermark: score, thresholds, evidence } = scores;
-  return evidence?.text_or_watermark && typeof score === "number" && typeof thresholds?.no_text_or_watermark === "number" && score < thresholds.no_text_or_watermark ? "text_or_watermark" : null;
-}
-/** The reason on the older row: what this batch found on the same photo, not a verdict on that older image. */
-export const TAKE_DOWN_WHY: Record<TakeDownVerdict, string> = {
-  text_or_watermark: "this batch checked the same photo and found a mark on it.",
-  different_product: "this batch checked the same photo and two checks found a different item.",
-};
 
 /** A hold on a photo with no other photo of the product delivered on its channel. */
 export const HOLD_SENTENCE_ALONE = "It has no link yet. Replace it, use it as it is, or remove it.";

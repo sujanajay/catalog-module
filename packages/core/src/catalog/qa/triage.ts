@@ -51,12 +51,6 @@ export interface TriageOutput {
 }
 export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: OutputFlag[] }
 
-/** Photo 1 of a product: its lowest photo that is not a size chart or a text-only image, counting the places that stay live. */
-export function photoOneOf(outputs: readonly Pick<TriageOutput, "n" | "flags">[], keptLive: readonly {n: number}[] = []): number {
-  const shots = [...new Set([...outputs.filter(o => !o.flags.some(flag => LEFT_OUT_FLAGS.has(flag))).map(o => o.n), ...keptLive.map(k => k.n)])];
-  return shots.length ? Math.min(...shots) : 1;
-}
-
 /**
  * Turns the problems of one product's outputs in this batch into automatic actions (07 4.1 v2).
  * Hard holds: a confirmed different item, a collage, a corrupt file (status `failed`), photo 1 with
@@ -72,7 +66,8 @@ export function photoOneOf(outputs: readonly Pick<TriageOutput, "n" | "flags">[]
  */
 export function triageProduct(outputs: readonly TriageOutput[], keptLive: readonly {channel: ChannelId; n: number}[] = []): Map<string, TriageDecision> {
   const leftOut = (o: TriageOutput) => o.flags.some(flag => LEFT_OUT_FLAGS.has(flag));
-  const photoOne = photoOneOf(outputs, keptLive);
+  const shots = [...new Set([...outputs.filter(o => !leftOut(o)).map(o => o.n), ...keptLive.map(k => k.n)])];
+  const photoOne = shots.length ? Math.min(...shots) : 1;
   const good = (o: TriageOutput) => o.decision === "use_as_is" || ((o.status === "staged" || o.status === "verified") && o.decision === null && !problemFlags(o.flags).length);
   const goodShots = (channel: ChannelId, except: number) => new Set([
     ...outputs.filter(o => o.channel === channel && o.n !== except && good(o)).map(o => o.n),
