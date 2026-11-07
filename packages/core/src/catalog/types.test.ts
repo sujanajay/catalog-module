@@ -28,9 +28,10 @@ describe("flagReason", () => {
     );
   });
 
-  it("has no sentence for shadow_synthesised and a non-empty one for every other flag", () => {
+  it("has no sentence for the note-only shadow_synthesised and text_suspected, and a non-empty one for every other flag", () => {
     expect(flagReason("shadow_synthesised")).toBe("");
-    for (const f of OUTPUT_FLAGS.filter((f) => f !== "shadow_synthesised")) {
+    expect(flagReason("text_suspected")).toBe("");
+    for (const f of OUTPUT_FLAGS.filter((f) => f !== "shadow_synthesised" && f !== "text_suspected")) {
       const s = flagReason(f);
       expect(s.length).toBeGreaterThan(0);
       expect(s).not.toMatch(/[<>]/);

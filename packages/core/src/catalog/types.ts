@@ -356,8 +356,8 @@ const GENERIC_REASON = "This image needs a look. Compare the two images; 'Use as
 
 /**
  * The operator sentence for a flag. `ctx` fills details when known: `w`, `h`, `min`, `channel`
- * (marketplace label), `failures`, `name`, `format`, `n`, `list`. `shadow_synthesised` is
- * information only and returns "".
+ * (marketplace label), `failures`, `name`, `format`, `n`, `list`. `shadow_synthesised` and
+ * `text_suspected` are information only and return "": they put no note on a delivered image.
  */
 export function flagReason(flag: OutputFlag, ctx?: Record<string, string | number>): string {
   const reason = REASONS[flag];

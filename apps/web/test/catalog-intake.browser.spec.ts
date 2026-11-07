@@ -213,11 +213,11 @@ test("4. correction while collecting: paste the grid, clear it, paste the varian
 
   await queue(page, { paused: false });
   await holdStart(page);
-  // Rows 6 and 7 both become TB-F with shots 1 and 2 (the readback warned about them), so TB-F holds two files per
-  // shot and is not among the products with photos; nothing of the first paste is left.
+  // Rows 6 and 7 both become TB-F with shots 1 and 2 (the readback warned about them), so TB-F holds two different files per
+  // shot. M1 D45: no file is lost and none is preferred, so it has 4 photos; nothing of the first paste is left.
   const preview = await finishedPreview(page, id);
   expect(preview.groups.map((g) => g.identifier).filter((i) => !/^TB-/.test(i))).toEqual([]);
-  expect(preview.groups.filter((g) => g.shots > 0).map((g) => [g.identifier, g.shots])).toEqual([["TB-A", 2], ["TB-B", 2], ["TB-C", 2]]);
+  expect(preview.groups.filter((g) => g.shots > 0).map((g) => [g.identifier, g.shots])).toEqual([["TB-A", 2], ["TB-B", 2], ["TB-C", 2], ["TB-F", 4]]);
   // The share page and the http link fail; both are permanent, so no retry. A ready batch shows them among its
   // warnings (the card is for a batch that is not ready), so the counts are read from the same GET the page polls.
   const detected = (await (await page.request.get(`/api/catalog/batches/${id}/detected`)).json()) as { linkFailures?: { total: number; links: number; products: number } };
