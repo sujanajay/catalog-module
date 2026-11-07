@@ -8,7 +8,7 @@ import { heldForPerson } from "@catalog/core/catalog/auto-decide";
 import { catalogSlotPatch, pickPromotion } from "@catalog/core/catalog/promote";
 import { actionsOn, autoActionsOf, diagnoseOutput, ENLARGEMENT_WAIT_DETAIL, failuresOf, LadderStopped, MATTE_STEPS, MAX_ENLARGEMENT_WAITS, MAX_REJUDGES_PER_PHOTO, MAX_REPAIRS_PER_OUTPUT, measuredOf, ownDefects, RENDER_FLAGS, variantOf, withAutoActions, type AutoAction, type AutoActionKind, type Repair, type RenderVariant } from "@catalog/core/catalog/auto-resolve";
 import { shadowSynthesisAllowed, strictestChannel } from "@catalog/core/catalog/qa/policy";
-import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX, wholeFrameMatte, wholeFrameRoute } from "@catalog/core/catalog/matte-guard";
+import { heldInHand, isBusyBackground, passthroughMatte, passthroughProductLoss, PASSTHROUGH_PRODUCT_LOSS_MAX, wholeFrameMatte, wholeFrameRoute, WHOLE_FRAME_VIEW, withoutKeptBackground, backgroundRegion } from "@catalog/core/catalog/matte-guard";
 import type { ChannelId, OutputFlag, ResolvedPolicy } from "@catalog/core/catalog/types";
 import type { CatalogDeps } from "./deps";
 import { batchEnlargement, primeReadiness, reconcileEnlargements, wantedRows, wantedRowsOfPixels } from "./enlarge";
@@ -134,9 +134,12 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   // The close-up route (matte-guard.ts): the judge's reading of the photo, kept on the row since its first look.
   let whole: Matte | undefined, wholeAllowed: boolean | undefined;
   const wholeFor = () => whole ??= wholeFrameMatte(p);
+  // The backdrop patch the judge saw, out of the photo's cut-out (matte-guard.ts). Never on a close-up: it has no backdrop, and pale fabric reads as one (529E410: 41% of the frame).
+  let patched: Matte | null | undefined;
+  const patchedFor = () => patched === undefined ? (patched = withoutKeptBackground(p,first,backgroundRegion(p),{anyDepth:true})) : patched;
   const view = input.outputs.map(o=>(o.qaScores as {view?: string | null} | null)?.view).find(Boolean);
   const contextFor = input.contextFor ?? rowContext;
-  const matteOf = async (v: RenderVariant): Promise<Matte> => v.matte === "second" ? (await secondMatte())! : v.matte === "passthrough" ? passthroughFor() : v.matte === "whole" ? wholeFor() : first;
+  const matteOf = async (v: RenderVariant): Promise<Matte> => v.matte === "second" ? (await secondMatte())! : v.matte === "passthrough" ? passthroughFor() : v.matte === "whole" ? wholeFor() : v.matte === "patched" ? patchedFor()! : first;
   const render = async (o: Output, v: RenderVariant): Promise<RenderOutput> => {
     const matte = await matteOf(v);
     await underClaim(async()=>{});
@@ -173,7 +176,7 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   // The planner answers the judge's flags and, while the output breaks a channel rule, that rule's codes too.
   // After the second cut-out has had its turn.
   const wholeFrameOpen = (st: OutputState): boolean => currentTrigger.includes("product_removed") && (!secondPossible || st.tried.includes("second_matte")) && (wholeAllowed ??= wholeFrameRoute(p,view).allowed);
-  const diag = (st: OutputState): Repair[] => diagnoseOutput({channel:st.o.channel,trigger:[...new Set<OutputFlag>([...currentTrigger,...(failing(st) ? ["failed_compliance" as const]:[])])],failures:failing(st) ? (st.render ? st.render.compliance.failures:st.failures):[],measured:st.measured,current:st.variant,tried:st.tried,secondMatte:secondPossible,wholeFrame:wholeFrameOpen(st)});
+  const diag = (st: OutputState): Repair[] => diagnoseOutput({channel:st.o.channel,trigger:[...new Set<OutputFlag>([...currentTrigger,...(failing(st) ? ["failed_compliance" as const]:[])])],failures:failing(st) ? (st.render ? st.render.compliance.failures:st.failures):[],measured:st.measured,current:st.variant,tried:st.tried,secondMatte:secondPossible,wholeFrame:wholeFrameOpen(st),keptPatch:currentTrigger.includes("leftover_background") && first.source === "model" && view !== WHOLE_FRAME_VIEW && !!patchedFor()});
   const adopt = (st: OutputState, v: RenderVariant, r: RenderOutput) => { st.variant = v; st.render = r; st.measured = r.compliance.measured ?? st.measured; };
   const renderStep = async (st: OutputState, repair: Repair): Promise<void> => {
     st.attempts++; st.tried.push(repair.step);
@@ -248,9 +251,9 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
   if (!written.length) { await recordActions(deps,input,input.outputs,actions); return {actions,fixed:new Set()}; }
   // A channel the matte change broke and no repair mended keeps its first image; the record says so.
   const kept = [...states.values()].filter(st=>st.render && st.variant.matte !== "first" && !written.includes(st));
-  if (kept.length) record(kept[0]!.variant.matte === "second" ? "second_matte":kept[0]!.variant.matte === "whole" ? "matte_whole_frame":"matte_passthrough","failed",kept.map(st=>st.o.channel),`kept the first image on ${kept.map(st=>st.o.channel).join(",")}`);
+  if (kept.length) record(kept[0]!.variant.matte === "patched" ? "matte_patch_removed":kept[0]!.variant.matte === "second" ? "second_matte":kept[0]!.variant.matte === "whole" ? "matte_whole_frame":"matte_passthrough","failed",kept.map(st=>st.o.channel),`kept the first image on ${kept.map(st=>st.o.channel).join(",")}`);
   let sourceFlags = source.flags;
-  const winning = written.find(st=>st.variant.matte !== "first")?.variant.matte, matte = winning === "second" ? second : winning === "passthrough" ? passthrough : winning === "whole" ? whole : undefined;
+  const winning = written.find(st=>st.variant.matte !== "first")?.variant.matte, matte = winning === "second" ? second : winning === "passthrough" ? passthrough : winning === "whole" ? whole : winning === "patched" ? patched ?? undefined : undefined;
   if (matte && source.matteUri) {
     // The winning cut-out becomes the photo's matte, so any later render of this shot uses it too.
     const {path} = deps.storage.parseGsUri(source.matteUri), keptWhole = matte === passthrough || matte === whole, suffix = keptWhole ? ".matte-whole.png" : ".matte2.png", nextPath = path.replace(/\.matte[^/]*\.png$/,"")+suffix;

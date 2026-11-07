@@ -38,12 +38,13 @@ export function judgeSawSourceCut(flags: readonly string[], qaScores?: Record<st
  * - `reshift`: the product is moved by the exact move the Styli guide check measured.
  * - `reencode`: the same pixels saved at a lower JPEG quality (a file over 2 MB).
  * - `re_render`: one plain re-render with the same inputs (a transient encoder fault).
+ * - `matte_patch_removed`: a backdrop patch the judge saw left in the cut-out taken out of it (withoutKeptBackground, matte-guard.ts; per photo).
  * - `second_matte`: the policy's second cut-out model (per photo).
  * - `matte_whole_frame`: a frame-filling close-up kept exactly as it is (wholeFrameRoute, matte-guard.ts; per photo, only for `product_removed`, after the second cut-out).
  * - `matte_passthrough`: the whole frame kept (matte-guard.ts; per photo, only for `product_removed`).
  */
 export const RENDER_STEPS = ["reshift", "reencode", "shadow_off", "source_shadow_off", "refit", "re_render"] as const;
-export const MATTE_STEPS = ["second_matte", "matte_whole_frame", "matte_passthrough"] as const;
+export const MATTE_STEPS = ["matte_patch_removed", "second_matte", "matte_whole_frame", "matte_passthrough"] as const;
 export type RenderStep = typeof RENDER_STEPS[number];
 export type MatteStep = typeof MATTE_STEPS[number];
 export type RepairStep = RenderStep | MatteStep;
@@ -60,7 +61,7 @@ export const REFIT_FALLBACK_SCALE = 0.95;
 export const JPEG_QUALITY_REPAIR_MIN = 50;
 
 /** How one output is rendered: the render options the repairs turn. A render never puts a shadow back once a step took it off. */
-export interface RenderVariant { synthesiseShadow?: false; keepSourceShadow?: false; matte: "first" | "second" | "whole" | "passthrough"; fitScale: number; anchorShift?: { dx: number; dy: number }; jpegQualityMin?: number }
+export interface RenderVariant { synthesiseShadow?: false; keepSourceShadow?: false; matte: "first" | "patched" | "second" | "whole" | "passthrough"; fitScale: number; anchorShift?: { dx: number; dy: number }; jpegQualityMin?: number }
 export const FIRST_VARIANT: RenderVariant = Object.freeze({ matte: "first", fitScale: 1 });
 export interface Repair { step: RepairStep; scope: "output" | "photo"; variant: RenderVariant; /** Short technical note for the record; never shown to operators. */ why: string }
 
@@ -76,6 +77,8 @@ export interface Diagnosis {
   current: RenderVariant;
   /** Steps already taken for this output (this run and earlier runs). */
   tried: readonly AutoActionKind[];
+  /** The photo's cut-out holds a piece of backdrop that can be taken out (withoutKeptBackground). */
+  keptPatch?: boolean;
   /** A second cut-out model may exist for this photo (the worker still checks the service). */
   secondMatte: boolean;
   /** The whole frame may be kept as it is (wholeFrameRoute): the judge read a close-up, and nothing in the pixels argues against it. */
@@ -126,7 +129,8 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
   // The judge's own-defect flags.
   if (d.trigger.includes("leftover_background")) shadowOff("leftover_background: a drawn shadow reads as background");
   if (d.trigger.includes("placement") && !reshift("placement")) add("re_render", "output", {}, "placement: re-placed by rule");
-  if (d.secondMatte && d.current.matte === "first" && (d.trigger.includes("halo") || d.trigger.includes("leftover_background") || d.trigger.includes("product_removed"))) add("second_matte", "photo", { matte: "second" }, "second cut-out model");
+  if (d.trigger.includes("leftover_background") && d.keptPatch) add("matte_patch_removed", "photo", { matte: "patched" }, "the backdrop patch taken out");
+  if (d.secondMatte && (d.current.matte === "first" || d.current.matte === "patched") && (d.trigger.includes("halo") || d.trigger.includes("leftover_background") || d.trigger.includes("product_removed"))) add("second_matte", "photo", { matte: "second" }, "second cut-out model");
   if (d.trigger.includes("product_removed") && d.wholeFrame) add("matte_whole_frame", "photo", { matte: "whole" }, "a close-up kept as it is");
   if (d.trigger.includes("product_removed")) add("matte_passthrough", "photo", { matte: "passthrough" }, "the whole frame kept");
   // Cheapest first: a move or a re-encode before a shadow change, a refit, a plain re-render, then the matte steps.
@@ -139,7 +143,7 @@ export function diagnoseOutput(d: Diagnosis): Repair[] {
 export const ENLARGEMENT_WAIT_DETAIL = "waiting for the enlargement";
 /** A photo parks a chunk at most this often (an x2 and an x4 image): past it the step is recorded skipped and the hold stands. */
 export const MAX_ENLARGEMENT_WAITS = 2;
-export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte" | "matte_agreement" | "photo_promoted";
+export type AutoActionKind = RepairStep | "smaller_fit" | "flush_cut" | "matte_retry" | "apply" | "matte_check" | "padded_matte" | "matte_agreement" | "matte_chunk_removed" | "photo_promoted";
 /** One entry of an output's `auto_actions` list (kept in `catalog_outputs.compliance`, no schema change). */
 export interface AutoAction {
   step: AutoActionKind;
@@ -212,7 +216,7 @@ export function busyBackgroundHold(compliance: unknown): boolean {
  * inside such a cut-out can read as a source shadow, so its first render already leaves the source shadow out.
  */
 export function agreedMatte(compliance: unknown): boolean {
-  return autoActionsOf(compliance).some(a => a.step === "matte_agreement" && a.result === "passed");
+  return autoActionsOf(compliance).some(a => (a.step === "matte_agreement" || a.step === "matte_chunk_removed") && a.result === "passed");
 }
 /**
  * M1 D40, requirement 3: the pass-through was used on a photo with a backdrop, so only what looks like the plain backdrop was replaced. A

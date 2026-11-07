@@ -314,7 +314,7 @@ export function heldInHand(p: Pick<Prepared, "width" | "height" | "rgb">, alpha:
 }
 
 /** The candidate kept background chunks of a matte (see KEPT_BACKGROUND_DELTA): their labels, sizes and which qualify by touch and depth. */
-function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer) {
+function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, anyDepth = false) {
   const { width: w, height: h, rgb } = p, color = borderBackground(p).color, chunk = new Uint8Array(w * h), dropped = new Uint8Array(w * h);
   let kept = 0, y0 = h, y1 = -1;
   for (let i = 0; i < chunk.length; i++) {
@@ -326,7 +326,7 @@ function backgroundChunks(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: 
   const near = dilate(dropped, w, h, KEPT_BACKGROUND_TOUCH_PX), { labels, sizes } = components(chunk, w, h);
   const touches = new Uint8Array(sizes.length), top = new Int32Array(sizes.length).fill(h), counts = new Uint8Array(sizes.length);
   for (let i = 0; i < chunk.length; i++) { const l = labels[i]!; if (!l) continue; if (near[i]) touches[l] = 1; const y = (i - (i % w)) / w; if (y < top[l]!) top[l] = y; }
-  for (let l = 1; l < sizes.length; l++) counts[l] = touches[l] && (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH ? 1 : 0;
+  for (let l = 1; l < sizes.length; l++) counts[l] = touches[l] && (anyDepth || (top[l]! - y0) / Math.max(1, y1 - y0) >= KEPT_BACKGROUND_MIN_DEPTH) ? 1 : 0;
   return { labels, sizes, counts, kept };
 }
 
@@ -345,14 +345,27 @@ export function keptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, al
 }
 
 /** The kept background chunks large enough to reject the matte (KEPT_BACKGROUND_FRAME_SHARE and KEPT_BACKGROUND_KEPT_SHARE), as a mask. */
-export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion): Mask {
+export function keptBackgroundMask(p: Pick<Prepared, "width" | "height" | "rgb">, alpha: Buffer, region: BackgroundRegion, opts: { anyDepth?: boolean } = {}): Mask {
   const { width: w, height: h } = p, out = new Uint8Array(w * h);
   if (region.frameFilling) return out;
-  const { labels, sizes, counts, kept } = backgroundChunks(p, alpha);
+  const { labels, sizes, counts, kept } = backgroundChunks(p, alpha, opts.anyDepth);
   if (!kept) return out;
   for (let l = 1; l < sizes.length; l++) if (counts[l] && sizes[l]! > w * h * KEPT_BACKGROUND_FRAME_SHARE && sizes[l]! > kept * KEPT_BACKGROUND_KEPT_SHARE) counts[l] = 2;
   for (let i = 0; i < out.length; i++) if (counts[labels[i]!] === 2) out[i] = 1;
   return out;
+}
+
+/**
+ * The matte with its kept background chunks (keptBackgroundMask) taken out; null when it has none. `anyDepth` also takes a
+ * chunk in the upper half (a backdrop patch at the neck): the guard does not look there, because a pale collar touches the dropped
+ * area as well, so only the judge's `leftover_background` asks for it, and the judge looks at the result.
+ */
+export function withoutKeptBackground(p: Pick<Prepared, "width" | "height" | "rgb">, matte: Matte, region: BackgroundRegion, opts: { anyDepth?: boolean } = {}): Matte | null {
+  const mask = keptBackgroundMask(p, matte.alpha, region, opts);
+  if (!mask.some(v => v)) return null;
+  const alpha = Buffer.from(matte.alpha);
+  for (let i = 0; i < mask.length; i++) if (mask[i]) alpha[i] = 0;
+  return { ...matte, alpha };
 }
 
 export interface MatteIntegrity {
@@ -1182,7 +1195,8 @@ export interface MatteResolution {
  * matte when it passes checkMatteIntegrity; else (a) the policy's second model, (b) the photo framed
  * in a white border (GUARD_PAD_FRACTION) with the first, then the second model, (c) on apparel (no `handRule`), a cut-out
  * two models of different families agree on, asking a third model when the policy's two are of one family or disagree
- * (matteAgreement), (d) the pass-through matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
+ * (matteAgreement), (d) a cut-out the guard rejected only for a kept background chunk, with the chunk taken out (withoutKeptBackground),
+ * re-checked once and always judged, (e) the pass-through matte (the whole frame minus the plain background). The first matte that passes wins. A pass-through
  * replaces a plain backdrop only: on a busy background (busyBorderShare), or a backdrop of the product's own
  * colour (passthroughProductLoss), the photo is kept whole and held (`busyBackground`). The judge's
  * `product_removed` names the same failure after the render, and its ladder ends in the same
@@ -1231,6 +1245,14 @@ export async function resolveMatte(input: ResolveMatteInput): Promise<MatteResol
     }
     record("matte_agreement", agreement.matte ? "passed" : "failed", agreement.detail);
     if (agreement.matte) return won(agreement.matte);
+  }
+  for (const candidate of tried) {
+    const clean = checkMatteIntegrity(p, candidate, { handRule: input.handRule, region }).detail.startsWith("kept background") ? withoutKeptBackground(p, candidate, region) : null;
+    if (!clean) continue;
+    const result = checkMatteIntegrity(p, clean, { handRule: input.handRule, region });
+    if (!result.ok) continue;
+    record("matte_chunk_removed", "passed", `${candidate.model}: ${result.detail}`);
+    return won(clean);
   }
   const guide = passthroughGuide(p, region, tried), loss = passthroughProductLoss(p, tried, region, guide);
   if (loss > PASSTHROUGH_PRODUCT_LOSS_MAX) {

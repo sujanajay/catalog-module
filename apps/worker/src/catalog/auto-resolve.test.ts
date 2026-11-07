@@ -404,6 +404,49 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(source!.flags).toContain("matte_passthrough");
   }, 180_000);
 
+  describe("a backdrop patch the judge saw", () => {
+    /** A dark product on the plain backdrop; the first model also keeps a square of backdrop beside its upper half, the second does not see the product at all. */
+    const inProduct = (x: number, y: number) => x >= 200 && x < 600 && y >= 50 && y < 750;
+    const inPatch = (x: number, y: number) => x >= 600 && x < 700 && y >= 80 && y < 180;
+    const keeping = (name: string): Matte => { const alpha = Buffer.alloc(W * H); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (inProduct(x, y) || (name === "first" && inPatch(x, y))) alpha[y * W + x] = 255; return { alpha, width: W, height: H, model: name, ms: 5, source: "model", target: "cpu", sentLongSide: 1024 }; };
+    const stepsOfShot = (o: { compliance: unknown }) => steps(autoActionsOf(o.compliance));
+    const photoOf = async (batchId: string) => (await db.select().from(catalogSourceImages).where(and(eq(catalogSourceImages.batchId, batchId), eq(catalogSourceImages.n, 2))))[0]!;
+
+    it("comes out of the cut-out, the judge looks again, and the cleaned cut-out is the photo's matte", async () => {
+      let judged = 0;
+      const w = world({ view: "on-model", photoScores: (n): Record<string, number> => (n === 2 && ++judged < 2 ? { background_clean: 30 } : {}) });
+      w.matteFor.mockImplementation(async (p, _client, name) => (name ?? "first") === "first" ? keeping("first") : fakeMatte(p.rgb, name!));
+      const s = await seed(w, "apparel_model", [block(PLAIN), block(PLAIN)]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect(stepsOfShot(o)).toEqual(["matte_patch_removed:passed"]);
+      expect(autoActionsOf(o.compliance)[0]).toMatchObject({ rejudged: true });
+      expect(o.flags).not.toContain("leftover_background");
+      expect(o.status).toBe("staged");
+      const photo = await photoOf(s.batch.id);
+      expect(photo.matteUri).toMatch(/\.matte2\.png$/);
+      expect(photo.matteModel).toBe("first");
+    }, 180_000);
+
+    it("the judge is the real check: flagged again, the ladder goes on and nothing cleaned is published", async () => {
+      const w = world({ view: "on-model", photoScores: (n): Record<string, number> => (n === 2 ? { background_clean: 30 } : {}) });
+      w.matteFor.mockImplementation(async (p, _client, name) => (name ?? "first") === "first" ? keeping("first") : fakeMatte(p.rgb, name!));
+      const s = await seed(w, "apparel_model", [block(PLAIN), block(PLAIN)]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect(stepsOfShot(o).slice(0, 2)).toEqual(["matte_patch_removed:failed", "second_matte:failed"]);
+      expect(o.flags).toContain("leftover_background");
+      expect(o.status).toBe("needs_attention");
+      expect((await photoOf(s.batch.id)).matteUri).not.toMatch(/\.matte2\.png$/);
+    }, 180_000);
+
+    it("control: a close-up never takes it, pale fabric reads as backdrop there", async () => {
+      const w = world({ view: "detail", photoScores: (n): Record<string, number> => (n === 2 ? { background_clean: 30 } : {}) });
+      w.matteFor.mockImplementation(async (p, _client, name) => (name ?? "first") === "first" ? keeping("first") : fakeMatte(p.rgb, name!));
+      const s = await seed(w, "apparel_flat", [block(PLAIN), block(PLAIN)]);
+      const o = s.outputs.find(row => row.n === 2)!;
+      expect(stepsOfShot(o).some(step => step.startsWith("matte_patch_removed"))).toBe(false);
+    }, 180_000);
+  });
+
   describe("the close-up route", () => {
     /** Plain pale fabric from edge to edge, as a shirt close-up fills the frame. */
     const FABRIC: RGB = [226, 226, 222];
