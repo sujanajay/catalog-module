@@ -113,6 +113,16 @@ describe("catalog-route-switch", () => {
     expect((await db.select().from(vendorRouteChanges).where(eq(vendorRouteChanges.routeId, named))).map(c => c.toState)).toEqual(["serving", "off", "serving"]);
   });
 
+  it("drill on vision.read with no batch turns off the classifier's own first route, not the judge's model (M1 D43)", async () => {
+    const classifier = SEED_ROUTES.find(r => r.capability === "vision.read" && r.rank === 1)!;
+    const stop = new AbortController();
+    let offDuring: string[] = [];
+    const { deps, lines } = harness(async () => { offDuring = (await loadRouteRows(db, "vision.read")).filter(r => r.state === "off").map(r => r.id); stop.abort(); });
+    await runRouteSwitch({ command: "drill", capability: "vision.read", minutes: 30, reason: "reader drill", actor: ADMIN }, { ...deps, signal: stop.signal });
+    expect(offDuring).toEqual([classifier.id]);
+    expect(lines.some(l => l.startsWith(`Drill target: ${classifier.id}`))).toBe(true);
+  });
+
   it("set: refuses to turn off the last serving route of a capability unless forced", async () => {
     const { deps, lines } = harness();
     const judges = SEED_ROUTES.filter(r => r.capability === "judge.render");

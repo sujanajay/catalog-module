@@ -18,7 +18,8 @@
 #                                                        # recorded under catalog-test/evals/<run>/sets/ are skipped
 #   bash infra/catalog-output-evals.sh run --sets anta.footwear,penti.apparel_flat   # only these brand.category sets
 #   bash infra/catalog-output-evals.sh exam              # M1 D43: the judge exam: the live judges on the pinned defects and clean images.
-#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.50). Exits non-zero under its
+#                                                        # Always LIVE_SMOKE=1 for that one execution (about $1.50). Exit 0: passed. Exit 1: a judge
+#                                                        # failed a bar. Exit 3: it could not run, which is no judge result. Non-zero under its
 #                                                        # bars. infra/deploy.sh runs it as its last step; proof runs it first.
 #   bash infra/catalog-output-evals.sh proof [--limit n] # M1 D40: the matte agreement on the 19 real photos and 8 controls.
 #                                                        # Always LIVE_SMOKE=1 for that one execution (spends credit); run
@@ -43,6 +44,9 @@ source infra/lib/labels.sh
 JOB_LABELS=$(catalog_labels "$JOB" test)
 # cli_args: the --args value for "gcloud run jobs execute" (unique tokens, "^|^" separator).
 source infra/lib/cli-args.sh
+# gcloud_retry, gcloud_job_run: a network drop during the wait is not a result.
+# shellcheck source=lib/gcloud-retry.sh
+source infra/lib/gcloud-retry.sh
 
 WORKER_SA=catalog-worker@$PROJECT.iam.gserviceaccount.com
 ASSETS_BUCKET=image-links-agent-assets
@@ -116,9 +120,33 @@ execute_cli() {
   MSYS2_ARG_CONV_EXCL='--args=' gcloud run jobs execute "$JOB" --region="$REGION" --args="$joined" "${env_flags[@]}" --wait
 }
 
+# The judge exam, through the wrapper that judges from the execution's final state. Its exit code says which of three things happened.
+exam() {
+  local listed joined rc=0 out
+  if ! listed=$(gcloud_retry gcloud run jobs list --region="$REGION" --filter="metadata.name=$JOB" --format='value(metadata.name)'); then
+    echo "JUDGE EXAM COULD NOT RUN: could not read the job list; this is not a judge result." >&2; return 3
+  fi
+  [ -n "${listed//$'\r'/}" ] || { echo "JUDGE EXAM COULD NOT RUN: $JOB does not exist yet; run bash infra/deploy.sh first." >&2; return 3; }
+  joined=$(cli_args exam) || return 3
+  GCLOUD_JOB_EXECUTE_FLAGS=("--args=$joined" --update-env-vars=LIVE_SMOKE=1)
+  out=$(mktemp) || { echo "JUDGE EXAM COULD NOT RUN: no temp file on this laptop (is the disk full?); this is not a judge result." >&2; return 3; }
+  echo "==> $JOB: EXECUTE exam (LIVE_SMOKE=1, live judge calls)"
+  MSYS2_ARG_CONV_EXCL='--args=' gcloud_job_run "$JOB" "$REGION" 0 | tee "$out" || rc=$?
+  unset GCLOUD_JOB_EXECUTE_FLAGS
+  if [ "$rc" = 0 ]; then
+    rm -f "$out"
+    echo "JUDGE EXAM PASSED: the judges met every bar. This counts as a pass for the deploy whose exam failed; no redeploy is needed."
+    return 0
+  fi
+  if grep -q 'JUDGE EXAM FAIL:' "$out"; then rm -f "$out"; return 1; fi
+  rm -f "$out"
+  echo "JUDGE EXAM COULD NOT RUN: the execution gave no judge result (a network drop, a job failure or a log not readable yet). This is not a judge result." >&2
+  return 3
+}
+
 case "${1:-}" in
   deploy) deploy ;;
-  exam) shift; execute_cli --live exam "$@" ;;
+  exam) shift; exam ;;
   proof) shift; execute_cli --live proof "$@" ;;
   recut) shift; execute_cli recut "$@" ;;
   upload) shift; upload "$@" ;;

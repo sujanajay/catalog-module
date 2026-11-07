@@ -741,18 +741,34 @@ else
 fi
 
 # --- 10b. The judge exam (M1 D43) --------------------------------------------------------
-# Every verdict after this deploy comes from these judges, so a judge that stopped seeing defects stops the release flow here, before
-# DEPLOY_OK, and before any proof or real batch. The new code is already live: on a failure read the printed report and roll back if the prompt or
-# the model changed in this deploy. It only reads images under catalog-test/ and calls the model provider; no site traffic.
+# Every verdict after this deploy comes from these judges. A failure here fails the deploy report (no DEPLOY_OK). It does not roll back and
+# it blocks nothing by itself: all traffic is already on the new code, and new batches keep running until a person acts. It only reads
+# images under catalog-test/ and calls the model provider; no site traffic.
 deploy_step "judge exam"
 echo "==> judge exam"
 if [ "${CATALOG_PREVIEW:-0}" = 1 ]; then
   echo "==> judge exam: SKIP (the preview stack has no jobs of its own)"
 elif [ "$MEASURE_ONLY" = 1 ]; then
   echo "==> judge exam: SKIP (measure only)"
-elif ! bash infra/catalog-output-evals.sh exam; then
-  echo "ERROR: the judge exam failed. This deploy is live but not released: no proof, no real batch, until it passes. Read its report ($ASSETS_BUCKET/catalog-test/evals/exam-*/judge-exam/verdict.txt); re-run with bash infra/catalog-output-evals.sh exam" >&2
-  exit 1
+else
+  exam_rc=0
+  bash infra/catalog-output-evals.sh exam || exam_rc=$?
+  if [ "$exam_rc" != 0 ]; then
+    if [ "$exam_rc" = 1 ]; then
+      echo "ERROR: a judge failed its exam: it missed known defects or flagged too many clean images." >&2
+    else
+      echo "ERROR: the judge exam could not run (exit $exam_rc). This is not a judge result: the judges may be fine." >&2
+    fi
+    cat >&2 <<EXAM_NEXT
+This deploy is live: all traffic is on the new code, nothing was rolled back, and nothing blocks new batches by itself. Only the deploy report failed: no DEPLOY_OK.
+Next steps:
+  1. Read the result: gcloud storage cat gs://$ASSETS_BUCKET/catalog-test/evals/<the Run id printed above>/judge-exam/verdict.txt
+  2. Hold new batches, proofs and real runs until step 3 passes. This is by hand.
+  3. If it could not run, or after a fix: bash infra/catalog-output-evals.sh exam. A line "JUDGE EXAM PASSED" clears this deploy; no redeploy is needed.
+  4. If a judge really failed and this deploy changed the prompt or a model: bash infra/deploy.sh --rollback catalog-worker
+EXAM_NEXT
+    exit 1
+  fi
 fi
 
 # --- 11. The deploy report (M6-F2: minutes per step; F2 acceptance test 3 ends at DEPLOY_OK) -------------------------

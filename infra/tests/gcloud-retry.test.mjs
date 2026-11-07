@@ -272,6 +272,36 @@ test('gcloud_retry wraps the deploy reads: pre-flight, the image check, the gate
   }
 });
 
+// M1 D43: the judge exam goes through the wrapper, and its exit code tells a judge result from no result.
+const exam = 'bash infra/catalog-output-evals.sh exam';
+test('the exam: a network blip during the wait is no failure; it runs one execution with LIVE_SMOKE=1 and a pass reads as a pass', () => {
+  const r = run(exam, {POLL_SEQ: 'running,dns,dns,running,succeeded'});
+  assert.equal(r.status, 0, r.err);
+  assert.match(r.out, /JUDGE EXAM PASSED/);
+  assert.equal(count(r.calls, 'run jobs execute'), 1);
+  const start = r.calls.find((c) => c.startsWith('run jobs execute'));
+  assert.match(start, /--update-env-vars=LIVE_SMOKE=1/);
+  assert.match(start, /--args=.*exam/);
+});
+test('the exam: a judge below a bar exits 1', () => {
+  const r = run(exam, {POLL_SEQ: 'failed', FAKE_JOB_LOG: 'JUDGE EXAM FAIL: set v2, run exam-x.'});
+  assert.equal(r.status, 1, r.err);
+  assert.doesNotMatch(r.out + r.err, /JUDGE EXAM PASSED/);
+});
+test('the exam: a drill, a job failure with no verdict, a lost network and a failed start all exit 3, no judge result', () => {
+  for (const [label, env] of [
+    ['drill', {POLL_SEQ: 'failed', FAKE_JOB_LOG: 'JUDGE EXAM COULD NOT RUN: not serving: x. This is not a judge result.'}],
+    ['job failure', {POLL_SEQ: 'failed'}],
+    ['network', {POLL_SEQ: 'running,dns', GCLOUD_POLL_OUTAGE_S: '0'}],
+    ['start refused', {EXEC_SEQ: 'denied'}],
+    ['list refused', {READ_SEQ: 'denied'}],
+  ]) {
+    const r = run(exam, env);
+    assert.equal(r.status, 3, label + ': ' + r.err);
+    assert.match(r.err, /JUDGE EXAM COULD NOT RUN/, label);
+  }
+});
+
 let failed = 0;
 try {
   for (const [name, fn] of tests) {

@@ -4,7 +4,7 @@ import { judgeOutput, sheetNames, sheetNumbered, normalizeScores, verdictFor, di
 import { classifyProductType } from "./classify";
 import { CATALOG_QA_TEMPLATE, renderTemplate } from "./templates";
 import { QA_USD_PER_CHECK_FALLBACK } from "../cost";
-import { createRouter } from "../../vendor/router";
+import { createRouter, type Router } from "../../vendor/router";
 import { CircuitBreakers } from "../../vendor/circuit";
 import { SEED_ROUTES } from "../../vendor/routes";
 /** A non-streaming OpenRouter chat completion as it arrives in production (usage is always present). */
@@ -120,7 +120,7 @@ describe("catalog judge v2", () => {
   // The retry names the missing scores; the partial first reply raised no flag.
   expect(JSON.stringify(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body)).messages.at(-1))).toMatch(/Missing scores: edge_quality, background_clean, no_text_or_watermark, orientation_ok, product_intact/);
   expect(result).toMatchObject({verdict:"pass",flags:[]});expect(result.costUsd).toBe(2*QA_USD_PER_CHECK_FALLBACK);
-  expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price USD 0\.0013/));
+  expect(log).toHaveBeenCalledWith(expect.stringMatching(/usage\.cost absent; recorded the estimated price USD 0\.0056/));
  });
  it("reads the billed cost from OpenRouter's real response shape and does not log",async()=>{
   const bytes=await image(), log=vi.fn();
@@ -446,13 +446,9 @@ describe("classifier back-off on rate limits and the second model (gate 3h)", ()
  });
 });
 
-/** The seeds with a third judge that exists only in these tests: the chain logic holds for a table an admin has grown. */
-const THIRD = "test/third-judge";
-const WITH_THIRD = [...SEED_ROUTES, {...SEED_ROUTES.find(r => r.capability === "judge.render")!, id:`judge.render:openrouter:${THIRD}`, model:THIRD, rank:3}];
-
 describe("M7-F2 the judge and classifier call through the route table", () => {
  /** The seeds once the owner has recorded their no-training positions; `killRank` is switched off. */
- const routes = (killRank?: number, circuits?: CircuitBreakers) => createRouter(WITH_THIRD.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.rank === killRank ? "off" as const : "serving" as const})), circuits);
+ const routes = (killRank?: number, circuits?: CircuitBreakers) => createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.rank === killRank ? "off" as const : "serving" as const})), circuits);
  const [FIRST, SECOND] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string];
  const [READ_FIRST, READ_SECOND] = SEED_ROUTES.filter(r => r.capability === "vision.read").map(r => r.model) as [string, string];
  const fast = {sleep: async () => {}, random: () => .5, log: () => {}};
@@ -463,12 +459,6 @@ describe("M7-F2 the judge and classifier call through the route table", () => {
   expect(result).toMatchObject({verdict:"pass",flags:[],model:SECOND,route:`judge.render:openrouter:${SECOND}`,calls:1});
   expect(asked(fetcher)).toEqual([SECOND]);
  });
- it("route 1 switched off: the second opinion on a different item comes from route 3, so two models still agree", async () => {
-  const fetcher = byModel({[SECOND]: reply({wrong_item:true}), [THIRD]: reply({wrong_item:true})});
-  const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:routes(1),...fast});
-  expect(result.wrongItem).toMatchObject({first:true,second:true,confirmed:true,secondModel:THIRD});
-  expect(asked(fetcher)).toEqual([SECOND, THIRD]);
- });
  it("a refusal (empty reply) moves to the next route for this item instead of holding the photo", async () => {
   const refused = () => new Response(JSON.stringify(openRouterReply("")));
   const fetcher = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === FIRST ? refused() : response(reply(), .001, requestModel(init)));
@@ -477,10 +467,8 @@ describe("M7-F2 the judge and classifier call through the route table", () => {
   expect(result).toMatchObject({verdict:"pass",flags:[],model:SECOND,route:`judge.render:openrouter:${SECOND}`});
   expect(log).toHaveBeenCalledWith("catalog_qa: first judge unavailable; the second judge gave the verdict", expect.objectContaining({model:FIRST,fallbackModel:SECOND,kind:"empty_reply"}));
  });
- it("routes 1 and 2 down: the fallback route gives the verdict; only all routes down holds the photo as unchecked", async () => {
+ it("both judges down holds the photo as unchecked", async () => {
   const down = () => new Response("upstream error",{status:503});
-  const third = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === THIRD ? response(reply(), .001, THIRD) : down());
-  expect(await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:third,router:routes(),...fast})).toMatchObject({verdict:"pass",model:THIRD,route:`judge.render:openrouter:${THIRD}`});
   const none = await judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:vi.fn<typeof fetch>(async () => down()),router:routes(),...fast});
   expect(none).toMatchObject({flags:["qa_unavailable"],route:null,model:FIRST});
  });
@@ -490,13 +478,54 @@ describe("M7-F2 the judge and classifier call through the route table", () => {
   expect(result).toMatchObject({type:"footwear",flags:[],model:READ_SECOND,route:`vision.read:openrouter:${READ_SECOND}`});
   expect(asked(fetcher)).toEqual([READ_SECOND]);
  });
- it("M1 D43: the seeded chain with route 1 off: route 2 alone decides, and a different item with nobody to confirm it does not count", async () => {
-  const seeded = createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.capability === "judge.render" && r.rank === 1 ? "off" as const : "serving" as const})));
-  const fetcher = byModel({[SECOND]: reply({wrong_item:true})});
-  const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:seeded,...fast});
-  expect(asked(fetcher)).toEqual([SECOND]);
-  expect(result.model).toBe(SECOND);
-  expect(result.flags).not.toContain("different_product");
+ describe("M1 D43: one judge lost never turns the agreed checks off in silence (the real two-route seed)", () => {
+  const judgeRow = (rank: number) => SEED_ROUTES.find(r => r.capability === "judge.render" && r.rank === rank)!;
+  const seed = (off: number[] = [], circuits = new CircuitBreakers({now: () => 0})) => createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state: r.capability === "judge.render" && off.includes(r.rank) ? "off" as const : "serving" as const})), circuits);
+  const openCircuit = (rank: number) => { const circuits = new CircuitBreakers({now: () => 0}); for (let i = 0; i < 5; i++) circuits.failure(judgeRow(rank).id); return circuits; };
+  const defect = reply({wrong_item:true, background_clean:40, evidence:{background_clean:"A green court in the top left corner."}});
+  const run = async (router: Router, fetcher: ReturnType<typeof byModel>) => {
+   const log = vi.fn();
+   return {log, result: await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router,...fast,log})};
+  };
+  const held = (log: ReturnType<typeof vi.fn>) => expect(log).toHaveBeenCalledWith("catalog_qa: no second judge could answer; the photo is held as unchecked", expect.objectContaining({severity:"WARNING", wrongItem:true, leftover:true}));
+  it("both healthy: both asked, both checks count", async () => {
+   const fetcher = byModel({[FIRST]: defect, [SECOND]: defect});
+   const {result, log} = await run(seed(), fetcher);
+   expect(asked(fetcher)).toEqual([FIRST, SECOND]);
+   expect(result).toMatchObject({verdict:"flag", wrongItem:{confirmed:true}, leftover:{confirmed:true}});
+   expect(result.flags).toEqual(expect.arrayContaining(["different_product","leftover_background"]));
+   expect(log).not.toHaveBeenCalledWith("catalog_qa: no second judge could answer; the photo is held as unchecked", expect.anything());
+  });
+  it.each<[string, () => Router, string]>([
+   ["the second judge's circuit open", () => seed([], openCircuit(2)), "first"],
+   ["the second judge switched off", () => seed([2]), "first"],
+   ["the first judge's circuit open", () => seed([], openCircuit(1)), "second"],
+   ["the first judge switched off", () => seed([1]), "second"],
+  ])("%s: the one judge left is asked once, the photo is unchecked with a WARNING, never a clean pass", async (_name, router, left) => {
+   const model = left === "first" ? FIRST : SECOND, fetcher = byModel({[model]: defect});
+   const {result, log} = await run(router(), fetcher);
+   expect(asked(fetcher)).toEqual([model]);
+   expect(result).toMatchObject({verdict:"flag", flags:["qa_unavailable"], model, wrongItem:{first:true, second:null, confirmed:false}, leftover:{first:true, second:null, confirmed:false, located:true}});
+   held(log);
+  });
+  it("the second judge failing live on this call stays unchecked too", async () => {
+   const fetcher = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === FIRST ? response(defect, .001, FIRST) : new Response("upstream error",{status:503}));
+   const {result, log} = await run(seed(), fetcher as never);
+   expect(result).toMatchObject({verdict:"flag", flags:["qa_unavailable"], model:FIRST});
+   held(log);
+  });
+  it("one judge left with nothing that needs agreement still gives a plain verdict", async () => {
+   const fetcher = byModel({[SECOND]: reply()});
+   const {result, log} = await run(seed([1]), fetcher);
+   expect(result).toMatchObject({verdict:"pass", flags:[], model:SECOND});
+   expect(log).not.toHaveBeenCalledWith("catalog_qa: no second judge could answer; the photo is held as unchecked", expect.anything());
+  });
+  it("without a table a one-model plan has no second judge to wait for, as in the eval job", async () => {
+   const fetcher = byModel({[FIRST]: defect});
+   const result = await judgeOutput(await input({model:FIRST,secondModel:undefined}),{apiKey:"fake",fetch:fetcher,...fast});
+   expect(result.flags).not.toContain("qa_unavailable");
+   expect(result.wrongItem).toMatchObject({confirmed:false});
+  });
  });
  it("M1 D43: a policy that still names the retired judge is never asked: the seeded chain judges instead", async () => {
   const fetcher = byModel({[FIRST]: reply()});
@@ -509,24 +538,18 @@ describe("M7-F2 the judge and classifier call through the route table", () => {
 
 describe("M7-F2 dead primary, caller stops and model-gone routes (review findings 1, 2 and 5)", () => {
  const [FIRST, SECOND] = SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => r.model) as [string, string];
- const serving = (circuits: CircuitBreakers) => createRouter(WITH_THIRD.map(r => ({...r, noTrainingTerms:"test: position on file", state:"serving" as const})), circuits);
+ const serving = (circuits: CircuitBreakers) => createRouter(SEED_ROUTES.map(r => ({...r, noTrainingTerms:"test: position on file", state:"serving" as const})), circuits);
  const fast = {sleep: async () => {}, random: () => .5, log: () => {}};
  const down = () => new Response("upstream error",{status:503});
- it("route 1 serving but returning 503 (circuit still closed): route 2 judges, route 3 gives the second opinion and a wrong item is confirmed", async () => {
+ it("route 1 serving but returning 503 (circuit still closed): route 2 judges, route 1 is not asked again, and a wrong item is held as unchecked, never passed", async () => {
   const circuits = new CircuitBreakers({now: () => 0});
   const fetcher = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === FIRST ? down() : response(reply({wrong_item:true}), .001, requestModel(init)));
   const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:serving(circuits),...fast});
-  expect(result).toMatchObject({flags:["different_product"],model:SECOND,wrongItem:{first:true,second:true,confirmed:true,secondModel:THIRD}});
-  // Route 1 was asked once with its back-off (4 attempts) and never again for the second opinion.
-  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).toEqual([FIRST, FIRST, FIRST, FIRST, SECOND, THIRD]);
-  expect(circuits.state(`judge.render:openrouter:${FIRST}`)).toBe("closed");
- });
- it("route 1 dead and route 3 refusing: no healthy second judge, so a wrong item is held as unchecked, never passed", async () => {
-  const refused = () => new Response(JSON.stringify(openRouterReply("")));
-  const fetcher = vi.fn<typeof fetch>(async (_url, init) => requestModel(init) === FIRST ? down() : requestModel(init) === THIRD ? refused() : response(reply({wrong_item:true}), .001, SECOND));
-  const result = await judgeOutput(await input({model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:serving(new CircuitBreakers()),...fast});
   expect(result).toMatchObject({verdict:"flag",flags:["qa_unavailable"],model:SECOND});
   expect(result.flags).not.toContain("different_product");
+  // Route 1 was asked once with its back-off (4 attempts) and never again for the second opinion.
+  expect(fetcher.mock.calls.map(([, init]) => requestModel(init))).toEqual([FIRST, FIRST, FIRST, FIRST, SECOND]);
+  expect(circuits.state(`judge.render:openrouter:${FIRST}`)).toBe("closed");
  });
  it("a timeout (no response) on route 1 moves to route 2", async () => {
   const fetcher = vi.fn<typeof fetch>(async (_url, init) => { if (requestModel(init) === FIRST) throw new DOMException("The operation was aborted due to timeout","TimeoutError"); return response(reply(), .001, SECOND); });
@@ -546,7 +569,7 @@ describe("M7-F2 dead primary, caller stops and model-gone routes (review finding
   const fetcher = vi.fn<typeof fetch>(async () => { stopped = capped; throw capped; });
   await expect(judgeOutput(await input({n:1,shotOne:undefined,model:FIRST,secondModel:SECOND}),{apiKey:"fake",fetch:fetcher,router:serving(circuits),assertAvailable:()=>{ if (stopped) throw stopped; },...fast})).rejects.toBe(capped);
   expect(fetcher).toHaveBeenCalledTimes(1);
-  for (const model of [FIRST, SECOND, THIRD]) expect(circuits.state(`judge.render:openrouter:${model}`)).toBe("closed");
+  for (const model of [FIRST, SECOND]) expect(circuits.state(`judge.render:openrouter:${model}`)).toBe("closed");
   stopped = undefined;
   await expect(classifyProductType(await image(),{apiKey:"fake",model:FIRST,secondModel:SECOND,fetch:fetcher,router:serving(circuits),assertAvailable:()=>{ if (stopped) throw stopped; },...fast})).rejects.toBe(capped);
   expect(fetcher).toHaveBeenCalledTimes(2);

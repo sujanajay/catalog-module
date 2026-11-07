@@ -25,7 +25,7 @@ gcloud() {
         nospace) echo "ERROR: gcloud failed to load: [Errno 28] No space left on device" >&2; return 1 ;;
       esac ;;
     "run jobs executions cancel "*) echo "cancelled" ;;
-    "logging read "*) printf '| model | size |\nprobe passed\n' ;;
+    "logging read "*) printf '%s\n' "${FAKE_JOB_LOG:-| model | size |}" "probe passed" ;;
     *)
       step=$(next read "${READ_SEQ:-ok}")
       case "$step" in

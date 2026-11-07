@@ -352,6 +352,7 @@ try {
     for (const [label, env, status, ran] of [
       ['deploy-exam-ok', {EXAM_EXIT: '0'}, 0, true],
       ['deploy-exam-fails', {EXAM_EXIT: '1'}, 1, true],
+      ['deploy-exam-could-not-run', {EXAM_EXIT: '3'}, 1, true],
       ['deploy-exam-preview', {CATALOG_PREVIEW: '1', EXAM_EXIT: '1'}, 0, false],
     ]) {
       fs.rmSync(path.join(repo, 'exam.txt'), {force: true});
@@ -360,6 +361,9 @@ try {
       assert.equal(fs.existsSync(path.join(repo, 'exam.txt')), ran, label + ' ran the exam');
       if (ran) assert.equal(fs.readFileSync(path.join(repo, 'exam.txt'), 'utf8').trim(), 'exam', label);
       assert.equal(/DEPLOY_OK/.test(r.stdout), status === 0, label + ' DEPLOY_OK only after a passed exam');
+      if (label === 'deploy-exam-fails') assert.match(r.stderr, /a judge failed its exam/, label);
+      if (label === 'deploy-exam-could-not-run') assert.match(r.stderr, /could not run.*not a judge result/, label);
+      if (status === 1) { assert.match(r.stderr, /nothing was rolled back/, label); assert.match(r.stderr, /catalog-output-evals\.sh exam/, label); }
       console.log('PASS ' + label);
       cases++;
     }

@@ -127,7 +127,8 @@ gcloud_job_run() {
   fi
   while :; do
     status=0
-    execution=$(gcloud run jobs execute "$job" --region="$region" --async --format='value(metadata.name)' 2>"$err") || status=$?
+    # GCLOUD_JOB_EXECUTE_FLAGS (an array, optional): flags for this one execution, such as its --args and one env var.
+    execution=$(gcloud run jobs execute "$job" --region="$region" --async --format='value(metadata.name)' ${GCLOUD_JOB_EXECUTE_FLAGS[@]+"${GCLOUD_JOB_EXECUTE_FLAGS[@]}"} 2>"$err") || status=$?
     execution=${execution//$'\r'/}; execution=${execution//$'\n'/}
     [ "$status" != 0 ] || break
     if [ "$attempt" -lt "$GCLOUD_RETRY_ATTEMPTS" ] && grep -qE "$GCLOUD_UNSENT_RE" "$err"; then

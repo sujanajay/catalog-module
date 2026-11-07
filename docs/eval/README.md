@@ -46,8 +46,8 @@ human edge flags, judge edge disagreements and ms per image on CPU and L4. A gat
 outputs, pinned by sha256 in `packages/core/test-fixtures/catalog/evals/judge-exam-set.json`, the images under
 `catalog-test/evals/judge-exam/v1/`. Each judge a verdict can come from sits it: the first with its second opinion, and the fallback
 with the first switched off. It writes `report.json` and `verdict.txt` under `catalog-test/evals/<run>/judge-exam/` and exits 1 when a
-bar in `JUDGE_EXAM_BARS` fails. `proof` runs it first, and `infra/deploy.sh` runs it after a production deploy, where a failure stops
-the release. It costs about USD 1.1 and takes about 10 minutes. It
+bar in `JUDGE_EXAM_BARS` fails. `proof` runs it first, and `infra/deploy.sh` runs it after a production deploy, where a failure fails
+the deploy report (no DEPLOY_OK). It does not roll back or block new batches by itself. It costs about USD 1.1 and takes about 10 minutes. It
 only reads the pinned images and writes under `catalog-test/`, but it shares the model provider's rate limit with a running batch.
 
 A rule for every proof, eval and exit report: name the judge model that produced each result. "The judge passed it" without the model

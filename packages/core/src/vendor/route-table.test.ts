@@ -238,6 +238,12 @@ describe("M1 D43: the judge chain", () => {
     expect(judgeRows(SEED_ROUTES)).toEqual([JUDGES.first, JUDGES.second]);
     expect(SEED_ROUTES.filter(r => r.capability === "vision.read").map(r => r.model)).toEqual([JUDGES.retired, JUDGES.first, JUDGES.qwen]);
   });
+  it("Qwen, retired on evidence, cannot come back as a judge by a typed switch; the classifier still reads with it", () => {
+    const row = {...SEED_ROUTES.find(r => r.capability === "judge.render")!, id: routeId("judge.render", "openrouter", JUDGES.qwen), model: JUDGES.qwen, rank: 1};
+    expect(planRoutes(createRouter([row]), "judge.render", [JUDGES.qwen])).toEqual([]);
+    expect(planRoutes(undefined, "judge.render", [JUDGES.qwen])).toEqual([]);
+    expect(planRoutes(undefined, "vision.read", [JUDGES.qwen]).map(r => r.model)).toEqual([JUDGES.qwen]);
+  });
   it("a model measured to pass every defect can never judge: not from a serving row, not named by a policy, not without a table", () => {
     const row = {...SEED_ROUTES.find(r => r.capability === "judge.render")!, id: routeId("judge.render", "openrouter", JUDGES.retired), model: JUDGES.retired, rank: 1};
     const router = createRouter([row, ...SEED_ROUTES.filter(r => r.capability === "judge.render").map(r => ({...r, rank: r.rank + 1}))]);

@@ -73,10 +73,11 @@ export const routeId = (capability: Capability, adapter: RouteAdapter, model: st
 
 /**
  * M1 D43: models measured to pass what a judge must catch, so they can never judge again, whatever a route row, a policy
- * row, a pinned batch or an environment setting says: google/gemini-2.5-flash-lite caught 0 of 14 known defects. The
- * classifier is not a judge and keeps using it.
+ * row, a pinned batch or an environment setting says: google/gemini-2.5-flash-lite caught 0 of 14 known defects, and
+ * qwen/qwen3-vl-30b-a3b-instruct caught 1 of 18 alone and lost catches as a second opinion. The classifier is not a judge
+ * and keeps using both.
  */
-export const RETIRED_JUDGE_MODELS: readonly string[] = ["google/gemini-2.5-flash-lite"];
+export const RETIRED_JUDGE_MODELS: readonly string[] = ["google/gemini-2.5-flash-lite", "qwen/qwen3-vl-30b-a3b-instruct"];
 export const isRetiredJudge = (capability: Capability, model: string): boolean => capability === "judge.render" && RETIRED_JUDGE_MODELS.includes(model);
 
 /**

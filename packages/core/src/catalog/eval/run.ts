@@ -23,7 +23,7 @@ export const MATTE_CANDIDATES: readonly MatteCandidate[] = [
 /** Section 4.9 default for CATALOG_QA_CANDIDATES (the full judge bake-off). */
 export const DEFAULT_QA_CANDIDATES = [
   "google/gemini-3.8-flash", "google/gemini-2.5-flash", "google/gemini-3.5-flash-lite",
-  "qwen/qwen3-vl-30b-a3b-instruct", "qwen/qwen3-vl-8b-instruct", "anthropic/claude-haiku-5.5",
+  "qwen/qwen3-vl-8b-instruct", "anthropic/claude-haiku-5.5",
 ] as const;
 export function qaCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
   const list = env.CATALOG_QA_CANDIDATES?.split(",").map(s => s.trim()).filter(Boolean);

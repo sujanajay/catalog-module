@@ -31,3 +31,26 @@ describe("the pad probe reads the band's end beside the product (M1 D43, Z46B n5
     expect(padBands(rgb, alpha, W, H).bottom.photoEdge).toBe(true);
   });
 });
+
+describe("a garment cut at the edge of a narrow photo inside side pads stays cut (M1 D43, review P2-1)", () => {
+  /** White pads around a grey photo; the garment reaches the photo's bottom edge, cut flat there. */
+  function padded(w: number, h: number, photoX: [number, number], garment: [number, number], background: number) {
+    const rgb = Buffer.alloc(w * h * 3, 255), alpha = Buffer.alloc(w * h), photoBottom = Math.round(h * 0.9), photoTop = Math.round(h * 0.1), garmentTop = Math.round(h * 0.2);
+    for (let y = photoTop; y < photoBottom; y++) for (let x = photoX[0]; x < photoX[1]; x++) {
+      const i = y * w + x, onGarment = x >= garment[0] && x < garment[1] && y >= garmentTop;
+      rgb.fill(onGarment ? 60 : background, i * 3, i * 3 + 3);
+      if (onGarment) alpha[i] = 255;
+    }
+    return { rgb, alpha, w, h };
+  }
+  const cases: [string, ReturnType<typeof padded>, boolean][] = [
+    ["A: 1000x1000, photo x 180-820, garment 230-770", padded(1000, 1000, [180, 820], [230, 770], 200), true],
+    ["E: 1000x1000, side pads 12%, garment 170-830", padded(1000, 1000, [120, 880], [170, 830], 200), true],
+    ["F: 1000x1250, side pads 8%, garment 130-870", padded(1000, 1250, [80, 920], [130, 870], 190), true],
+    ["B: as A, garment 300-700: the photo shows beside it", padded(1000, 1000, [180, 820], [300, 700], 200), true],
+    ["D: a full-width photo with no side pads", padded(1000, 1000, [0, 1000], [230, 770], 200), true],
+  ];
+  it.each(cases)("%s", (_name, { rgb, alpha, w, h }, cut) => {
+    expect(shotGeometry(alpha, w, h, { rgb })!.cut.bottom).toBe(cut);
+  });
+});
