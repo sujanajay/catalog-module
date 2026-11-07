@@ -237,7 +237,7 @@ export const DETAIL_SHOT_BBOX_FRACTION = 0.85;
 /** The one size floor on every channel: a source under this long side is flagged `small_source` and held for a person. */
 export const MIN_SOURCE_LONG_SIDE_PX = 500;
 /** Bumped on any rule change; part of render_key (06). */
-export const CHANNEL_RULES_VERSION = "10";
+export const CHANNEL_RULES_VERSION = "11";
 
 /** The start of the render note naming a cut side that does not sit flush on a channel (the sheet's cut note leaves such photos out). */
 export const CUT_BAND_NOTE_START = "The original photo is cut at the ";

@@ -43,6 +43,6 @@ it("cites the worst photo and its main problem first, with at most three problem
  expect(item!.photos.map(photo=>photo.n)).toEqual([4,2]);
  expect(item!.problemLine).toBe("Photo 4 lost part of the product in the cut-out; photo 2 carries text or a watermark.");
  const worst=item!.photos[0]!;
- expect(worst.why).toBe("Part of the product went missing when the background was removed. Some of the original background is still visible around the product. The edge of the product looks rough or shows a halo, often white on white. The original photo has no shadow that could be kept, so the product sits on the plain background without one.");
+ expect(worst.why).toBe("Part of the product went missing when the background was removed. Some of the original background is still visible around the product. The edge of the product looks rough or shows a halo, often white on white. No shadow from the original photo could be kept, so the product sits on the plain background without one.");
  expect(worst.whatToDo).toContain("Remove this photo");
 });

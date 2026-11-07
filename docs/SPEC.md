@@ -521,7 +521,13 @@ and `SHADOW_SYNTH_INTENSITY_WHITE` 0.15 on white; parameters named so presets ca
 the default path; Depth Anything is a spec 08 experiment. Compliance's `background` check still enforces
 the border band, so a shadow reaching a margin fails by code. Every shadow, kept or made, eases to zero
 before required margins, the border band and the source frame, and a kept shadow fades out past its
-measuring band; no shadow ever ends on a straight cut.
+measuring band; no shadow ever ends on a straight cut. Every product type uses the same band around the
+contact line. An apparel shadow is also read against the floor's own tone beside the band, so a toned studio
+floor is not kept as a shadow. A kept shadow that still leaves floor tone (1.5 to 25 levels under the canvas colour, below the product's middle,
+beside its columns plus 3% of its longer side) on an area of at least `FLOOR_PATCH_MAX_SHARE` (1%) of the square of
+the product's longer side, so close across channels (real photos: median 1.1 times, worst 1.3 times), is left out by the render and the synthesis rule then decides, as
+if the photo had none: apparel stays clean (`no_shadow_source`), a shoe gets a synthesised shadow; no hold, no person
+(2026-11-07, faint floor patches no judge sees; `CHANNEL_RULES_VERSION` 11).
 
 Bake-off (spec 08): every candidate runs on the golden set for every brand and category; outputs are
 scored by the compliance checks, by each QA judge and by human labels. The result is the `model_policy`

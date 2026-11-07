@@ -492,7 +492,7 @@ describe("Styli judged on the upscaled size", () => {
     const seen = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), null)!;
     expect(seen.x + seen.w).toBeGreaterThan(product.x + product.w + 100);
     expect(Math.abs((2 * seen.x + seen.w) / 2 - info.width / 2)).toBeGreaterThan(50);
-    expect(data[((floor - 100) * info.width + product.x + product.w + 50) * 3]!).toBeLessThan(hexColor(CHANNELS.styli.background)[0] - BG_TOLERANCE);
+    expect(data[((floor - 100) * info.width + product.x + product.w + 30) * 3]!).toBeLessThan(hexColor(CHANNELS.styli.background)[0] - BG_TOLERANCE);
     // ... and the product itself is on the guide: its box by the render's mask is centred within a pixel, bottom on the guide.
     const box = anchorBounds(data, info.width, info.height, hexColor(CHANNELS.styli.background), output.foregroundMask!)!;
     expect(Math.abs((2 * box.x + box.w) / 2 - info.width / 2)).toBeLessThanOrEqual(1);

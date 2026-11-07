@@ -306,7 +306,7 @@ const REASONS: Partial<Record<OutputFlag, (ctx?: Ctx) => string>> = {
       : `The original photo is smaller than ${channelName(ctx, "this marketplace")} wants, so this one may look soft.`) +
     " It will upload, but ask the brand for a larger photo if you can.",
   no_shadow_source: () =>
-    "The original photo has no shadow that could be kept, so the product sits on the plain background without one. Nothing to do; replace the photo if you want a shadow.",
+    "No shadow from the original photo could be kept, so the product sits on the plain background without one. Nothing to do; replace the photo if you want a shadow.",
   passthrough: () =>
     "The original already met this marketplace's rules, so it was only saved again in the right format. Nothing to do.",
   alpha_source: () =>
