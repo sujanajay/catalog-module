@@ -102,7 +102,7 @@ function world(opts: { photoScores?: (n: number) => Record<string, number>; char
 }
 
 let count = 0;
-async function seed(w: ReturnType<typeof world>, productType: ProductType, shots: Shot[], channels: ChannelId[] = ["noon"]) {
+async function seed(w: ReturnType<typeof world>, productType: ProductType, shots: Shot[], channels: ChannelId[] = ["noon"], options: { stages?: number } = {}) {
   const name = `auto-${++count}`;
   const [batch] = await db.insert(catalogBatches).values({ brandSlug: "anta", brandName: "Anta", name, isTest: true, createdBy: "test@opptra.com", status: "matting", productType, channels, counts: { ...EMPTY_BATCH_COUNTS, products: 1, sources: shots.length, outputs: shots.length * channels.length } }).returning();
   const [product] = await db.insert(catalogProducts).values({ brandSlug: "anta", isTest: true, productKey: name, pathKey: name, identifier: name, lockBatchId: batch!.id }).returning();
@@ -113,10 +113,10 @@ async function seed(w: ReturnType<typeof world>, productType: ProductType, shots
     await db.insert(catalogSourceImages).values({ batchId: batch!.id, productId: product!.id, n: i + 1, sha256: `${name}-${i}`, originalName: `${name}_${i + 1}.png`, rawUri, mime: "image/png", width: W, height: H });
   }
   const [chunk] = await db.insert(catalogChunks).values({ batchId: batch!.id, index: 0, stage: "matte", productIds: [product!.id] }).returning();
-  for (let stage = 0; stage < 3; stage++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,chunk!.id))).httpStatus).toBe(200);
+  for (let stage = 0; stage < (options.stages ?? 3); stage++) expect((await handleChunkTask(w.deps,await currentChunkTask(db,chunk!.id))).httpStatus).toBe(200);
   const outputs = await db.select().from(catalogOutputs).where(eq(catalogOutputs.batchId, batch!.id)).orderBy(catalogOutputs.n, catalogOutputs.channel);
   const held = await listAttention(db, batch!.id, async uri => uri);
-  return { batch: batch!, product: product!, outputs, held };
+  return { batch: batch!, product: product!, outputs, held, chunk: chunk! };
 }
 const steps = (actions: AutoAction[]) => actions.map(a => `${a.step}:${a.result}`);
 const own = ["halo", "leftover_background", "failed_compliance"];
@@ -401,6 +401,30 @@ describe("cut-out integrity guard in the matte stage (matte-guard.ts)", () => {
     expect(s.outputs.find(o => o.n === 1)!.flags).toContain("qa_sampled_out");
     expect(vi.mocked(w.deps.judgeOutput).mock.calls.every(([input]) => input.n === 2)).toBe(true);
   }, 180_000);
+
+  it("M1 D45: the detector's flag is on the source once the matte stage ends, so the next stage's delivery and a redelivery read it from the database", async () => {
+    const w = world(), s = await seed(w, "apparel_flat", [sizeChart], ["noon"], { stages: 1 });
+    const flagsOf = async () => (await db.select().from(catalogSourceImages).where(eq(catalogSourceImages.productId, s.product.id)))[0]!.flags;
+    expect(await flagsOf()).toContain("text_suspected");
+    for (let stage = 0; stage < 2; stage++) expect((await handleChunkTask(w.deps, await currentChunkTask(db, s.chunk.id))).httpStatus).toBe(200);
+    expect((await flagsOf()).filter(flag => flag === "text_suspected")).toHaveLength(1);
+    const [output] = await db.select().from(catalogOutputs).where(eq(catalogOutputs.productId, s.product.id));
+    expect(output!.flags).toContain("text_suspected");
+    expect(vi.mocked(w.deps.judgeOutput).mock.calls[0]![0].chartSuspected).toBe(true);
+  }, 180_000);
+
+  it("M1 D45: the measured cut sides and the chart hint reach the repair's re-judge too", async () => {
+    const w = world({ photoScores: () => ({ edge_quality: 30 }) });
+    await seed(w, "apparel_flat", [legs(true)], ["noon"]);
+    const calls = vi.mocked(w.deps.judgeOutput).mock.calls;
+    expect(calls.length).toBeGreaterThan(1);
+    for (const [input] of calls) expect(input.sourceCut).toContain("left");
+    const c = world({ photoScores: () => ({ edge_quality: 30 }) });
+    await seed(c, "apparel_flat", [sizeChart], ["noon"]);
+    const again = vi.mocked(c.deps.judgeOutput).mock.calls;
+    expect(again.length).toBeGreaterThan(1);
+    for (const [input] of again) expect(input.chartSuspected).toBe(true);
+  }, 240_000);
 
   it("M1 D45: the measured cut sides reach the judge", async () => {
     const w = world(), s = await seed(w, "apparel_flat", [legs(true)], ["noon"]);
