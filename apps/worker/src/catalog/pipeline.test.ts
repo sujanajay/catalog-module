@@ -166,6 +166,19 @@ it("R1 exit 2 finding 1: a product grouping left out is on the digest, the excep
  const row=(await db.execute(sql`SELECT success,cause,products,products_with_links FROM catalog_batch_outcomes WHERE batch_id=${s.batch.id}`) as unknown as {rows:Record<string,unknown>[]}).rows;
  expect(row).toMatchObject([{success:false,cause:"input_left_out",products:2,products_with_links:1}]);
 },60_000);
+it("M1 D45: different photos at one shot number reach the digest, the exceptions sheet and report.json through finalize",async()=>{
+ const w=world(),s=await seed(w,"same-shot-kept");
+ const ledger={products:[{identifier:"same-shot-kept",items:[]}],sameShots:[{identifier:"same-shot-kept",shot:2,files:["X_2.jpg","X_v2.jpg"]}]};
+ await w.upload(`catalog-test/anta/${s.batch.id}/derived/_ingest/preview-state.json`,Buffer.from(JSON.stringify(ledger)),"application/json");
+ await run(w,s);
+ expect((await handleFinalizeTask(w.deps,{batchId:s.batch.id})).outcome).toBe("done");
+ const [batch]=await db.select().from(catalogBatches).where(eq(catalogBatches.id,s.batch.id));
+ expect(batch!.digest).toMatchObject({sameShotsKept:1});
+ const csv=(await w.deps.storage.downloadBuffer(batch!.digest!.page!.exceptionsCsv!)).buf.toString();
+ expect(csv).toContain("Different photos claim shot 2 of same-shot-kept");
+ const report=JSON.parse((await w.deps.storage.downloadBuffer(batch!.reportUri!)).buf.toString());
+ expect(report.sameShots).toEqual([{identifier:"same-shot-kept",shot:2,files:["X_2.jpg","X_v2.jpg"]}]);
+},60_000);
 it("R1 exit 2 review P1-1: a failed upload is never all done, on the digest, the exceptions sheet, report.json, the banner and the outcome",async()=>{
  const w=world(),s=await seed(w,"failed-upload");
  await db.insert(catalogUploads).values({batchId:s.batch.id,kind:"zip",name:"a.zip",status:"failed",error:"The zip a.zip was not found in storage."});

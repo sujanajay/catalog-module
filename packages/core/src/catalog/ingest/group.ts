@@ -270,8 +270,6 @@ export function originalOf(item: SourceItem): SourceItem {
 
 interface Entry { item: SourceItem; id: string; raw: number | null; link: boolean; mode: IdentifierMode; notes?: string[]; shown?: number | null }
 
-const byNameThenUpload = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(a.item.uploadId, b.item.uploadId);
-
 /** The name of an item without its folders and extension: `X.jpg` and `X.jpeg` have one stem. */
 /**
  * One file per photo, in every grouping mode: all entries of a product with the same bytes are one file, whatever their
@@ -381,6 +379,8 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
   const rejected: GroupingResult["rejected"] = [];
   const sameFiles: SameFile[] = [];
   const sameShots: SameShot[] = [];
+  // Two uploads can hold one path with different bytes. A re-send gets new upload ids, so the bytes break that tie and each photo keeps its shot (M1 D45).
+  const byNameThenBytes = (a: Entry, b: Entry) => byText(a.item.originalName, b.item.originalName) || byText(sha256Of?.(a.item) ?? "", sha256Of?.(b.item) ?? "") || byText(a.item.uploadId, b.item.uploadId);
   let entries: Entry[] = [];
 
   for (const item of items) {
@@ -412,7 +412,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
 
   const products = new Map<string, SourceItem[]>();
   for (const id of [...byId.keys()].sort(byText)) {
-    let list = pastesInOrder(byId.get(id)!.sort(byNameThenUpload));
+    let list = pastesInOrder(byId.get(id)!.sort(byNameThenBytes));
     const uploads = list.filter((e) => !e.link);
     const links = list.filter((e) => e.link);
     // Precedence only decides for a product that both kinds have; a product only one kind has keeps it.
@@ -472,7 +472,7 @@ export function groupItems(items: SourceItem[], options: BatchOptions, unreadabl
     const notesOf = (e: Entry) => [...(e.notes ?? []), ...(clashNotes.has(e.item) ? [clashNotes.get(e.item)!] : [])];
 
     let numbered = list.filter((e) => e.raw !== null && !moved.has(e.item));
-    const unnumbered = list.filter((e) => e.raw === null).sort(byNameThenUpload);
+    const unnumbered = list.filter((e) => e.raw === null).sort(byNameThenBytes);
     let placedLast = unnumbered;
     if (!numbered.length) {
       if (list.some((e) => e.mode === "folder") || list.length === 1) {

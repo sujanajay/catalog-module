@@ -69,11 +69,12 @@ it("carries what the uploads lost before grouping: under 1 KB files, sheet rows 
 });
 it("an older spelling's photo is out unless the product carrying on holds the same bytes, and a copy merged in a product later left out is not reported (P2-C, P3-1)",async()=>{
   const reason="X_Black_3.jpg is the same product as X-Black. Only the newest photos are used.";
-  const ledger={products:[{identifier:"X-Black",items:[{rawUri:null,sha256:"kept",item:{originalName:"X-Black_1.jpg",origin:"image",bytes:{kind:"gcs"}}}]}],sameFiles:[{identifier:"Gone",n:1,kept:"a",dropped:["b"]},{identifier:"X-Black",n:1,kept:"c",dropped:["d"]}],rejected:[
+  const ledger={products:[{identifier:"X-Black",items:[{rawUri:null,sha256:"kept",item:{originalName:"X-Black_1.jpg",origin:"image",bytes:{kind:"gcs"}}}]}],sameFiles:[{identifier:"Gone",n:1,kept:"a",dropped:["b"]},{identifier:"X-Black",n:1,kept:"c",dropped:["d"]}],sameShots:[{identifier:"Gone",shot:1,files:["e","f"]},{identifier:"X-Black",shot:2,files:["g","h"]}],rejected:[
     {item:{sha256:"kept",item:{originalName:"X_Black_1.jpg",identifier:"X_Black"}},reason},
     {item:{sha256:"only-here",item:{originalName:"X_Black_3.jpg",identifier:"X_Black"}},reason},
   ]};
   const result=await readIngestReport({getBucketName:()=>"assets",headObject:vi.fn(async()=>({exists:true,size:1,contentType:"application/json",generation:"1",crc32c:"x"})),downloadBuffer:vi.fn(async()=>({buf:Buffer.from(JSON.stringify(ledger)),mime:"application/json"}))} as never,"p");
   expect(result!.unsupportedFiles).toEqual([expect.objectContaining({name:"X_Black_1.jpg",copyOfKept:true}),expect.not.objectContaining({copyOfKept:true})]);
   expect(result!.sameFiles!.map(s=>s.identifier)).toEqual(["X-Black"]);
+  expect(result!.sameShots!.map(s=>s.identifier)).toEqual(["X-Black"]);
 });

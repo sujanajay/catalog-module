@@ -159,6 +159,17 @@ describe("groupItems", () => {
     for (const seed of [1, 7, 42]) expect(shape(groupItems(shuffle(items, seed), opts()))).toEqual(shape(g));
   });
 
+  it("M1 D45: one path with different bytes in two uploads keeps its shots on a re-send, whatever the new upload ids", () => {
+    const send = (first: string, second: string) => {
+      const a = file("X/X_1.jpg", first), b = file("X/X_1.jpg", second);
+      return groupItems([a, b], opts(), undefined, (i) => (i === a ? "aaa" : "bbb"));
+    };
+    const shaOrder = (g: ReturnType<typeof groupItems>) => g.products.get("X")!.map((i) => [i.n, i.uploadId]);
+    expect(shaOrder(send("u1", "u2"))).toEqual([[1, "u1"], [2, "u2"]]);
+    // The photo with bytes "aaa" now has the later upload id. It still comes first.
+    expect(shaOrder(send("u9", "u3"))).toEqual([[1, "u9"], [2, "u3"]]);
+  });
+
   it("M1 D45: the 729A3 shape: a collar close-up and two different flats all stay", () => {
     const g = groupItems([file("729A3.jpg"), file("729A3_2.jpg"), file("729A3_v2.jpg")], opts(), undefined, (i) => i.originalName);
     expect(g.rejected).toEqual([]);
