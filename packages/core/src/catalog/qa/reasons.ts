@@ -67,7 +67,7 @@ export function flagDetails(flag: OutputFlag | "failed", ctx: ReasonContext = {}
     qa_unavailable:["The quality check could not read this image.",'Please look at it yourself. "Use as is" keeps it.'],
     qa_cap:["Quality check paused: the spending limit was reached.","Look at this image yourself, or raise the limit and start a new batch."],
     type_unknown:["We could not tell what kind of product this is, so the general treatment was used.","If the images look wrong, start a new batch with the product type chosen by hand."],
-    no_shadow_source:["The original photo has no shadow that could be kept, so the product sits on the plain background without one.","Nothing to do; replace the photo if you want a shadow."],
+    no_shadow_source:["No shadow from the original photo could be kept, so the product sits on the plain background without one.","Nothing to do; replace the photo if you want a shadow."],
     shadow_synthesised:["A shadow was added because the original photo had no shadow that could be kept.","Nothing to do."],
     cut_in_source:["The original photo is already cut at the frame edge, so that edge sits flush with the edge of the image.","Nothing to do; ask the brand for an uncut photo if you want one."],
     passthrough:["The original already met this marketplace's rules, so it was only saved again in the right format.","Nothing to do."],

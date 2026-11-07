@@ -524,7 +524,7 @@ time, before anything is rendered.
   (`matte-agreement.test.ts` pins this). Only the judge stands behind it, and it scored one such defect 95 before (S1), so whether it catches this class is what the proof job's backstop row measures. Its render leaves the source shadow out
   (`AGREED_VARIANT`), because floor inside such a cut-out reads as shadow (ZB58D59DC3872166C12DCZ shot 3). The judge always
   looks at an agreed result, whatever the sample rate, and its repair ladder still applies; an agreed result the judge could not see
-  (judge down or capped) is never delivered: left out when the channel keeps two good photos, else held. The report counts agreed cut-outs (`qa.agreedCutOuts`). A pass-through on a photo that does not fill the frame carries a note (`plainPassthrough`).
+  (judge down or capped) is never delivered: left out when the channel keeps two good photos, else held. The report counts agreed cut-outs (`qa.agreedCutOuts`) and kept shadows dropped as floor patches (`qa.floorPatchesDropped`). A pass-through on a photo that does not fill the frame carries a note (`plainPassthrough`).
 - The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
   auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
 - No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):
