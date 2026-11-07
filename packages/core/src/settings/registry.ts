@@ -87,6 +87,9 @@ const AUTO_DECIDE_CHOICES = [
 
 /** The owner allow-list key (integration decision D2): Sujan's account until roles arrive with M12-F4. */
 export const OWNERS_KEY = "people.owners";
+/** M1 D45: whether a batch may take down an older image when it rejects the same photo. */
+export const REJECTED_PHOTO_TAKE_DOWN_KEY = "intake.rejected_photo_take_down";
+
 /** The default owner: the account the migrate job seeds as the first admin (apps/worker/src/migrate.ts). */
 export const DEFAULT_OWNERS: readonly string[] = ["sujan@opptra.com"];
 /** The upscaler threshold, moved from the UPSCALE_MIN_SCALE environment variable (integration decision D10). */
@@ -157,6 +160,12 @@ export const SETTING_DEFS: readonly SettingDef[] = [
     key: "intake.outage_deadline_hours", area: "rules", module: "M1", label: "Hours to wait for the enlargement service",
     help: "When the enlargement service is down, photos wait this long, then the batch sends plain images and improves them later. 0 means wait without limit.",
     type: { kind: "whole", min: 0, max: 72, unit: "hours" }, default: 6, scopes: [], risk: "normal", inUse: true, schemaVersion: 1,
+  },
+  // M1 D45: read per batch from its snapshot at publish. Off until the live exam and the replay have passed; only an owner turns it on.
+  {
+    key: REJECTED_PHOTO_TAKE_DOWN_KEY, area: "rules", module: "M1", label: "Take down an older image when a check fails its photo",
+    help: "When a batch finds a mark on a photo, or two checks find a different item, the older image of that same photo comes down. Off means it stays until someone looks.",
+    type: { kind: "switch" }, default: false, scopes: [], risk: "needs_owner", inUse: true, schemaVersion: 1,
   },
   // M0-F1 and M0-F3: style grouping and live photo matching (decision D5 of the M0 doc: one match distance).
   {
