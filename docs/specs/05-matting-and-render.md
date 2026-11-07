@@ -525,8 +525,18 @@ time, before anything is rendered.
   (`AGREED_VARIANT`), because floor inside such a cut-out reads as shadow (ZB58D59DC3872166C12DCZ shot 3). The judge always
   looks at an agreed result, whatever the sample rate, and its repair ladder still applies; an agreed result the judge could not see
   (judge down or capped) is never delivered: left out when the channel keeps two good photos, else held. The report counts agreed cut-outs (`qa.agreedCutOuts`) and kept shadows dropped as floor patches (`qa.floorPatchesDropped`). A pass-through on a photo that does not fill the frame carries a note (`plainPassthrough`).
+- A kept background chunk comes out (`withoutKeptBackground`, `KEPT_BACKGROUND_REMOVAL_*`). After agreement has failed, a cut-out the guard rejected only for a kept chunk
+  has the chunk subtracted, is re-checked once and recorded `matte_chunk_removed`; it is always judged and never delivered unseen, as an agreed cut-out. In the repair ladder the judge's
+  `leftover_background` takes a chunk at any depth out first (`matte_patch_removed`, re-judged, never on the view `detail`). Neither runs when the removal would eat the product: more
+  than 75% of what the matte keeps (good removals on the stored mattes reach 73.2%), or the rest in more than 2 pieces (good removals leave 1 or 2; the white top Z40E29CD878FAA726501DZ shot 1,
+  15.5% removed, leaves 6, and 529E410 9). An enclosed hole that touches nothing the matte dropped is not found.
 - The judge's `product_removed` (07 4.0a) names the same failure after the render: its ladder (07
-  auto-resolve) adds the same pass-through step after the second matte, for that trigger only.
+  auto-resolve) adds the same pass-through step after the second matte, for that trigger only, unless the whole-frame route below is open or taken.
+- The whole-frame route (`matte_whole_frame`, `wholeFrameRoute`), for a close-up whose cut-outs removed the product: only on `product_removed`, only when the judge's view is `detail`, after the
+  second cut-out, and not with over 3% skin, a flat side in another colour, or over 10% near-white on a side. Every pixel is kept and nothing is trimmed ("we never crop" holds; `TRIM_UNCUT_SIDES` stays off). It goes only to a
+  channel whose canvas the untrimmed frame fills within the flush tolerance of 1 px (`wholeFrameFills`; 3:4 raws fill Styli, Sixth Street and Vogacloset, no landscape frame fills any canvas). Every other channel keeps the photo held with the sentence
+  `wholeFrameBandSentence`, and a render that would float fails `whole_frame_band` on any path. The judge looks at each channel's own image, and any problem flag on any of them, a mark the cut-out had hidden or a collage included,
+  fails the step for the photo: nothing is written, and no pass-through follows.
 - No synthesised contact shadow for a product held in a hand (`heldInHand`, kept or dropped hand):
   it does not rest on a floor.
 - Size charts and text-only photos (07 4.0a, flag `chart_image`) are not cut out: a photo the
@@ -554,6 +564,7 @@ export const BG_TOLERANCE: number;   // builder constant derived by test, see be
 
 Checks (each failure is a short code plus a sentence):
 - `magic`: bytes start `FF D8 FF`.
+- `whole_frame_band` (set by the render, no image made): a whole-frame matte that would not fill this canvas.
 - `format`: `metadata().format === "jpeg"`, `chromaSubsampling === "4:4:4"`, `space === "srgb"`,
   `hasProfile === true`, `hasAlpha === false`.
 - `dims`: width and height equal `plan.w`, `plan.h`; for adaptive channels also `min <= C <= target`
