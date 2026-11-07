@@ -94,5 +94,5 @@ export function autoDecideNote(action: AutoDecideAction, why: string | null, oth
   if (action === "hold") return `${lead}${othersDelivered ? HOLD_SENTENCE : HOLD_SENTENCE_ALONE}`;
   return action === "deliver"
     ? `${lead}${PROVISIONAL_SENTENCE}`
-    : `${lead}Left out automatically; this photo gets no link here${othersDelivered ? " and the product's other photos are delivered" : ""}.`;
+    : `${lead}Left out automatically; this photo gets no new link here${othersDelivered ? " and the product's other photos are delivered" : ""}.`;
 }

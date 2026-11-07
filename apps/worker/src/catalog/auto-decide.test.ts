@@ -261,7 +261,7 @@ it("a dropped photo of a product with no other photo does not say the product's 
   await stages(w, s);
   const [only] = await outputsOf(s.batch.id);
   expect(autoDecideRecordOf(only!.compliance)).toMatchObject({ action: "drop" });
-  expect(only!.reason).toContain("Left out automatically; this photo gets no link here.");
+  expect(only!.reason).toContain("Left out automatically; this photo gets no new link here.");
   expect(only!.reason).not.toContain("other photos");
 }, 120_000);
 
