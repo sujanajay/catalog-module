@@ -616,5 +616,9 @@ describe("M1 D45: a straight cut in the source", () => {
     expect(CATALOG_QA_TEMPLATE).toContain("flat against the edge of the image.");
     expect(CATALOG_QA_TEMPLATE).not.toContain("plain background beyond it");
     expect(CATALOG_QA_TEMPLATE).toContain("it is a real loss");
+    expect(CATALOG_QA_TEMPLATE).toContain("A straight edge floating on a plain background is a defect:");
+    expect(CATALOG_QA_TEMPLATE).toContain("score product_intact below 60, even if image 1 shows no more of the product there.");
+    // It comes after the sentence that says nothing was lost, so that sentence cannot excuse a float.
+    expect(CATALOG_QA_TEMPLATE.indexOf("A straight edge floating")).toBeGreaterThan(CATALOG_QA_TEMPLATE.indexOf("nothing was lost"));
   });
 });

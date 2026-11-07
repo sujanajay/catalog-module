@@ -46,7 +46,7 @@ export interface TriageOutput {
   decision: string | null; stagingUri: string | null;
   /** The row's `compliance` (its `auto_actions` say whether the matte stage held it for a busy background). */
   compliance?: unknown;
-  /** The judge's record; none means no judge saw this row. */
+  /** The row's `qa_scores`: empty until the judge's answer, or its failure, is written. */
   qaScores?: unknown;
 }
 export interface TriageDecision { action: AutoAction; cause?: HoldCause; flags: OutputFlag[] }
