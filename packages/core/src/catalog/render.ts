@@ -78,6 +78,8 @@ export const CUT_EDGE_OPAQUE_ALPHA = 250;
 export const CUT_EDGE_PAD_STDEV = 6;
 /** ... whose mean colour stays within this distance per channel of the outermost line (any colour, not only white). */
 export const CUT_EDGE_PAD_TOLERANCE = 10;
+/** A band deeper than CUT_EDGE_PAD_MAX_FRACTION is the product itself when the matte is opaque on this share of its outermost line, across the product's extent. */
+export const CUT_EDGE_PRODUCT_LINE_SHARE = 0.9;
 /** How far beside the product, as a share of the frame line, the pad probe stays off its contact shadow. */
 export const CUT_EDGE_PROBE_MARGIN_FRACTION = 0.05;
 /** A pad the colour of the photo's own background is told apart only as the thin border: this fraction of the frame. */
@@ -161,7 +163,9 @@ function lineIndex(side: Side, d: number, i: number, width: number, height: numb
  * colour of the outermost line (CUT_EDGE_PAD_TOLERANCE), any colour. `photoEdge` is true when the
  * band ends on a photo whose own background (where the matte is transparent, between the other
  * sides' bands) is another colour, or on a line the product fills, or when the outermost line is
- * not uniform at all: the band's inner edge is then the real photo's frame edge.
+ * not uniform at all: the band's inner edge is then the real photo's frame edge. A band past the depth limit is no
+ * pad, unless the matte keeps its outermost line in a colour other than what the matte dropped on the frame edge: that
+ * is plain fabric running off the frame, and the product itself starts on the frame edge.
  */
 export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: number): Record<Side, { depth: number; photoEdge: boolean }> {
   const depths = {} as Record<Side, { depth: number; colour: number[] | null; max: number; reach: number }>;
@@ -184,10 +188,24 @@ export function padBands(rgb: Buffer, alpha: Buffer, width: number, height: numb
     depths[side] = { depth, colour: outer.mean, max, reach };
   }
   const result = {} as Record<Side, { depth: number; photoEdge: boolean }>, tight = bbox(alpha, width, height) ?? { x: 0, y: 0, w: 0, h: 0 };
+  // The photo's own background: what the matte dropped on the frame edge.
+  const dropped = [0, 0, 0];
+  let droppedCount = 0;
+  for (const side of SIDES) for (let i = 0, length = side === "top" || side === "bottom" ? width : height; i < length; i++) {
+    const k = lineIndex(side, 0, i, width, height);
+    if (alpha[k]! <= ALPHA_BBOX_THRESHOLD) { droppedCount++; for (let c = 0; c < 3; c++) dropped[c]! += rgb[k * 3 + c]!; }
+  }
+  const productAtEdge = (side: Side, colour: number[]): boolean => {
+    const horizontal = side === "top" || side === "bottom", from = horizontal ? tight.x : tight.y, to = horizontal ? tight.x + tight.w : tight.y + tight.h;
+    let opaque = 0;
+    for (let i = from; i < to; i++) if (alpha[lineIndex(side, 0, i, width, height)]! >= CUT_EDGE_OPAQUE_ALPHA) opaque++;
+    if (to <= from || opaque < (to - from) * CUT_EDGE_PRODUCT_LINE_SHARE) return false;
+    return !droppedCount || colour.some((v, c) => Math.abs(v - dropped[c]! / droppedCount) > CUT_EDGE_PAD_TOLERANCE);
+  };
   for (const side of SIDES) {
     const { depth, colour, max } = depths[side], horizontal = side === "top" || side === "bottom";
     if (!colour) { result[side] = { depth, photoEdge: true }; continue; }
-    if (depth > max) { result[side] = { depth, photoEdge: false }; continue; }
+    if (depth > max) { result[side] = productAtEdge(side, colour) ? { depth: 0, photoEdge: true } : { depth, photoEdge: false }; continue; }
     // Two lines in, past the JPEG blend of the pad edge, between the other sides' bands: the photo's own background.
     const [a, b] = horizontal ? [depths.left, depths.right] : [depths.top, depths.bottom], length = horizontal ? width : height;
     // Only thin perpendicular bands are skipped: a deeper one may end on the product itself, not on the photo.
