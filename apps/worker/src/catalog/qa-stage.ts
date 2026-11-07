@@ -325,13 +325,23 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
  const decisions=triageProduct(current,keptLive);
  // M1-F3: a batch started with auto-decide rules turns every hold into deliver (provisional), drop or, rarely, a photo held for a person (M1 D40); the batch never waits.
  const auto=autoDecideOf(batch.options);
+ // A hold with no cause (rare: a held render with no problem flag) is decided as not publishable, so every auto
+ // decision carries a rule id (D10). A pipeline failure without a cause is not a rule decision and stays failed.
+ const causeOf=(o:Output)=>{const decision=decisions.get(o.id);return auto && decision?.action==="hold" ? decision.cause ?? (o.status==="failed" ? undefined:"not_publishable"):undefined;};
+ // Whether this photo's triage ends with a link on its channel, so a hold on another photo may say so.
+ const delivers=(o:Output)=>{
+  const decision=decisions.get(o.id),cause=causeOf(o);
+  if(!decision) return o.decision==="use_as_is" || (o.decision===null && (o.status==="staged" || o.status==="verified"));
+  if(decision.action==="drop") return false;
+  if(decision.action==="hold") return !!auto && !!cause && autoDecide(auto,cause,o).action==="deliver";
+  return true;
+ };
+ const othersDelivered=(o:Output)=>keptLive.some(l=>l.channel===o.channel && l.n!==o.n) || current.some(x=>x.channel===o.channel && x.n!==o.n && delivers(x));
  await underClaim(async tx=>{
   for(const o of current) {
    const decision=decisions.get(o.id),scores=o.qaScores;
    if(!decision) continue;
-   // A hold with no cause (rare: a held render with no problem flag) is decided as not publishable, so every auto
-   // decision carries a rule id (D10). A pipeline failure without a cause is not a rule decision and stays failed.
-   const cause=auto && decision.action==="hold" ? decision.cause ?? (o.status==="failed" ? undefined:"not_publishable"):undefined;
+   const cause=causeOf(o);
    if(o.status==="failed" && !cause) continue;
    // The rule in plain words (never its code) and, for our own defect still there after the repair loop, what was tried (07 4.6a).
    const plain=plainPassthrough(o.compliance),lead=leadFlag(o.flags) ?? (plain ? "matte_passthrough" as const:undefined),ctx={channel:CHANNELS[o.channel].label,n:o.n,k:batch.channels.length,plainBackdrop:plain,busy:busyBackgroundHold(o.compliance),failures:plainFailures(failuresOf(o.compliance),CHANNELS[o.channel].label)};
@@ -349,7 +359,7 @@ async function decideOutputs(deps:CatalogDeps,batch:Batch,productId:string,under
     patch=d.action==="deliver"
      ? {status:"staged",flags:[...new Set<OutputFlag>([...ordered,"provisional"])],reason:autoDecideNote("deliver",problem)}
      : d.action==="hold"
-      ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem)}
+      ? {status:"needs_attention",flags:ordered,reason:autoDecideNote("hold",problem,othersDelivered(o))}
       : {status:"skipped",flags:[...new Set<OutputFlag>([...ordered,"auto_dropped"])],reason:autoDecideNote("drop",problem)};
     patch.compliance={...(o.compliance ?? {}),auto_decide:autoDecideRecord(cause,d)};
     if(scores) patch.qaScores={...scores,autoAction:d.action==="deliver" ? "note":d.action,holdCause:cause,autoDecideRule:d.rule.id,finalStatus:patch.status};

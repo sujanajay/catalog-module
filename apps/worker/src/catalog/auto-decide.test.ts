@@ -230,10 +230,27 @@ it("D40: a visible defect the channel cannot do without is held: no link, the ot
   expect(one).toMatchObject({ status: "verified", isLive: true });
   expect(two).toMatchObject({ status: "needs_attention", isLive: false });
   expect(autoDecideRecordOf(two!.compliance)).toEqual({ rule: "visible_defect:*", cause: "visible_defect", action: "hold" });
+  expect(two!.reason).toContain("the product's other photos are delivered");
   expect(w.copy).toHaveBeenCalledTimes(1);
   expect((await pairOf(s.batch.id)).change).not.toBe("pending_attention");
   expect((await handleFinalizeTask(w.deps, { batchId: s.batch.id })).outcome).toBe("done");
   expect(await lockOf(s.product.id)).toBeNull();
+}, 120_000);
+
+it.each([
+  ["a product with one photo", "auto-held-single", ["m"]],
+  ["a product whose other photo is held too", "auto-held-both", ["m", "n"]],
+])("D40: the hold of %s does not say the product's other photos are delivered", async (_name, slug, shots) => {
+  const w = world(), s = await seed(w, slug, { shots, auto: true });
+  vi.mocked(w.deps.judgeOutput).mockImplementation(async input => FLAGGED(input, ["text_or_watermark"]));
+  await stages(w, s);
+  const rows = await outputsOf(s.batch.id);
+  expect(rows).toHaveLength(shots.length);
+  for (const o of rows) {
+    expect(autoDecideRecordOf(o.compliance)).toMatchObject({ action: "hold" });
+    expect(o.reason).toContain("It has no link yet. Replace it, use it as it is, or remove it.");
+    expect(o.reason).not.toMatch(/other photos|fixture|haiku|gemini|birefnet|bria/i);
+  }
 }, 120_000);
 
 it("D40: a product with every photo held has no link and still reaches a person: in the needs-you count and the list the page shows", async () => {

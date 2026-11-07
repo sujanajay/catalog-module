@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb } from "../../db/testing";
 import type { Db } from "../../db/client";
 import { catalogBatches, modelPolicy } from "../../db/schema";
 import { recordCost } from "../../spend";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolvePolicy, ensureDefaultPolicies, strictestChannel, sampledForQa, defaultPolicyFor, shadowSynthesisAllowed, DEFAULT_POLICIES } from "./policy";
 import { DEPLOYED_MATTE_MODELS } from "../matte";
@@ -17,6 +17,36 @@ describe("catalog policies and caps",()=>{
   expect(await db.select().from(modelPolicy)).toHaveLength(5);
   await db.update(modelPolicy).set({source:"bakeoff",matteModel:"measured"}).where(eq(modelPolicy.category,"footwear"));
   await ensureDefaultPolicies(db,{models:[],default:"birefnet-general"});expect((await resolvePolicy(db,"anta","footwear")).matteModel).toBe("measured");
+ });
+ it("no migration writes a cut-out model the services do not serve into a policy row",()=>{
+  const folder=fileURLToPath(new URL("../../../drizzle/",import.meta.url));
+  const statements=readdirSync(folder).filter(name=>name.endsWith(".sql")).flatMap(name=>readFileSync(folder+name,"utf8").split("--> statement-breakpoint").map(text=>text.replace(/^\s*--.*$/gm,"")));
+  // What a statement writes comes before its WHERE; a WHERE may name a retired model, to replace it.
+  const written=statements.filter(text=>/^\s*(UPDATE|INSERT INTO)\s+"model_policy"/.test(text)).flatMap(text=>[...text.split(/\bWHERE\b/)[0]!.matchAll(/'((?:birefnet|bria|rmbg|u2net|isnet|ben2|inspyrenet)[a-z0-9.-]*)'/g)].map(m=>m[1]));
+  expect(written.length).toBeGreaterThan(0);
+  for(const id of written) expect(DEPLOYED_MATTE_MODELS).toContain(id);
+ });
+ it("migration 0031 moves the rows with a retired second cut-out model, and only those",async()=>{
+  const statements=readFileSync(fileURLToPath(new URL("../../../drizzle/0031_policy_served_second_models.sql",import.meta.url)),"utf8").split("--> statement-breakpoint");
+  const migrate=async()=>{for(const statement of statements) await db.execute(sql.raw(statement));};
+  const row=(brandSlug:string,category:"apparel_model"|"bag_accessory"|"other"|"apparel_flat",matteModelSecond:string)=>({brandSlug,category,matteModel:"bria-rmbg",matteModelSecond,qaModel:"q",threshold:80,floor:65,source:"default" as const});
+  await db.insert(modelPolicy).values([row("m0031","apparel_model","birefnet-general"),row("*","apparel_flat","birefnet-general")]).onConflictDoUpdate({target:[modelPolicy.brandSlug,modelPolicy.category],set:{matteModel:"bria-rmbg",matteModelSecond:"birefnet-general"}});
+  for(const r of [row("*","apparel_model","birefnet-dynamic-matting"),row("*","bag_accessory","birefnet-hr-matting"),row("*","other","birefnet-dynamic-matting")]) await db.insert(modelPolicy).values(r).onConflictDoUpdate({target:[modelPolicy.brandSlug,modelPolicy.category],set:{matteModel:r.matteModel,matteModelSecond:r.matteModelSecond}});
+  const before=await db.select().from(modelPolicy);
+  await migrate();
+  await migrate();
+  const after=await db.select().from(modelPolicy);
+  const second=(brand:string,category:string)=>after.find(r=>r.brandSlug===brand && r.category===category)!.matteModelSecond;
+  expect(second("*","apparel_model")).toBe("birefnet-general-lite");
+  expect(second("*","bag_accessory")).toBe("birefnet-general");
+  expect(second("*","other")).toBe("birefnet-general");
+  expect(second("m0031","apparel_model")).toBe("birefnet-general");
+  for(const r of after.filter(r=>r.brandSlug==="*" && (r.category==="apparel_model" || r.category==="bag_accessory" || r.category==="other"))) {
+   expect(DEPLOYED_MATTE_MODELS).toContain(r.matteModelSecond);
+   expect(r.matteModelSecond).not.toBe(r.matteModel);
+  }
+  // The first choice, the source and the judge of a moved row stay as they were.
+  for(const r of after) { const old=before.find(b=>b.id===r.id)!; expect([r.matteModel,r.source,r.qaModel]).toEqual([old.matteModel,old.source,old.qaModel]); }
  });
  it("resolves exact brand/category before brand wildcard, global category and global wildcard",async()=>{
   await db.insert(modelPolicy).values([{brandSlug:"anta",category:"*",matteModel:"brand",qaModel:"q",threshold:80,floor:65,source:"manual"},{brandSlug:"anta",category:"footwear",matteModel:"exact",qaModel:"q",threshold:80,floor:65,source:"manual"},{brandSlug:"*",category:"*",matteModel:"global",qaModel:"q",threshold:80,floor:65,source:"manual"}]);

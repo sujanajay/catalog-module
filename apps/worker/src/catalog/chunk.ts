@@ -14,6 +14,7 @@ import type { EnlargeTaskBody } from "@catalog/core/tasks";
 import { afterUnpark, batchEnlargement, derivedPrefixFor, handleEnlargeTask, loadShotFromMatte, photosWantingEnlargement, primeReadiness, productHasQueuedEnlargement, reconcileEnlargements, type PhotoShot } from "./enlarge";
 import { eachLimit, positiveIntEnv, serialLock } from "@catalog/core/concurrency";
 import { EnlargementNotReadyError, isCpuUpscalerId } from "@catalog/core/catalog/upscale";
+import { isConnectionError } from "@catalog/core/db/connection-error";
 import { recordCostEvents, type CostEventInput } from "@catalog/core/cost-events";
 import { matteCallUsd, upscaleCallUsd } from "@catalog/core/catalog/cost";
 import type { VendorCall } from "@catalog/core/catalog/matte-routing";
@@ -538,7 +539,11 @@ export async function handleChunkTask(rawDeps: CatalogDeps, body: Record<string,
             // M0-F2-R2, R3: the staged bytes, hashed while in memory, become the output's version in the same write.
             const asset = rendered.jpeg ? await imageAsset(rendered.jpeg,uri,"image/jpeg"):null;
             await underClaim(async tx=>tx.update(catalogOutputs).set({status,stagingUri:rendered.jpeg ? uri:null,crc32c:staged?.crc32c ?? null,contentVersionId:asset ? await recordOutputVersion(tx,{output:{...output,flags},source,product,batch,asset}):null,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id)));
-          } catch(error) { if (error instanceof EnlargementNotReadyError) throw error; const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);}); }
+          } catch(error) {
+            // A lost database connection says nothing about the photo: the chunk is redelivered, counted against CHUNK_MAX_ERRORS.
+            if (error instanceof EnlargementNotReadyError || isConnectionError(error)) throw error;
+            const reason = error instanceof Error ? error.message:String(error); await underClaim(async tx=>{await tx.update(catalogOutputs).set({status:"failed",error:reason,reason,updatedAt:deps.now()}).where(eq(catalogOutputs.id,output.id));await flush(tx);});
+          }
           // 07 4.6a: a channel rule we broke (the Styli guide, margins, the band colour, the file size) is re-made
           // before anything is held, with the fix the measured failure asks for, on the failing channel only.
           const photo = await deps.db.select().from(catalogOutputs).where(and(eq(catalogOutputs.productId,productId),eq(catalogOutputs.sourceImageId,source.id),eq(catalogOutputs.batchId,batch.id),isNull(catalogOutputs.decision),inArray(catalogOutputs.status,["staged","needs_attention"])));

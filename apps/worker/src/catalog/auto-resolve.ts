@@ -114,7 +114,10 @@ export async function resolvePhoto(deps: CatalogDeps, input: ResolvePhotoInput):
     second = null;
     if (!secondPossible) return second;
     const health = await deps.matting.health();
-    if (!health.models.some(m => m.id === secondModel)) return second;
+    if (!health.models.some(m => m.id === secondModel)) {
+      deps.log("catalog second cut-out model not served",{severity:"WARNING",batchId:input.batch.id,productId:product.id,sourceImageId:source.id,model:secondModel,served:health.models.map(m=>m.id)});
+      return second;
+    }
     await underClaim(async()=>{});
     const matte = await deps.matteFor(p,deps.matting,secondModel!,{},trace);
     second = matte.source === "model" ? matte : null;

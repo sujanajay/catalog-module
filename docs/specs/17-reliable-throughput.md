@@ -130,7 +130,8 @@ one `verified`, three `failed` with the reason, product `failed`, zero `staged`.
 `{ id, sentence, severity, sql }`, each SQL returning rows that violate the sentence (zero rows = true):
 - `silent_outputs`: outputs `pending`, or `staged` with no decision on a product that is not `pending_attention`,
   in a batch whose status is `done` or `failed`. ERROR.
-- `held_without_reason`: `needs_attention` outputs with an empty `reason`. ERROR.
+- `held_without_reason`: `needs_attention` outputs with an empty `reason`, in a batch whose status is `done` or
+  `failed` (while a batch runs, a flagged output has no reason until triage decides). ERROR.
 - `stale_running_chunk`: a chunk `running` whose `lease_until` passed more than 5 minutes ago. WARNING (the
   sweep should have recovered it).
 - `slow_chunk`: a chunk `running` for more than 3 x the median finished-chunk time of its batch and more than

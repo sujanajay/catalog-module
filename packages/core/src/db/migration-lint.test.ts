@@ -124,6 +124,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "t_k_uq" ON "t" USING btree ("k");`;
     expect(tags.indexOf("0028_traffic_shifts")).toBe(tags.indexOf("0027_route_drill") + 1);
     expect(tags.indexOf("0029_auto_decide_hold")).toBe(tags.indexOf("0028_traffic_shifts") + 1);
     expect(tags.indexOf("0030_judge_routes")).toBe(tags.indexOf("0029_auto_decide_hold") + 1);
+    expect(tags.indexOf("0031_policy_served_second_models")).toBe(tags.indexOf("0030_judge_routes") + 1);
   });
 
   // R1 merge trains (2026-11-04): parallel PRs claimed the same migration number and were renumbered at merge. A
