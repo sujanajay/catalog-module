@@ -76,7 +76,7 @@ describe(`the digest of a ${PRODUCTS.toLocaleString("en")}-product batch`, () =>
     expect(d.exceptions).toBe(50 * 2 + 10 + 45);
     // Photos left out: photo 3 of 50 products and every photo of the 10 products with nothing (each photo once).
     expect(d.photosLeftOut).toBe(50 + 10 * PHOTOS);
-    expect(d.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 120 }, { text: "busy background in the photo, so the whole photo was used", count: 40 }]);
+    expect(d.provisionalReasons).toEqual([{ text: "not enlarged yet", count: 100 }, { text: "busy background in the photo, so the whole photo was used", count: 40 }, { text: "not enlarged, and no more tries are planned", count: 20 }]);
     expect(d.completeEveryChannel).toBe(PRODUCTS - 160 - 50 - 10 - 45);
     expect(d.linksReadyAt).toBe(batch.finishedAt!.toISOString());
     expect(d.firstLinksAt).not.toBeNull();
