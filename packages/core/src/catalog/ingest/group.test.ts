@@ -5,6 +5,7 @@ import type { BatchOptions, IdentifierMode, Precedence } from "../types";
 import {
   baseName,
   duplicateShotMessage,
+  sameShotMessage,
   groupItems,
   leftOutProducts,
   noIdentifierMessage,
@@ -146,14 +147,23 @@ describe("groupItems", () => {
     expect(run("uploads_only")).toEqual({ FILEONLY: [[1, "FILEONLY_1.jpg"]], LINKONLY: [[1, "LINKONLY-1.jpg"]], P: [[1, "P_1.jpg"], [2, "P_2.jpg"]] });
   });
 
-  it("rejects only the product with two files for one shot, with the exact sentence", () => {
-    const g = groupItems([file("Q_1.jpg"), file("Q-1.jpg"), file("Q_2.jpg"), file("OK_1.jpg")], opts());
-    expect(shape(g)).toEqual({ OK: [[1, "OK_1.jpg"]] });
-    expect(g.rejected.map((r) => [r.item.originalName, r.reason])).toEqual([
-      ["Q_1.jpg", "Two files claim shot 1 of Q: Q_1.jpg, Q-1.jpg. Rename one and re-upload."],
-      ["Q_2.jpg", "Two files claim shot 1 of Q: Q_1.jpg, Q-1.jpg. Rename one and re-upload."],
-      ["Q-1.jpg", "Two files claim shot 1 of Q: Q_1.jpg, Q-1.jpg. Rename one and re-upload."],
-    ]);
+  it("M1 D45: two different files for one shot lose nothing: the unclashing file keeps its number, each clashing file gets its own, with the exact sentence", () => {
+    const items = [file("Q_1.jpg"), file("Q-1.jpg"), file("Q_2.jpg"), file("OK_1.jpg")];
+    const g = groupItems(items, opts());
+    expect(shape(g)).toEqual({ OK: [[1, "OK_1.jpg"]], Q: [[1, "Q_1.jpg"], [2, "Q_2.jpg"], [3, "Q-1.jpg"]] });
+    expect(g.rejected).toEqual([]);
+    expect(g.sameShots).toEqual([{ identifier: "Q", shot: 1, files: ["Q_1.jpg", "Q-1.jpg"] }]);
+    const q = g.products.get("Q")!;
+    expect(q.map((i) => i.warnings)).toEqual([["Different photos claim shot 1 of Q: Q_1.jpg, Q-1.jpg. We cannot tell which is right, so each was kept as its own shot. If one is wrong, send this product again without it."], [], ["Different photos claim shot 1 of Q: Q_1.jpg, Q-1.jpg. We cannot tell which is right, so each was kept as its own shot. If one is wrong, send this product again without it."]]);
+    // The order files arrive in never changes who gets which number.
+    for (const seed of [1, 7, 42]) expect(shape(groupItems(shuffle(items, seed), opts()))).toEqual(shape(g));
+  });
+
+  it("M1 D45: the 729A3 shape: a collar close-up and two different flats all stay", () => {
+    const g = groupItems([file("729A3.jpg"), file("729A3_2.jpg"), file("729A3_v2.jpg")], opts(), undefined, (i) => i.originalName);
+    expect(g.rejected).toEqual([]);
+    expect(shape(g)).toEqual({ "729A3": [[1, "729A3_2.jpg"], [2, "729A3.jpg"], [3, "729A3_v2.jpg"]] });
+    expect(g.sameShots).toEqual([{ identifier: "729A3", shot: 2, files: ["729A3_2.jpg", "729A3_v2.jpg"] }]);
   });
 
   it("renumbers gaps to positions with the numbering_gap note", () => {
@@ -210,8 +220,10 @@ describe("groupItems", () => {
 describe("previewRows", () => {
   const ok1 = file("OKP_1.jpg");
   const bmp = file("BAD_1.bmp");
-  const items = [ok1, file("OKP_3.jpg"), file("DUP_1.jpg"), file("DUP-1.jpg"), bmp];
+  const items = [ok1, file("OKP_3.jpg"), bmp];
   const g = groupItems(items, opts(), new Map([[bmp, unsupportedMessage("BAD_1.bmp", "BMP")]]));
+  // A batch grouped before M1 D45 keeps its rejects: the stored ledger still reads as a duplicate shot.
+  for (const name of ["DUP_1.jpg", "DUP-1.jpg"]) g.rejected.push({ item: { ...file(name), identifier: "DUP", n: 1 }, reason: duplicateShotMessage(1, "DUP", ["DUP_1.jpg", "DUP-1.jpg"]) });
   const dims: ItemDimensions = new Map([[ok1, { width: 800, height: 1200 }]]);
 
   it("gives the four statuses with their files in shot order", () => {
@@ -265,7 +277,7 @@ describe("warningSentences", () => {
         headline: "2 files could not be read.",
         detail: "BAD_1.bmp: is a BMP file; CRP_1.jpg: is corrupt and could not be decoded. Fix them and use them in a new batch, or continue without them.",
       },
-      { headline: "1 products have two files for the same shot number: DUP.", detail: "They are left out until one file is renamed; see the grouping table." },
+      { headline: "1 product has different photos with the same shot number: DUP.", detail: "Each photo is kept as its own shot; see the grouping table." },
       {
         headline: "Your upload has 2 top-level folders (Anta, Campus).",
         detail: "Everything in them will be filed under Anta. If these are different brands, make one batch per brand.",
@@ -282,7 +294,7 @@ describe("warningSentences", () => {
     const heads = warningSentences(g, null, ["noon"]).map((w) => w.headline);
     expect(heads).toEqual([
       "2 files could not be read.",
-      "1 products have two files for the same shot number: DUP.",
+      "1 product has different photos with the same shot number: DUP.",
       "Your upload has 2 top-level folders (Anta, Campus).",
     ]);
     const one = groupItems([file("Anta/A_1.jpg"), file("Anta/B_1.jpg"), file("C_1.jpg")], opts());
@@ -379,21 +391,23 @@ describe("a clash on one shot number is judged by bytes (R1 exit 2 finding 1)", 
     for (const seed of [1, 7, 42]) expect(groupItems(shuffle(items, seed), opts(), undefined, sha).products.get("10255347_Black")!.map(baseName)).toEqual(["10255347_Black_1.jpeg", "10255347_Black_2.jpeg"]);
   });
 
-  it("still leaves the product out when the same names hold different bytes", () => {
+  it("M1 D45: keeps every file when the same names hold different bytes, and says so", () => {
     const a = file("10288257_Chocolate-Torte_1.jpg"), b = file("10288257_Chocolate-Torte_1.jpeg"), other = file("10288257_Chocolate-Torte_2.jpg");
     const g = groupItems([a, b, other], opts(), undefined, shas({ [a.originalName]: "a", [b.originalName]: "b", [other.originalName]: "c" }));
-    expect(g.products.size).toBe(0);
+    expect(g.rejected).toEqual([]);
     expect(g.sameFiles).toBeUndefined();
-    expect(g.rejected.map((r) => r.reason)).toEqual(Array(3).fill("Two files claim shot 1 of 10288257_Chocolate-Torte: 10288257_Chocolate-Torte_1.jpeg, 10288257_Chocolate-Torte_1.jpg. Rename one and re-upload."));
+    expect(g.products.get("10288257_Chocolate-Torte")!.map((i) => [i.n, baseName(i)])).toEqual([[1, "10288257_Chocolate-Torte_1.jpeg"], [2, "10288257_Chocolate-Torte_2.jpg"], [3, "10288257_Chocolate-Torte_1.jpg"]]);
+    expect(g.sameShots).toEqual([{ identifier: "10288257_Chocolate-Torte", shot: 1, files: [b.originalName, a.originalName] }]);
   });
 
-  it("drops the copies but still refuses a third file with different bytes, and never merges when the bytes are not known", () => {
+  it("drops the copies, keeps a third file with different bytes as its own shot, and never merges when the bytes are not known", () => {
     const a = file("M_1.jpg"), b = file("M_1.jpeg"), c = file("M-1.png");
     const g = groupItems([a, b, c], opts(), undefined, shas({ [a.originalName]: "a", [b.originalName]: "a", [c.originalName]: "z" }));
-    expect(g.products.size).toBe(0);
-    expect(g.rejected[0]!.reason).toBe("Two files claim shot 1 of M: M_1.jpeg, M-1.png. Rename one and re-upload.");
-    expect(groupItems([a, b], opts(), undefined, () => null).products.size).toBe(0);
-    expect(groupItems([a, b], opts()).products.size).toBe(0);
+    expect(g.rejected).toEqual([]);
+    expect(g.products.get("M")!.map((i) => [i.n, baseName(i)])).toEqual([[1, "M_1.jpeg"], [2, "M-1.png"]]);
+    expect(g.sameFiles).toHaveLength(1);
+    expect(groupItems([a, b], opts(), undefined, () => null).products.get("M")).toHaveLength(2);
+    expect(groupItems([a, b], opts()).products.get("M")).toHaveLength(2);
   });
 
   it("treats files with no shot number, one stem and the same bytes as one file", () => {
@@ -458,25 +472,26 @@ describe("identical files merge in every grouping mode (PR 187 review P1-3)", ()
     expect(g.rejected).toEqual([]);
   });
 
-  it("different bytes at one named shot leave the product out in folder mode too, the same as filename mode (P2-A)", () => {
+  it("M1 D45: different bytes at one named shot lose nothing in folder mode too, the same as filename mode (P2-A)", () => {
     const different = pasted(["P/P_1.jpg", "P/P_1.jpeg", "P/size chart.jpg"], (n) => n);
     expect(different.mode).toBe("folder");
-    expect(different.g.products.size).toBe(0);
-    expect(different.g.rejected[0]!.reason).toBe(duplicateShotMessage(1, "P", ["P_1.jpeg", "P_1.jpg"]));
+    expect(different.g.rejected).toEqual([]);
+    expect(different.g.products.get("P")).toHaveLength(3);
+    expect(different.g.sameShots).toMatchObject([{ identifier: "P", shot: 1 }]);
   });
 
   it("the clash sentence names the shot the sender numbered, not the closed-up one (P3-1)", () => {
     const items = ["X_1.jpg", "X_2.jpg", "X_3.jpg", "X_3.jpeg"].map((n) => sourceItemFromPath(n, { kind: "gcs", gsUri: "" }, "u", "image"));
     const g = groupItems(items, opts(), undefined, (i) => (i.originalName.startsWith("X_3") ? i.originalName : "same"));
-    expect(g.rejected[0]!.reason).toContain("shot 3 of X");
+    expect(g.sameShots).toMatchObject([{ identifier: "X", shot: 3 }]);
   });
 
-  it("records no merge for a product left out, and lists all of its files, copies too (P3-1)", () => {
+  it("M1 D45: a copy merges and the different file stays, each once (P3-1)", () => {
     const items = ["X_1.jpg", "X_1.jpeg", "X_1.png"].map((n) => sourceItemFromPath(n, { kind: "gcs", gsUri: "" }, "u", "image"));
     const g = groupItems(items, opts(), undefined, (i) => (i.originalName === "X_1.png" ? "other" : "same"));
-    expect(g.products.size).toBe(0);
-    expect(g.sameFiles).toBeUndefined();
-    expect(g.rejected.map((r) => r.item.originalName).sort()).toEqual(["X_1.jpeg", "X_1.jpg", "X_1.png"]);
+    expect(g.rejected).toEqual([]);
+    expect(g.products.get("X")!.map((i) => i.originalName)).toEqual(["X_1.jpeg", "X_1.png"]);
+    expect(g.sameFiles).toHaveLength(1);
   });
 });
 
@@ -518,10 +533,11 @@ describe("copies across folders and names (owner, 2026-11-06)", () => {
     expect(other.products.get("X")!.map((i) => [i.n, i.originalName])).toEqual([[1, "a.jpg"], [2, "b.jpg"], [3, "c.jpg"], [4, "d.jpg"]]);
   });
 
-  it("(a) one product in two folders with different bytes at one named shot is a choice we do not guess: left out, on the record", () => {
+  it("(a) M1 D45: one product in two folders with different bytes at one named shot is a choice we do not guess: both kept, on the record", () => {
     const g = groupItems(fileItems(["vm-ol/X/X_1.jpg", "vero-moda/X/X_1.jpeg"]), opts(), undefined, (i) => i.originalName);
-    expect(g.products.size).toBe(0);
-    expect(leftOutProducts(g.rejected.map((r) => ({ identifier: r.item.identifier, name: r.item.originalName, reason: r.reason })), [])).toMatchObject([{ identifier: "X", why: "same_shot" }]);
+    expect(g.rejected).toEqual([]);
+    expect(g.products.get("X")!.map((i) => i.n)).toEqual([1, 2]);
+    expect(g.sameShots).toMatchObject([{ identifier: "X", shot: 1 }]);
   });
 
   it("(b) the same bytes under different shot numbers or names take one slot, and later shots close up", () => {
@@ -554,7 +570,7 @@ describe("copies across folders and names (owner, 2026-11-06)", () => {
   it("a clash across two pastes names the folders, so the sender can tell which to fix (P3-1)", () => {
     const row = (u: string, dir: string) => urlListItems(parsePastedLinks(`P\thttps://h/${dir}/P/P_1.jpg`), u);
     const g = groupItems([...row("u1", "vm-ol"), ...row("u2", "vero-moda")], opts(), undefined, (i) => (i.bytes.kind === "url" ? i.bytes.url : ""));
-    expect(g.rejected[0]!.reason).toBe(duplicateShotMessage(1, "P", ["vero-moda/P/P_1.jpg", "vm-ol/P/P_1.jpg"]));
+    expect(g.products.get("P")!.map((i) => i.warnings[0])).toEqual(Array(2).fill(sameShotMessage(1, "P", ["vero-moda/P/P_1.jpg", "vm-ol/P/P_1.jpg"])));
   });
 
   it("two pastes keep one shot order whatever their upload ids, so a re-send stays unchanged (P2-B)", () => {

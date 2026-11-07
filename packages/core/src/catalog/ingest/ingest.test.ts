@@ -1795,28 +1795,27 @@ describe("a real folder with each shot stored twice (R1 exit 2 finding 1)", () =
     const files = { "10255347_Black/10255347_Black_1.jpg": one!, "10255347_Black/10255347_Black_1.jpeg": one!, "10255347_Black/10255347_Black_2.jpg": two!, "10255347_Black/10255347_Black_2.jpeg": two!, "10288257_Choc/10288257_Choc_1.jpg": a!, "10288257_Choc/10288257_Choc_1.jpeg": b! };
     await folderUpload(w, batch, files);
     const outcomes = await ingestAll(w, batch);
-    expect(outcomes.at(-1)).toBe("preview ready: 1 products, 2 photos");
+    expect(outcomes.at(-1)).toBe("preview ready: 2 products, 4 photos");
     // The grouping reads no bytes of its own: every file was downloaded once, to hash it.
     const prefix = `gs://${BUCKET}/${prefixOf(batch)}/uploads/`;
-    const downloads = w.calls.downloads.filter((d) => d.startsWith(prefix) && d.endsWith("_1.jpg"));
+    const downloads = w.calls.downloads.filter((d) => d.startsWith(prefix) && d.endsWith("10255347_Black_1.jpg"));
     expect(downloads.length).toBeGreaterThan(0);
     expect(new Set(downloads).size).toBe(downloads.length);
 
     const done = await batchRow(batch.id);
-    expect(done.counts).toMatchObject({ products: 1, sources: 2, duplicateFiles: 2, productsLeftOut: 1 });
-    expect((await sourcesOf(batch.id)).map((s) => [s.n, s.originalName]).sort()).toEqual([[1, "10255347_Black/10255347_Black_1.jpeg"], [2, "10255347_Black/10255347_Black_2.jpeg"]]);
+    expect(done.counts).toMatchObject({ products: 2, sources: 4, duplicateFiles: 0, productsLeftOut: 0 });
+    expect((await sourcesOf(batch.id)).map((s) => [s.n, s.originalName]).sort()).toEqual([[1, "10255347_Black/10255347_Black_1.jpeg"], [1, "10288257_Choc/10288257_Choc_1.jpeg"], [2, "10255347_Black/10255347_Black_2.jpeg"], [2, "10288257_Choc/10288257_Choc_1.jpg"]]);
 
     const report = await readIngestReport({ ...w.storage, getBucketName: () => BUCKET } as never, prefixOf(batch));
-    expect(report!.leftOutProducts).toEqual([{
-      identifier: "10288257_Choc", why: "same_shot", photos: 2, files: ["10288257_Choc/10288257_Choc_1.jpeg", "10288257_Choc/10288257_Choc_1.jpg"],
-      reason: "Two files claim shot 1 of 10288257_Choc: 10288257_Choc_1.jpeg, 10288257_Choc_1.jpg. Rename one and re-upload.",
-    }]);
+    // M1 D45: different bytes at one shot lose nothing, and the report says so.
+    expect(report!.leftOutProducts).toEqual([]);
+    expect(report!.sameShots).toEqual([{ identifier: "10288257_Choc", shot: 1, files: ["10288257_Choc/10288257_Choc_1.jpeg", "10288257_Choc/10288257_Choc_1.jpg"] }]);
     expect(report!.sameFiles).toHaveLength(2);
 
     const preview = await buildPreview(db, batch.id, { storage: w.storage });
-    expect(preview.kpis.products).toBe(1);
+    expect(preview.kpis.products).toBe(2);
     expect(preview.rows.find((r) => r.identifier === "10255347_Black")).toMatchObject({ status: "ok", shots: 2, notes: expect.arrayContaining(["10255347_Black_1.jpeg and 10255347_Black_1.jpg are the same photo, so one was used."]) });
-    expect(preview.rows.find((r) => r.identifier === "10288257_Choc")).toMatchObject({ status: "duplicate shot" });
+    expect(preview.rows.find((r) => r.identifier === "10288257_Choc")).toMatchObject({ status: "ok", shots: 2 });
   }, 120_000);
 });
 
@@ -1826,16 +1825,16 @@ describe("nothing is lost without a word at grouping (owner, 2026-11-06)", () =>
   it("when every product is left out it says why, not that no photos were found (P2-1)", async () => {
     const w = fakeWorld();
     const batch = await newBatch("all-left-out");
-    await folderUpload(w, batch, { "P_1.jpg": await jpeg(), "P_1.jpeg": await jpeg() });
+    await folderUpload(w, batch, { "P.jpg": await jpeg(), "P.png": await jpeg() });
     await ingestAll(w, batch);
     const done = await batchRow(batch.id);
-    expect(done.counts.failReason).toBe("The product could not be used: two different photos have the same shot number. Fix the files and start again.");
+    expect(done.counts.failReason).toBe("The product could not be used: its photos have no shot numbers. Fix the files and start again.");
   }, 60_000);
 
   it("a left-out product on the product list is that row and not a second product (P2-3)", async () => {
     const w = fakeWorld();
     const batch = await newBatch("left-out-on-list");
-    await folderUpload(w, batch, { "OK1_1.jpg": await jpeg(), "CL1_1.jpg": await jpeg(), "CL1_1.jpeg": await jpeg() });
+    await folderUpload(w, batch, { "OK1_1.jpg": await jpeg(), "CL1.jpg": await jpeg(), "CL1.png": await jpeg() });
     const listPath = `${prefixOf(batch)}/uploads/items.csv`;
     w.put(listPath, Buffer.from("Style\nOK1\nCL-1\nNOPHOTOS\n"));
     await newUpload(batch, "product_list", "items.csv", `gs://${BUCKET}/${listPath}`);

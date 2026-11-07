@@ -25,6 +25,8 @@ export interface BatchDigest {
   photosUnderSeveralProducts?: number;
   /** Files that were copies of a photo the product already has, so one was used. Older stored digests have none. */
   sameFilesMerged?: number;
+  /** M1 D45: products with different photos at one shot number, each kept as its own shot. Older stored digests have none. */
+  sameShotsKept?: number;
   /** Products with links on every channel of the batch, nothing left out and nothing sent with a note. */
   completeEveryChannel: number;
   /** Links in the sheet per channel, in channel order. */

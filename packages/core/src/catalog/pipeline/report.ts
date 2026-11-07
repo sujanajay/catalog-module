@@ -14,7 +14,7 @@ import { outputNote, type Output } from "./publish";
 import { flagDetails } from "../qa/reasons";
 import type { RecheckResult } from "../recheck/index";
 import { isDuplicateReject, isOlderSpelling, leftOutProducts, photosUnderSeveralProducts, type SharedPhotos } from "../ingest/group";
-import type { LeftOutProduct, SameFile, UploadReject } from "../ingest/types";
+import type { LeftOutProduct, SameFile, SameShot, UploadReject } from "../ingest/types";
 import { normalizeKey } from "../naming";
 import { isLinkReject } from "../ingest/link-reasons";
 import type * as storage from "../../storage";
@@ -95,13 +95,13 @@ export async function notRefreshedChannels(db:Db,batchId:string):Promise<NotRefr
 }
 /** The batch exports; `exceptionsCsv` and `notesCsv` (M1-S5) are the digest sheets as csv, absent on older batches. */
 export interface ExportPaths { xlsx:string; csv:string; report:string; filledProductList:{xlsx:string;csv:string[]}|null; exportsMatch:boolean; exceptionsCsv?:string; notesCsv?:string }
-export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}>;leftOutProducts?:LeftOutProduct[];sameFiles?:SameFile[];sharedPhotos?:SharedPhotos[] }
+export interface IngestReport { unsupportedFiles:unknown[];duplicates:unknown[];linkFailures?:unknown[];sourceOrigins?:Record<string,{origin:string;sourceUrl?:string;relativePath?:string}>;leftOutProducts?:LeftOutProduct[];sameFiles?:SameFile[];sameShots?:SameShot[];sharedPhotos?:SharedPhotos[] }
 /** The reject ledger written by ingest includes files that have no product/source DB row. */
 export async function readIngestReport(store:Pick<typeof storage,"headObject"|"downloadBuffer"|"getBucketName">,prefix:string):Promise<IngestReport|undefined> {
   const uri=`gs://${store.getBucketName()}/${prefix}/derived/_ingest/preview-state.json`;
   if(!(await store.headObject(uri)).exists) return undefined;
   type StoredOrigin={rawUri:string|null;sha256?:string|null;item:{originalName:string;origin:string;bytes:{kind:string;url?:string}}};
-  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{sha256?:string|null;item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{identifier?:string;items:StoredOrigin[]}[];sameFiles?:SameFile[];uploadRejects?:UploadReject[]};
+  const state=JSON.parse((await store.downloadBuffer(uri)).buf.toString()) as {rejected?:{item:{sha256?:string|null;item:{originalName:string;identifier:string}};reason:string}[];duplicates?:unknown[];products?:{identifier?:string;items:StoredOrigin[]}[];sameFiles?:SameFile[];sameShots?:SameShot[];uploadRejects?:UploadReject[]};
   // An older spelling's photo is out unless the product carrying on already holds the same bytes.
   const keptShas=new Map((state.products ?? []).map(p=>[normalizeKey(p.identifier ?? ""),new Set(p.items.map(i=>i.sha256))] as const));
   const rejected=(state.rejected ?? []).map(r=>({name:r.item.item.originalName,identifier:r.item.item.identifier,reason:r.reason,...(isOlderSpelling(r.reason) && r.item.sha256 && keptShas.get(normalizeKey(r.item.item.identifier))?.has(r.item.sha256) ? {copyOfKept:true}:{})}));
@@ -109,7 +109,7 @@ export async function readIngestReport(store:Pick<typeof storage,"headObject"|"d
   const sourceOrigins:NonNullable<IngestReport["sourceOrigins"]>={};
   for(const source of (state.products ?? []).flatMap(p=>p.items)) if(source.rawUri) sourceOrigins[source.rawUri]={origin:source.item.origin,...(source.item.bytes.kind==="url" ? {sourceUrl:source.item.bytes.url}:{relativePath:source.item.originalName})};
   // Links that could not be downloaded are listed on their own, as counts.linkFailures counts them (spec 14b F5).
-  return {unsupportedFiles:[...rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),...uploadRejects.filter(r=>!isLinkReject(r.reason))],linkFailures:[...rejected.filter(r=>isLinkReject(r.reason)),...uploadRejects.filter(r=>isLinkReject(r.reason))],duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins,leftOutProducts:leftOutProducts([...rejected,...uploadRejects.map(r=>({identifier:r.identifier ?? "",name:r.name,reason:r.reason}))],(state.products ?? []).flatMap(p=>p.identifier ? [p.identifier]:[])),sameFiles:(state.sameFiles ?? []).filter(s=>keptShas.has(normalizeKey(s.identifier)) || !state.products),sharedPhotos:photosUnderSeveralProducts(state.products ?? [])};
+  return {unsupportedFiles:[...rejected.filter(r=>!isDuplicateReject(r.reason) && !isLinkReject(r.reason)),...uploadRejects.filter(r=>!isLinkReject(r.reason))],linkFailures:[...rejected.filter(r=>isLinkReject(r.reason)),...uploadRejects.filter(r=>isLinkReject(r.reason))],duplicates:[...rejected.filter(r=>isDuplicateReject(r.reason)),...(state.duplicates ?? [])],sourceOrigins,leftOutProducts:leftOutProducts([...rejected,...uploadRejects.map(r=>({identifier:r.identifier ?? "",name:r.name,reason:r.reason}))],(state.products ?? []).flatMap(p=>p.identifier ? [p.identifier]:[])),sameFiles:(state.sameFiles ?? []).filter(s=>keptShas.has(normalizeKey(s.identifier)) || !state.products),sameShots:state.sameShots ?? [],sharedPhotos:photosUnderSeveralProducts(state.products ?? [])};
 }
 export async function workbookCsvSheets(bytes:Buffer):Promise<{name:string;csv:string}[]> {
   const workbook=new ExcelJS.Workbook(); await workbook.xlsx.load(bytes as unknown as Parameters<typeof workbook.xlsx.load>[0]);
@@ -227,7 +227,7 @@ export async function buildReport(db:Db,batchId:string,extra:{recheck:RecheckRes
       const changes=Array.isArray(e.details.changes) ? e.details.changes as Record<string,unknown>[]:[];
       return changes.length ? changes.map(c=>({identifier,kind:e.kind,channels:[c.channel],shots:[c.n],oldGeneration:c.oldGeneration,newGeneration:c.newGeneration,sha256:c.sha256})):[{identifier,kind:e.kind,channels:e.details.channels,shots:e.details.shots,oldGeneration:null,newGeneration:null,sha256:null}];
     }),notRefreshedChannels:await notRefreshedChannels(db,batchId),removedLinks:events.flatMap(e=>e.kind==="shots_removed" && Array.isArray(e.details.removedLinks) ? e.details.removedLinks.map((r:unknown)=>({identifier:identifierOf.get(e.productId),...r as Record<string,unknown>})):[]),recheck:extra.recheck,exports:extra.exports,
-    leftOutProducts:extra.ingest?.leftOutProducts ?? [],sameFiles:extra.ingest?.sameFiles ?? [],sharedPhotos:extra.ingest?.sharedPhotos ?? [],
+    leftOutProducts:extra.ingest?.leftOutProducts ?? [],sameFiles:extra.ingest?.sameFiles ?? [],sameShots:extra.ingest?.sameShots ?? [],sharedPhotos:extra.ingest?.sharedPhotos ?? [],
     unsupportedFiles,linkFailures,duplicates:extra.ingest?.duplicates ?? pairs.filter(p=>p.pair.flags.includes("duplicate_shot")).map(p=>({identifier:p.product.identifier,reason:p.pair.notes})),unresolvedIdentifiers:pairs.filter(p=>!p.product.opptraSkuIds.length).map(p=>p.product.identifier),chunks:chunks.map(c=>({index:c.index,stage:c.stage,status:c.status,attempt:c.attempt,error:c.error}))};
   return {sheet:{channels:CHANNEL_ORDER.filter(c=>batch.channels.includes(c)),rows},report,batch:{...batch,counts,cost},carriedLinks:delivery.carried,rows:{pairs,outputs}};
 }

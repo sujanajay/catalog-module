@@ -157,7 +157,7 @@ describe.skipIf(!REAL)("ingest against the real bucket and image sets", () => {
       expect(firstRows).toHaveLength(3280);
       const preview1 = await buildPreview(db, first.id, { storage });
       expect(preview1.rows.every((r) => r.status === "ok" && r.shots >= 1)).toBe(true);
-      expect(preview1.warnings.map((w) => w.headline).some((h) => h.includes("two files for the same shot number"))).toBe(false);
+      expect(preview1.warnings.map((w) => w.headline).some((h) => h.includes("different photos with the same shot number"))).toBe(false);
       console.log(`French Connection: ${preview1.kpis.products} products, ${preview1.kpis.photos} photos`);
 
       const preview2 = await buildPreview(db, second.id, { storage });

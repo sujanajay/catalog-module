@@ -59,7 +59,7 @@ import { linksSheetAdapter, readLinksSheetUpload, normalizeHeader } from "./link
 import { completeUploads, mapLimit } from "./local-files";
 import { buildOverwritePreview, matchProducts, uploadTimes } from "./overwrite-preview";
 import { linkStatuses, matchProductList, missingIdentifier, productListDetected, readProductList, sizeBases, type ProductListRow } from "./product-list";
-import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SameFile, SourceItem, UploadReject } from "./types";
+import type { Adapter, CollectInput, Detected, GroupingResult, IngestDeps, OverwritePreview, Preview, SameFile, SameShot, SourceItem, UploadReject } from "./types";
 import { badLinkRejects, fetchSourceUrl, parsePastedLinks, pastedText, urlListAdapter } from "./url-list";
 import { armAutoStart } from "../auto-start";
 import { columnLetter } from "./detect-step";
@@ -744,6 +744,7 @@ function assemble(manifests: UploadManifest[], lists: ListInput[], options: Batc
       // A rejected file of a renamed product stays with it, so that product is not read as left out.
       for (const r of grouped.rejected) r.item.identifier = m.renamed.get(r.item.identifier) ?? r.item.identifier;
       for (const s of grouped.sameFiles ?? []) s.identifier = m.renamed.get(s.identifier) ?? s.identifier;
+      for (const s of grouped.sameShots ?? []) s.identifier = m.renamed.get(s.identifier) ?? s.identifier;
     }
     statuses = linkStatuses(list, grouped, { byMatchColumn });
     // A left-out product is matched like a kept one, so its list row (under any of the match rules) is that product and
@@ -846,6 +847,8 @@ interface PreviewState {
   topLevelFolders: string[];
   /** Shots that came as several files with the same bytes (absent on states saved before it). */
   sameFiles?: SameFile[];
+  /** M1 D45: different photos that claimed one shot number, each kept as its own shot (absent on states saved before it). */
+  sameShots?: SameShot[];
   /** What the uploads lost before grouping (absent on states saved before it). */
   uploadRejects?: UploadReject[];
 }
@@ -1120,6 +1123,8 @@ interface GroupState {
   roots?: StoredRoot[];
   /** Shots that came as several files with the same bytes (absent on states saved before it). */
   sameFiles?: SameFile[];
+  /** M1 D45: different photos that claimed one shot number, each kept as its own shot (absent on states saved before it). */
+  sameShots?: SameShot[];
   /** What the uploads lost before grouping (absent on states saved before it). */
   uploadRejects?: UploadReject[];
 }
@@ -1215,6 +1220,7 @@ async function groupBatch(db: Db, deps: PlaceDeps, batchId: string, token: strin
     linkSource: linkSourceWords(linkUploads),
     ...(grouped.roots ? { roots: storedRoots(grouped.roots, uploads, batch.options) } : {}),
     ...(grouped.sameFiles ? { sameFiles: grouped.sameFiles } : {}),
+    ...(grouped.sameShots ? { sameShots: grouped.sameShots } : {}),
     ...(a.uploadRejects.length ? { uploadRejects: a.uploadRejects } : {}),
   };
   await saveJson(deps, groupStatePath(prefix, token), state);
@@ -1415,6 +1421,7 @@ async function groupProducts(
     warnings: grouped.warnings, missing, list: state.list, byMatchColumn: state.byMatchColumn,
     duplicates: [...state.duplicates, ...found2], skus, topLevelFolders: state.topLevelFolders,
     ...(state.sameFiles ? { sameFiles: state.sameFiles } : {}),
+    ...(state.sameShots ? { sameShots: state.sameShots } : {}),
     ...(state.uploadRejects ? { uploadRejects: state.uploadRejects } : {}),
   };
   const newCount = withPhotos.filter((id) => productOf.get(id)!.isNew).length;

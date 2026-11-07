@@ -334,3 +334,26 @@ describe("a photo held for a person (M1 D40)", () => {
     expect(JSON.stringify(rows)).not.toMatch(/birefnet|bria/);
   }, 120_000);
 });
+
+describe("M1 D45: different photos at one shot number", () => {
+  const same = { identifier: "729A3", shot: 2, files: ["729A3_2.jpg", "729A3_v2.jpg"] };
+  const digestOf = async (sameShots: Parameters<typeof digestFrom>[0]["sameShots"]) => {
+    const built = await buildReport(db, batchId, { recheck: { ok: 0, total: 0, failures: [] }, exports: { xlsx: "x", csv: "c", report: "r", filledProductList: null, exportsMatch: true } });
+    return digestFrom({ batch: built.batch, sheet: built.sheet, files: [], cost, sameShots, pairs: built.rows.pairs.map(r => ({ productId: r.pair.productId, identifier: r.product.identifier, change: r.pair.change, notes: r.pair.notes })), outputs: built.rows.outputs, improvements: await readImprovements(db, batchId) });
+  };
+  it("names the product in Exceptions, counts it once and says so in the digest", async () => {
+    const { digest, exceptions } = await digestOf([same, { ...same, shot: 3, files: ["729A3_3.jpg", "729A3_v3.jpg"] }]);
+    expect(digest.sameShotsKept).toBe(1);
+    const rows = exceptions.filter((e) => e.identifier === "729A3");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.reason).toContain("Different photos claim shot 2 of 729A3: 729A3_2.jpg, 729A3_v2.jpg");
+    expect(rows[0]!.group).toBe("Check: different photos had the same shot number, each kept as its own shot");
+    expect(digestReasonLines(digest, 50).lines.join(" ")).toContain("1 product had different photos with the same shot number. Each photo was kept as its own shot");
+  });
+  it("says nothing when there was no such clash", async () => {
+    const { digest, exceptions } = await digestOf(undefined);
+    expect(digest.sameShotsKept).toBe(0);
+    expect(exceptions.filter((e) => e.identifier === "729A3")).toEqual([]);
+    expect(digestReasonLines(digest, 50).lines.join(" ")).not.toContain("same shot number");
+  });
+});

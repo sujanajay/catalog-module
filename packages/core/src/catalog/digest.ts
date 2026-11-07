@@ -10,8 +10,8 @@ import { autoDecideRecordOf, heldForPerson } from "./auto-decide";
 import { CHANNEL_ORDER, CHANNELS } from "./channels";
 import { batchCostFigure, type BatchCostFigure } from "./cost-report";
 import type { BatchDigest, DigestCost, DigestReason } from "./digest-types";
-import { LEFT_OUT_WORDS, type SharedPhotos } from "./ingest/group";
-import type { LeftOutProduct } from "./ingest/types";
+import { LEFT_OUT_WORDS, sameShotMessage, type SharedPhotos } from "./ingest/group";
+import type { LeftOutProduct, SameShot } from "./ingest/types";
 import { normalizeKey } from "./naming";
 import { STYLI_SKIP_NOTE } from "./evals/completeness";
 import { IMPROVE_MAX_TRIES } from "./improve";
@@ -112,6 +112,8 @@ export interface DigestInput {
   leftOutProducts?: readonly LeftOutProduct[];
   /** Files that were copies of a photo the product already has (buildReport's sameFiles, as a count). */
   sameFilesMerged?: number;
+  /** M1 D45: different photos that claimed one shot number. All were kept, each as its own shot; said here so it is never silent. */
+  sameShots?: readonly SameShot[];
   /** The same bytes under several product names (photosUnderSeveralProducts): each is delivered, and said here. */
   sharedPhotos?: readonly SharedPhotos[];
   cost: DigestCost;
@@ -231,6 +233,9 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     const names = s.products > 3 ? `${s.identifiers.slice(0, 3).join(", ")} and ${(s.products - 3).toLocaleString("en-US")} more` : `${s.identifiers.slice(0, -1).join(", ")} and ${s.identifiers.at(-1)}`;
     exceptions.push({ identifier: s.identifiers[0]!, channel: null, image: null, reason: `${s.photos.toLocaleString("en-US")} ${s.photos === 1 ? "photo is" : "photos are"} the same in ${names}. Each product kept its links; nothing was merged.`, fix: "Check these are different products. If they are one product, send it under one name in a new batch.", group: "Check: the same photo under more than one product" });
   }
+  for (const s of input.sameShots ?? []) {
+    exceptions.push({ identifier: s.identifier, channel: null, image: null, reason: sameShotMessage(s.shot, s.identifier, s.files), fix: "Check the photos are of this product. If one is wrong, send this product again without it.", group: "Check: different photos had the same shot number, each kept as its own shot" });
+  }
   for (const l of leftOutProducts) {
     const { text, fix } = LEFT_OUT_WORDS[l.why];
     exceptions.push({ identifier: l.identifier, channel: null, image: null, reason: l.reason, fix, group: `Product left out: ${text}` });
@@ -268,6 +273,7 @@ export function digestFrom(input: DigestInput & { pairs: readonly DigestPair[]; 
     filesLeftOut: input.batch.counts?.filesLeftOut ?? 0,
     uploadsNotRead: input.batch.counts?.uploadsNotRead ?? 0,
     sameFilesMerged: input.sameFilesMerged ?? 0,
+    sameShotsKept: new Set((input.sameShots ?? []).map(s => normalizeKey(s.identifier))).size,
     photosUnderSeveralProducts: (input.sharedPhotos ?? []).reduce((sum, s) => sum + s.photos, 0),
     completeEveryChannel,
     linksPerChannel,

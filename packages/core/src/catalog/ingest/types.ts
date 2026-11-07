@@ -111,6 +111,7 @@ export interface GroupingResult {
   warnings: string[];                                // batch-level sentences for the step 4 warning list
   roots?: InputRoot[];                               // per-root grouping (M1-F1-R2): each input root and its mode
   sameFiles?: SameFile[];                            // files that were copies of a photo the product already has
+  sameShots?: SameShot[];                            // different photos that claimed one shot number; each kept as its own shot (M1 D45)
 }
 
 /**
@@ -121,6 +122,8 @@ export interface UploadReject { name: string; reason: string; identifier?: strin
 
 /** A shot that came as two or more files with the same bytes (X_1.jpg and X_1.jpeg): one is used, the rest are named here. */
 export interface SameFile { identifier: string; n: number | null; kept: string; dropped: string[] }
+/** M1 D45: different photos that claimed one shot number of a product. All of them were kept, each as its own shot. */
+export interface SameShot { identifier: string; shot: number; files: string[] }
 
 /** Why grouping left a whole product out. */
 export type LeftOutWhy = "same_shot" | "no_shot_numbers" | "same_product" | "refused" | "links" | "unreadable";
