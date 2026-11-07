@@ -610,3 +610,11 @@ describe("M7-F2 dead primary, caller stops and model-gone routes (review finding
   expect(fetcher).toHaveBeenCalledTimes(2);
  });
 });
+
+describe("M1 D45: a straight cut in the source", () => {
+  it("excuses only an edge flat against the image: a straight edge floating on the canvas is not excused", () => {
+    expect(CATALOG_QA_TEMPLATE).toContain("flat against the edge of the image.");
+    expect(CATALOG_QA_TEMPLATE).not.toContain("plain background beyond it");
+    expect(CATALOG_QA_TEMPLATE).toContain("it is a real loss");
+  });
+});
