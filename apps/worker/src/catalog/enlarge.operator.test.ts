@@ -12,7 +12,7 @@ import { ENLARGE_TASK_MAX_ATTEMPTS, ENLARGING_TASK } from "@catalog/core/catalog
 import { shotGeometry } from "@catalog/core/catalog/render";
 import { EnlargementNotReadyError } from "@catalog/core/catalog/upscale";
 import { DIMENSION_FLAGS } from "@catalog/core/catalog/qa/judge";
-import { autoActionsOf, ENLARGEMENT_WAIT_DETAIL } from "@catalog/core/catalog/auto-resolve";
+import { autoActionsOf, ENLARGEMENT_WAIT_DETAIL, MAX_ENLARGEMENT_WAITS } from "@catalog/core/catalog/auto-resolve";
 import { runInvariants } from "@catalog/core/catalog/invariants/run";
 import type { ChannelId } from "@catalog/core/catalog/types";
 import { chunkRow } from "../../test/catalog-fakes";
@@ -381,6 +381,30 @@ describe("judges honour readiness (3.3)", () => {
     expect(photo!.matteUri).not.toMatch(/\.matte(2|-whole)\.png$/);
     expect((await batchOf(db, s.batch.id)).status).not.toBe("processing");
   }, 180_000);
+
+  it("T50 (bound M3d): an enlargement that keeps going away: the repair waits at most MAX_ENLARGEMENT_WAITS times, then stops on its own, and the chunk finishes", async () => {
+    const e = enlargeWorld(db, { imageScale: 1.25 });
+    secondCutOut(e, (p) => boxAlpha(p, Math.floor(Math.min(p.width, p.height) * 0.3)));
+    judgeFlagsOnce(e, ["product_removed"]);
+    const s = await seedEnlargeBatch(db, e.w, "t50-loop", [[1]], { route: { model: "swinir-x2", x4Model: "swinir-x4", minScale: 1 } });
+    const render = e.w.deps.renderAllChannels;
+    e.w.deps.renderAllChannels = vi.fn(async (p, matte, channels, ctx) => { if (matte.model === "second") throw new EnlargementNotReadyError("not ready", false); return render(p, matte, channels, ctx); }) as typeof render;
+    await startChunks(db, e.w, s.chunks.map((c) => c.id));
+    // Every time the wanted image settles it is gone again, so each return finds something new to queue: only the bound can end this.
+    let removed = 0;
+    await drain(e.w, { ...only(s), max: 120, onDelivery: async () => {
+      const gone = await db.delete(catalogEnlargements).where(and(eq(catalogEnlargements.batchId, s.batch.id), eq(catalogEnlargements.upscaler, "swinir-x4"), eq(catalogEnlargements.status, "done"))).returning();
+      removed += gone.length;
+    } });
+    const [out] = await outputsOf(db, s.batch.id);
+    expect(removed).toBe(MAX_ENLARGEMENT_WAITS);
+    expect(autoActionsOf(out!.compliance).map((a) => [a.step, a.result, a.detail])).toEqual([
+      ...Array.from({ length: MAX_ENLARGEMENT_WAITS }, () => ["second_matte", "skipped", ENLARGEMENT_WAIT_DETAIL]),
+      ["second_matte", "skipped", "enlargement not ready"],
+    ]);
+    expect(out!.status).toBe("needs_attention");
+    expect((await batchOf(db, s.batch.id)).status).not.toBe("processing");
+  }, 240_000);
 
   it("T10, T51 (F10): the judge sees a source cut; the flush cut is upscaled from the stored image, and while the image is not ready it is skipped and the QA delivery completes", async () => {
     // A product touching the bottom edge (a dark product on white, so the bottom line is the photo's edge), narrowing
